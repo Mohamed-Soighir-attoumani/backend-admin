@@ -1,19 +1,19 @@
 const express = require("express");
 const bcrypt = require("bcryptjs");
-const User = require("../models/User"); // adapte ce chemin si besoin
+const Admin = require("../models/Admin"); // <-- ici on importe le bon modèle
 
 const router = express.Router();
 
 router.post("/setup-admin", async (req, res) => {
   try {
-    const existing = await User.findOne({ email: "admin@email.com" });
+    const existing = await Admin.findOne({ email: "admin@email.com" });
     if (existing) {
       return res.status(400).json({ message: "Admin already exists" });
     }
 
     const hashedPassword = await bcrypt.hash("admin123", 10);
 
-    const admin = new User({
+    const admin = new Admin({
       name: "Super Admin",
       email: "admin@email.com",
       password: hashedPassword,
