@@ -1,19 +1,20 @@
-// ✅ === routes/setup.js ===
+// routes/setup-admin.js
 const express = require("express");
 const bcrypt = require("bcryptjs");
 const Admin = require("../models/Admin");
 
 const router = express.Router();
 
-// 🔁 Crée ou remplace l’admin
+// Crée ou met à jour un admin
 router.post("/setup-admin", async (req, res) => {
   try {
-    const existingAdmin = await Admin.findOne({ email: "admin@email.com" });
+    const email = "admin@email.com";
+    const plainPassword = "admin123";
+    const hashedPassword = await bcrypt.hash(plainPassword, 10);
 
-    const hashedPassword = await bcrypt.hash("admin1234", 10);
+    const existingAdmin = await Admin.findOne({ email });
 
     if (existingAdmin) {
-      // 🔁 On met à jour le mot de passe
       existingAdmin.password = hashedPassword;
       await existingAdmin.save();
       return res.json({ message: "✅ Admin mis à jour avec succès" });
@@ -21,7 +22,7 @@ router.post("/setup-admin", async (req, res) => {
 
     const admin = new Admin({
       name: "Super Admin",
-      email: "admin@email.com",
+      email,
       password: hashedPassword,
       role: "admin",
     });
