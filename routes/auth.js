@@ -1,14 +1,14 @@
+// ✅ === backend/routes/auth.js ===
 const express = require('express');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
-const router = express.Router();
-const Admin = require('../models/Admin'); // le modèle Mongoose
+const Admin = require('../models/Admin');
 
+const router = express.Router();
 const JWT_SECRET = process.env.JWT_SECRET || 'defaultsecret';
 
 router.post('/login', async (req, res) => {
   const { email, password } = req.body;
-
   console.log("🧪 Tentative de connexion :", { email });
 
   try {
