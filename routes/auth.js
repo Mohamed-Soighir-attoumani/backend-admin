@@ -1,38 +1,42 @@
 const express = require('express');
 const jwt = require('jsonwebtoken');
+const bcrypt = require('bcryptjs');
 const router = express.Router();
-const Admin = require('../models/Admin');
+const Admin = require('../models/Admin'); // le modèle Mongoose
 
 const JWT_SECRET = process.env.JWT_SECRET || 'defaultsecret';
 
 router.post('/login', async (req, res) => {
-  let { username, password } = req.body;
+  const { email, password } = req.body;
 
-  console.log("🧪 Tentative de connexion reçue :", { username, password });
+  console.log("🧪 Tentative de connexion :", { email });
 
   try {
-    // Convertir le username en minuscule
-    username = username.trim().toLowerCase();
-
-    const admin = await Admin.findOne({ username });
+    const admin = await Admin.findOne({ email });
 
     if (!admin) {
-      console.log("❌ Aucun admin trouvé pour :", username);
+      console.log("❌ Aucun admin trouvé pour :", email);
       return res.status(401).json({ message: 'Identifiants invalides (admin)' });
     }
 
-    if (admin.password !== password) {
-      console.log("❌ Mot de passe incorrect :", password, "!=", admin.password);
+    const isMatch = await bcrypt.compare(password, admin.password);
+    if (!isMatch) {
+      console.log("❌ Mot de passe incorrect pour :", email);
       return res.status(401).json({ message: 'Identifiants invalides (mot de passe)' });
     }
 
-    console.log("✅ Connexion réussie pour :", admin.username);
+    console.log("✅ Connexion réussie :", email);
 
-    const token = jwt.sign({ username: admin.username }, JWT_SECRET, { expiresIn: '1h' });
+    const token = jwt.sign(
+      { id: admin._id, email: admin.email, role: admin.role },
+      JWT_SECRET,
+      { expiresIn: '1h' }
+    );
+
     res.json({ token });
 
   } catch (error) {
-    console.error('❌ Erreur serveur lors de la connexion :', error);
+    console.error("❌ Erreur serveur :", error.message);
     res.status(500).json({ message: 'Erreur serveur' });
   }
 });
