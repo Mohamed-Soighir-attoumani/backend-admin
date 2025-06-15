@@ -7,14 +7,12 @@ const Admin = require('../models/Admin'); // le modèle Mongoose
 const JWT_SECRET = process.env.JWT_SECRET || 'defaultsecret';
 
 router.post('/login', async (req, res) => {
-  const { username, password } = req.body;
-
-
+  const { email, password } = req.body;
 
   console.log("🧪 Tentative de connexion :", { email });
 
   try {
-    const admin = await Admin.findOne({ username });
+    const admin = await Admin.findOne({ email });
 
     if (!admin) {
       console.log("❌ Aucun admin trouvé pour :", email);
@@ -30,8 +28,7 @@ router.post('/login', async (req, res) => {
     console.log("✅ Connexion réussie :", email);
 
     const token = jwt.sign(
-      { id: admin._id, username: admin.username, role: admin.role },
-
+      { id: admin._id, email: admin.email, role: admin.role },
       JWT_SECRET,
       { expiresIn: '1h' }
     );
