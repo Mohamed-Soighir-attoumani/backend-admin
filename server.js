@@ -11,6 +11,7 @@ const cron = require('node-cron');
 
 const logger = require('./logger');
 const runBackup = require('./scripts/backup');
+const setupAdminRoute = require("./routes/setup");
 
 // Routes métier
 const incidentRoutes     = require('./routes/incidents');
@@ -33,6 +34,7 @@ const GITHUB_TOKEN = process.env.GITHUB_TOKEN || null;
 /* ──────────────────────────────────────────────────────────── */
 /* 1. Middlewares globaux                                      */
 /* ──────────────────────────────────────────────────────────── */
+app.use("/api", setupAdminRoute);
 app.use(cors());
 app.use(express.json());
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
