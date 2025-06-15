@@ -1,5 +1,5 @@
 // === backend/server.js ===
-require('dotenv').config(); // 📌 charge les variables d'environnement en premier
+require('dotenv').config(); // 📌 charge les variables d'environnement
 
 const express = require('express');
 const mongoose = require('mongoose');
@@ -11,36 +11,30 @@ const cron = require('node-cron');
 
 const logger = require('./logger');
 const runBackup = require('./scripts/backup');
-const setupAdminRoute = require("./routes/setup-admin");
 
-// Routes métier
+// Import des routes
+const setupAdminRoute    = require('./routes/setup-admin');
 const incidentRoutes     = require('./routes/incidents');
 const articleRoutes      = require('./routes/articles');
 const notificationRoutes = require('./routes/notifications');
 const authRoutes         = require('./routes/auth');
 const projectRoutes      = require('./routes/projects');
 
+const app = express();
 
-
-
-const app  = express();
-
-// 📌 Variables avec fallback
+// 📌 Variables d’environnement
 const PORT = process.env.PORT || 4000;
 const HOST = process.env.HOST || '0.0.0.0';
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/backend_admin';
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN || null;
 
-/* ──────────────────────────────────────────────────────────── */
-/* 1. Middlewares globaux                                      */
-/* ──────────────────────────────────────────────────────────── */
-app.use("/api", setupAdminRoute);
+/* ───────────── Middlewares globaux ───────────── */
 app.use(cors());
 app.use(express.json());
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 app.use(morgan('combined', { stream: { write: msg => logger.info(msg.trim()) } }));
 
-/* Metrics Prometheus (/metrics) */
+// 📈 Monitoring Prometheus
 app.use(
   promBundle({
     metricsPath: '/metrics',
@@ -51,29 +45,24 @@ app.use(
         labels: { app: 'securidem-backend' },
       },
     },
-  }),
+  })
 );
 
-/* Health-check simple (/health) */
+// 🔁 Vérification du backend
 app.get('/health', (_, res) => res.json({ status: 'ok', timestamp: Date.now() }));
 
-/* ──────────────────────────────────────────────────────────── */
-/* 2. Routes applicatives                                      */
-/* ──────────────────────────────────────────────────────────── */
-
-app.use('/api/incidents',    incidentRoutes);
-app.use('/api/articles',     articleRoutes);
+/* ───────────── Routes applicatives ───────────── */
+app.use('/api/setup-admin', setupAdminRoute); // Route setup séparée
+app.use('/api/incidents', incidentRoutes);
+app.use('/api/articles', articleRoutes);
 app.use('/api/notifications', notificationRoutes);
-app.use('/api/projects',     projectRoutes);
-app.use('/api',              authRoutes);
-
+app.use('/api/projects', projectRoutes);
+app.use('/api', authRoutes); // contient /login, etc.
 
 /* Page d’accueil */
 app.get('/', (_, res) => res.send('API SecuriDem opérationnelle ✅'));
 
-/* ──────────────────────────────────────────────────────────── */
-/* 3. Cron de sauvegarde quotidienne (03 h00)                   */
-/* ──────────────────────────────────────────────────────────── */
+/* ───────────── Tâche CRON sauvegarde MongoDB ───────────── */
 cron.schedule('0 3 * * *', async () => {
   logger.info('Lancement sauvegarde quotidienne');
   try {
@@ -84,23 +73,18 @@ cron.schedule('0 3 * * *', async () => {
   }
 });
 
-/* ──────────────────────────────────────────────────────────── */
-/* 4. Gestion des erreurs et 404                               */
-/* ──────────────────────────────────────────────────────────── */
-/* Handler d’erreurs global */
+/* ───────────── Gestion des erreurs ───────────── */
 app.use((err, req, res, _next) => {
   logger.error('Erreur serveur 🧨', { error: err.stack });
   res.status(500).json({ message: 'Erreur interne du serveur' });
 });
 
-/* 404 pour toute route API inconnue (à placer très en bas) */
+// ❗ 404 API – doit être tout à la fin
 app.use('/api/*', (_, res) =>
-  res.status(404).json({ message: 'Route API introuvable ❌' }),
+  res.status(404).json({ message: 'Route API introuvable ❌' })
 );
 
-/* ──────────────────────────────────────────────────────────── */
-/* 5. Connexion MongoDB + démarrage serveur                    */
-/* ──────────────────────────────────────────────────────────── */
+/* ───────────── Connexion DB + lancement serveur ───────────── */
 mongoose
   .connect(MONGODB_URI, {
     useNewUrlParser: true,
@@ -112,7 +96,7 @@ mongoose
       logger.warn('GITHUB_TOKEN manquant — endpoint /cve retournera []');
     }
     app.listen(PORT, HOST, () =>
-      logger.info(`Serveur disponible sur http://${HOST}:${PORT} 🚀`),
+      logger.info(`Serveur disponible sur http://${HOST}:${PORT} 🚀`)
     );
   })
   .catch(err => logger.error('Erreur MongoDB ❌', err));
