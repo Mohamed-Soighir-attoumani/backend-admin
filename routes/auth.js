@@ -1,4 +1,4 @@
-// ✅ === backend/routes/auth.js ===
+// ✅ backend/routes/auth.js
 const express = require('express');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
@@ -7,6 +7,7 @@ const Admin = require('../models/Admin');
 const router = express.Router();
 const JWT_SECRET = process.env.JWT_SECRET || 'defaultsecret';
 
+// Route POST /api/login
 router.post('/login', async (req, res) => {
   const { email, password } = req.body;
   console.log("🧪 Tentative de connexion :", { email });

@@ -52,7 +52,7 @@ app.use(
 app.get('/health', (_, res) => res.json({ status: 'ok', timestamp: Date.now() }));
 
 /* ───────────── Routes applicatives ───────────── */
-app.use('/api/setup-admin', setupAdminRoute); // Route setup séparée
+app.use('/api', setupAdminRoute); // ✅ corriger ici
 app.use('/api/incidents', incidentRoutes);
 app.use('/api/articles', articleRoutes);
 app.use('/api/notifications', notificationRoutes);
