@@ -11,7 +11,7 @@ const cron = require('node-cron');
 
 const logger = require('./logger');
 const runBackup = require('./scripts/backup');
-const setupAdminRoute = require("./routes/setup");
+const setupAdminRoute = require("./routes/setup-admin");
 
 // Routes métier
 const incidentRoutes     = require('./routes/incidents');
