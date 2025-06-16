@@ -185,3 +185,25 @@
 {"level":"info","message":"127.0.0.1 - - [15/Jun/2025:01:08:41 +0000] \"GET /api/notifications?period=7 HTTP/1.1\" 304 - \"-\" \"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36 Edg/137.0.0.0\"","timestamp":"2025-06-15T01:08:41.477Z"}
 {"level":"info","message":"127.0.0.1 - - [15/Jun/2025:01:08:41 +0000] \"GET /api/incidents/count?period=7 HTTP/1.1\" 304 - \"-\" \"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36 Edg/137.0.0.0\"","timestamp":"2025-06-15T01:08:41.899Z"}
 {"level":"info","message":"127.0.0.1 - - [15/Jun/2025:01:09:40 +0000] \"GET /api/devices/count HTTP/1.1\" 404 39 \"-\" \"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36 Edg/137.0.0.0\"","timestamp":"2025-06-15T01:09:40.536Z"}
+{"level":"info","message":"MongoDB connecté ✅","timestamp":"2025-06-16T00:24:10.235Z"}
+{"level":"info","message":"Serveur disponible sur http://0.0.0.0:4000 🚀","timestamp":"2025-06-16T00:24:10.262Z"}
+{"level":"info","message":"192.168.1.22 - - [16/Jun/2025:00:32:24 +0000] \"GET /api/notifications?_=1750033861384 HTTP/1.1\" 200 2 \"-\" \"okhttp/4.9.2\"","timestamp":"2025-06-16T00:32:24.856Z"}
+{"level":"info","message":"192.168.1.22 - - [16/Jun/2025:00:32:30 +0000] \"GET /api/projects HTTP/1.1\" 200 2 \"-\" \"okhttp/4.9.2\"","timestamp":"2025-06-16T00:32:30.131Z"}
+{"level":"info","message":"192.168.1.22 - - [16/Jun/2025:00:32:30 +0000] \"GET /api/notifications HTTP/1.1\" 200 2 \"-\" \"okhttp/4.9.2\"","timestamp":"2025-06-16T00:32:30.137Z"}
+{"level":"info","message":"192.168.1.22 - - [16/Jun/2025:00:32:30 +0000] \"GET /api/notifications HTTP/1.1\" 200 2 \"-\" \"okhttp/4.9.2\"","timestamp":"2025-06-16T00:32:30.148Z"}
+{"level":"info","message":"192.168.1.22 - - [16/Jun/2025:00:32:30 +0000] \"GET /api/articles HTTP/1.1\" 200 2 \"-\" \"okhttp/4.9.2\"","timestamp":"2025-06-16T00:32:30.978Z"}
+{"level":"info","message":"192.168.1.22 - - [16/Jun/2025:00:32:34 +0000] \"GET /api/notifications?_=1750033871436 HTTP/1.1\" 200 2 \"-\" \"okhttp/4.9.2\"","timestamp":"2025-06-16T00:32:34.588Z"}
+{"level":"info","message":"192.168.1.22 - - [16/Jun/2025:00:32:44 +0000] \"GET /api/notifications?_=1750033881447 HTTP/1.1\" 200 2 \"-\" \"okhttp/4.9.2\"","timestamp":"2025-06-16T00:32:44.651Z"}
+{"level":"info","message":"192.168.1.22 - - [16/Jun/2025:00:32:47 +0000] \"PATCH /api/notifications/mark-all-read HTTP/1.1\" 200 70 \"-\" \"okhttp/4.9.2\"","timestamp":"2025-06-16T00:32:47.115Z"}
+{"level":"info","message":"192.168.1.22 - - [16/Jun/2025:00:32:47 +0000] \"GET /api/notifications?_=1750033884427 HTTP/1.1\" 200 2 \"-\" \"okhttp/4.9.2\"","timestamp":"2025-06-16T00:32:47.586Z"}
+{"level":"info","message":"192.168.1.22 - - [16/Jun/2025:00:32:47 +0000] \"PATCH /api/notifications/mark-all-read HTTP/1.1\" 200 70 \"-\" \"okhttp/4.9.2\"","timestamp":"2025-06-16T00:32:47.593Z"}
+{"level":"info","message":"192.168.1.22 - - [16/Jun/2025:00:32:47 +0000] \"GET /api/notifications HTTP/1.1\" 304 - \"-\" \"okhttp/4.9.2\"","timestamp":"2025-06-16T00:32:47.596Z"}
+{"level":"info","message":"192.168.1.22 - - [16/Jun/2025:00:32:48 +0000] \"GET /api/notifications?_=1750033884858 HTTP/1.1\" 200 2 \"-\" \"okhttp/4.9.2\"","timestamp":"2025-06-16T00:32:48.004Z"}
+{"level":"info","message":"192.168.1.22 - - [16/Jun/2025:00:32:52 +0000] \"GET /api/notifications?_=1750033889442 HTTP/1.1\" 200 2 \"-\" \"okhttp/4.9.2\"","timestamp":"2025-06-16T00:32:52.600Z"}
+{"level":"info","message":"192.168.1.22 - - [16/Jun/2025:00:32:53 +0000] \"GET /api/notifications HTTP/1.1\" 200 2 \"-\" \"okhttp/4.9.2\"","timestamp":"2025-06-16T00:32:53.083Z"}
+{"level":"info","message":"192.168.1.22 - - [16/Jun/2025:00:32:53 +0000] \"GET /api/notifications HTTP/1.1\" 304 - \"-\" \"okhttp/4.9.2\"","timestamp":"2025-06-16T00:32:53.085Z"}
+{"level":"info","message":"192.168.1.22 - - [16/Jun/2025:00:32:53 +0000] \"GET /api/articles HTTP/1.1\" 304 - \"-\" \"okhttp/4.9.2\"","timestamp":"2025-06-16T00:32:53.089Z"}
+{"level":"info","message":"192.168.1.22 - - [16/Jun/2025:00:32:53 +0000] \"GET /api/projects HTTP/1.1\" 304 - \"-\" \"okhttp/4.9.2\"","timestamp":"2025-06-16T00:32:53.091Z"}
+{"level":"info","message":"192.168.1.22 - - [16/Jun/2025:00:32:54 +0000] \"GET /api/notifications?_=1750033891463 HTTP/1.1\" 200 2 \"-\" \"okhttp/4.9.2\"","timestamp":"2025-06-16T00:32:54.617Z"}
+{"level":"info","message":"192.168.1.22 - - [16/Jun/2025:00:32:57 +0000] \"GET /api/notifications?_=1750033894454 HTTP/1.1\" 200 2 \"-\" \"okhttp/4.9.2\"","timestamp":"2025-06-16T00:32:57.607Z"}
+{"level":"info","message":"192.168.1.22 - - [16/Jun/2025:00:33:02 +0000] \"GET /api/notifications?_=1750033899456 HTTP/1.1\" 200 2 \"-\" \"okhttp/4.9.2\"","timestamp":"2025-06-16T00:33:02.600Z"}

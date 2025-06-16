@@ -1,10 +1,10 @@
-// routes/notifications.js
+// ✅ routes/notifications.js
 const express = require('express');
 const router = express.Router();
 const Notification = require('../models/Notification');
 const mongoose = require('mongoose');
 
-// Créer une notification
+// ✅ Créer une notification
 router.post('/', async (req, res) => {
   const { title, message } = req.body;
   if (!title || !message) {
@@ -20,12 +20,10 @@ router.post('/', async (req, res) => {
   }
 });
 
-// Marquer toutes les notifications comme lues
+// ✅ Marquer toutes les notifications comme lues
 router.patch('/mark-all-read', async (req, res) => {
-  console.log("👉 Reçu un PATCH sur /mark-all-read"); // 👈 AJOUTE ICI
   try {
     const result = await Notification.updateMany({}, { isRead: true });
-    console.log("Mise à jour effectuée :", result);
     res.status(200).json({ message: "Toutes les notifications ont été marquées comme lues." });
   } catch (err) {
     console.error("❌ Erreur dans mark-all-read :", err);
@@ -33,8 +31,7 @@ router.patch('/mark-all-read', async (req, res) => {
   }
 });
 
-
-// Modifier une notification  ← ici on enlève l’anti-slash devant :
+// ✅ Modifier une notification
 router.patch('/:id', async (req, res) => {
   const { id } = req.params;
   const { title, message, isRead } = req.body;
@@ -57,7 +54,7 @@ router.patch('/:id', async (req, res) => {
   }
 });
 
-// Supprimer une notification ← idem, pas d’anti-slash
+// ✅ Supprimer une notification
 router.delete('/:id', async (req, res) => {
   const { id } = req.params;
   if (!mongoose.Types.ObjectId.isValid(id)) {
@@ -75,9 +72,8 @@ router.delete('/:id', async (req, res) => {
   }
 });
 
-
-// 👉 GET /api/notifications (supporte ?period=7 ou 30 ou vide)
-router.get("/", async (req, res) => {
+// ✅ GET /api/notifications (avec ?period=7 ou 30 optionnel)
+router.get('/', async (req, res) => {
   const { period } = req.query;
   const filter = {};
 
@@ -97,9 +93,7 @@ router.get("/", async (req, res) => {
   }
 });
 
-
-
-// Seed (test)
+// ✅ Seed de test
 router.post('/seed', async (req, res) => {
   try {
     const newNotif = new Notification({

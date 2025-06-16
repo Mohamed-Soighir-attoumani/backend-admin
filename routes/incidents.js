@@ -16,9 +16,9 @@ const storage = multer.diskStorage({
 });
 const upload = multer({ storage });
 
-/* ──────────────── GET /api/incidents (supporte ?period=7 ou 30 ou vide) ──────────────── */
+/* ──────────────── GET /api/incidents (supporte ?period=7 ou 30 ou deviceId=...) ──────────────── */
 router.get("/", async (req, res) => {
-  const { period } = req.query;
+  const { period, deviceId } = req.query;
   const filter = {};
 
   if (period === "7" || period === "30") {
@@ -26,6 +26,10 @@ router.get("/", async (req, res) => {
     const fromDate = new Date();
     fromDate.setDate(fromDate.getDate() - days);
     filter.createdAt = { $gte: fromDate };
+  }
+
+  if (deviceId) {
+    filter.deviceId = deviceId;
   }
 
   try {
@@ -68,14 +72,15 @@ router.post('/', upload.single('image'), async (req, res) => {
     latitude,
     longitude,
     adresse,
-    adminComment // ✅ ajout ici
+    adminComment,
+    deviceId
   } = req.body;
 
-  if (!title || !description || !lieu || !status || !latitude || !longitude) {
+  if (!title || !description || !lieu || !status || !latitude || !longitude || !deviceId) {
     return res.status(400).json({ message: "❌ Champs requis manquants." });
   }
 
-  const imageUrl = req.file ? `http://192.168.1.76:4000/uploads/${req.file.filename}` : null;
+  const imageUrl = req.file ? `https://backend-admin-tygd.onrender.com/uploads/${req.file.filename}` : null;
 
   try {
     const newIncident = new Incident({
@@ -87,7 +92,8 @@ router.post('/', upload.single('image'), async (req, res) => {
       latitude,
       longitude,
       adresse,
-      adminComment, // ✅ ajout ici aussi
+      adminComment,
+      deviceId,
       createdAt: new Date()
     });
 
@@ -99,7 +105,6 @@ router.post('/', upload.single('image'), async (req, res) => {
   }
 });
 
-
 /* ──────────────── PUT /api/incidents/:id ──────────────── */
 router.put('/:id', async (req, res) => {
   const { id } = req.params;
@@ -109,6 +114,7 @@ router.put('/:id', async (req, res) => {
   }
 
   try {
+    req.body.updated = true; // ✅ Ajout automatique du champ updated
     const updatedIncident = await Incident.findByIdAndUpdate(id, req.body, {
       new: true,
       runValidators: true,
@@ -148,7 +154,6 @@ router.delete('/:id', async (req, res) => {
 });
 
 /* ──────────────── GET /api/incidents/:id ──────────────── */
-
 router.get('/:id', async (req, res) => {
   const { id } = req.params;
 
@@ -167,7 +172,5 @@ router.get('/:id', async (req, res) => {
     res.status(500).json({ message: 'Erreur serveur' });
   }
 });
-
-
 
 module.exports = router;
