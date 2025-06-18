@@ -19,6 +19,7 @@ const articleRoutes      = require('./routes/articles');
 const notificationRoutes = require('./routes/notifications');
 const authRoutes         = require('./routes/auth');
 const projectRoutes      = require('./routes/projects');
+const deviceRoutes = require('./routes/devices');
 
 const app = express();
 
@@ -57,6 +58,7 @@ app.use('/api/incidents', incidentRoutes);
 app.use('/api/articles', articleRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/api/projects', projectRoutes);
+app.use('/api/devices', deviceRoutes);
 app.use('/api', authRoutes); // contient /login, etc.
 
 /* Page d’accueil */
