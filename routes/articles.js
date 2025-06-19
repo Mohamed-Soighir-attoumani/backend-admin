@@ -2,27 +2,17 @@ const express = require('express');
 const router = express.Router();
 const multer = require('multer');
 const mongoose = require('mongoose');
-const path = require('path');
 const Article = require('../models/Article');
 
-// 📁 Configuration du stockage
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    cb(null, 'uploads/'); // dossier local
-  },
-  filename: (req, file, cb) => {
-    const uniqueName = Date.now() + '-' + file.originalname;
-    cb(null, uniqueName);
-  },
-});
-
-const upload = multer({ storage });
+// ✅ Import du storage Cloudinary configuré
+const { storage } = require('../utils/cloudinary');
+const upload = multer({ storage }); // utilise multer-storage-cloudinary
 
 // ✅ Route POST pour créer un article avec image
 router.post('/', upload.single('image'), async (req, res) => {
   try {
     const { title, content } = req.body;
-    const imageUrl = req.file ? `/uploads/${req.file.filename}` : '';
+    const imageUrl = req.file ? req.file.path : null; // URL Cloudinary
 
     const article = new Article({ title, content, imageUrl });
     await article.save();
@@ -34,11 +24,10 @@ router.post('/', upload.single('image'), async (req, res) => {
   }
 });
 
-// 🔍 Récupérer un seul article par ID
+// 🔍 GET un article par ID
 router.get('/:id', async (req, res) => {
   const { id } = req.params;
 
-  // ⚠️ Vérification que l’ID est valide
   if (!mongoose.Types.ObjectId.isValid(id)) {
     return res.status(400).json({ message: 'ID invalide' });
   }
@@ -56,10 +45,9 @@ router.get('/:id', async (req, res) => {
   }
 });
 
-// 🔁 Récupérer tous les articles
+// 🔁 GET tous les articles
 router.get('/', async (req, res) => {
   try {
-    // Récupérer depuis MongoDB, trié par date de création
     const articles = await Article.find().sort({ createdAt: -1 });
     res.json(articles);
   } catch (err) {
@@ -68,9 +56,7 @@ router.get('/', async (req, res) => {
   }
 });
 
-
-// 🔁 Modifier un article
-// PUT : modifier un article
+// ✏️ PUT : modifier un article
 router.put('/:id', upload.single('image'), async (req, res) => {
   try {
     const article = await Article.findById(req.params.id);
@@ -80,25 +66,24 @@ router.put('/:id', upload.single('image'), async (req, res) => {
     article.content = req.body.content || article.content;
 
     if (req.file) {
-      article.imageUrl = `/uploads/${req.file.filename}`;
+      article.imageUrl = req.file.path; // URL Cloudinary
     }
 
     await article.save();
     res.json(article);
   } catch (err) {
-    console.error("Erreur PUT /api/articles/:id :", err);
+    console.error("❌ Erreur PUT /api/articles/:id :", err);
     res.status(500).json({ message: "Erreur modification article" });
   }
 });
 
-
-
-// 🗑️ Supprimer un article
+// 🗑️ DELETE : supprimer un article
 router.delete('/:id', async (req, res) => {
   try {
     await Article.findByIdAndDelete(req.params.id);
-    res.json({ message: 'Article supprimé' });
+    res.json({ message: '✅ Article supprimé' });
   } catch (error) {
+    console.error("❌ Erreur suppression :", error);
     res.status(500).json({ message: 'Erreur suppression article' });
   }
 });
