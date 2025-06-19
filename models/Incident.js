@@ -24,9 +24,9 @@ const incidentSchema = new mongoose.Schema({
     default: 'En attente'
   },
   adminComment: {
-  type: String,
-  default: ''
-},
+    type: String,
+    default: ''
+  },
   latitude: { 
     type: Number, 
     required: true 
@@ -36,9 +36,14 @@ const incidentSchema = new mongoose.Schema({
     required: true 
   },
   adresse: {
-  type: String,
-  default: ''
-},
+    type: String,
+    default: ''
+  },
+
+  deviceId: {                     // ✅ CHAMP AJOUTÉ
+    type: String,
+    required: true
+  },
 
   userId: {
     type: String,
