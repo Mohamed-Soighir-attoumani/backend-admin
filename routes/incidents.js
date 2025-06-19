@@ -1,19 +1,11 @@
 const express = require('express');
 const router = express.Router();
-const multer = require('multer');
-const path = require('path');
 const mongoose = require('mongoose');
 const Incident = require('../models/Incident');
 
-// 📸 Configuration multer
-const storage = multer.diskStorage({
-  destination: function (req, file, cb) {
-    cb(null, 'uploads/');
-  },
-  filename: function (req, file, cb) {
-    cb(null, Date.now() + path.extname(file.originalname));
-  }
-});
+// 📦 Cloudinary
+const multer = require('multer');
+const { storage } = require('../utils/cloudinary'); // 🔗 depuis utils/cloudinary.js
 const upload = multer({ storage });
 
 /* ──────────────── GET /api/incidents (supporte ?period=7 ou 30 ou deviceId=...) ──────────────── */
@@ -80,7 +72,7 @@ router.post('/', upload.single('image'), async (req, res) => {
     return res.status(400).json({ message: "❌ Champs requis manquants." });
   }
 
-  const imageUrl = req.file ? `https://backend-admin-tygd.onrender.com/uploads/${req.file.filename}` : null;
+  const imageUrl = req.file ? req.file.path : null; // ✅ URL Cloudinary automatique
 
   try {
     const newIncident = new Incident({
@@ -114,7 +106,7 @@ router.put('/:id', async (req, res) => {
   }
 
   try {
-    req.body.updated = true; // ✅ Ajout automatique du champ updated
+    req.body.updated = true; // ✅ Mise à jour détectée côté mobile
     const updatedIncident = await Incident.findByIdAndUpdate(id, req.body, {
       new: true,
       runValidators: true,
