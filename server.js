@@ -1,4 +1,3 @@
-// === backend/server.js ===
 require('dotenv').config(); // 📌 charge les variables d'environnement
 
 const express = require('express');
@@ -19,7 +18,8 @@ const articleRoutes      = require('./routes/articles');
 const notificationRoutes = require('./routes/notifications');
 const authRoutes         = require('./routes/auth');
 const projectRoutes      = require('./routes/projects');
-const deviceRoutes = require('./routes/devices');
+const deviceRoutes       = require('./routes/devices');
+const userRoutes         = require('./routes/userRoutes'); // ✅ ajout ici
 
 const app = express();
 
@@ -53,13 +53,14 @@ app.use(
 app.get('/health', (_, res) => res.json({ status: 'ok', timestamp: Date.now() }));
 
 /* ───────────── Routes applicatives ───────────── */
-app.use('/api', setupAdminRoute); // ✅ corriger ici
+app.use('/api', setupAdminRoute);
 app.use('/api/incidents', incidentRoutes);
 app.use('/api/articles', articleRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/api/projects', projectRoutes);
 app.use('/api/devices', deviceRoutes);
-app.use('/api', authRoutes); // contient /login, etc.
+app.use('/api', authRoutes);
+app.use('/api', userRoutes); // ✅ ajout route utilisateur (change-password)
 
 /* Page d’accueil */
 app.get('/', (_, res) => res.send('API SecuriDem opérationnelle ✅'));
