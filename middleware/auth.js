@@ -1,4 +1,4 @@
-// middlewares/auth.js
+// middleware/auth.js
 module.exports = {
   verifyToken: (req, res, next) => {
     // TODO: vérifier le JWT dans Authorization: Bearer <token>
