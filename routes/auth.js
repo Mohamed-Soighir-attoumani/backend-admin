@@ -28,10 +28,11 @@ router.post('/login', async (req, res) => {
 
     console.log("✅ Connexion réussie :", email);
 
+    // ✅ Le token contient le champ `id` pour fonctionner avec authMiddleware
     const token = jwt.sign(
       { id: admin._id, email: admin.email, role: admin.role },
       JWT_SECRET,
-      { expiresIn: '1h' }
+      { expiresIn: '7d' } // durée ajustée à 7 jours pour une session longue
     );
 
     res.json({ token });
