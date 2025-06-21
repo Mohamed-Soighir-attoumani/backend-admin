@@ -11,16 +11,6 @@ const cron = require('node-cron');
 const logger = require('./logger');
 const runBackup = require('./scripts/backup');
 
-// Import des routes
-const setupAdminRoute    = require('./routes/setup-admin');
-const incidentRoutes     = require('./routes/incidents');
-const articleRoutes      = require('./routes/articles');
-const notificationRoutes = require('./routes/notifications');
-const authRoutes         = require('./routes/auth');
-const projectRoutes      = require('./routes/projects');
-const deviceRoutes       = require('./routes/devices');
-const userRoutes         = require('./routes/userRoutes'); // ✅ ajout ici
-
 const app = express();
 
 // 📌 Variables d’environnement
@@ -52,6 +42,17 @@ app.use(
 // 🔁 Vérification du backend
 app.get('/health', (_, res) => res.json({ status: 'ok', timestamp: Date.now() }));
 
+/* ───────────── Import des routes ───────────── */
+const setupAdminRoute       = require('./routes/setup-admin');
+const incidentRoutes        = require('./routes/incidents');
+const articleRoutes         = require('./routes/articles');
+const notificationRoutes    = require('./routes/notifications');
+const authRoutes            = require('./routes/auth');
+const projectRoutes         = require('./routes/projects');
+const deviceRoutes          = require('./routes/devices');
+const userRoutes            = require('./routes/userRoutes');
+const changePasswordRoute   = require('./routes/changePassword'); // ✅ Route ajoutée ici
+
 /* ───────────── Routes applicatives ───────────── */
 app.use('/api', setupAdminRoute);
 app.use('/api/incidents', incidentRoutes);
@@ -60,7 +61,8 @@ app.use('/api/notifications', notificationRoutes);
 app.use('/api/projects', projectRoutes);
 app.use('/api/devices', deviceRoutes);
 app.use('/api', authRoutes);
-app.use('/api', userRoutes); // ✅ ajout route utilisateur (change-password)
+app.use('/api', userRoutes);
+app.use('/api', changePasswordRoute); // ✅ Route ajoutée ici
 
 /* Page d’accueil */
 app.get('/', (_, res) => res.send('API SecuriDem opérationnelle ✅'));
