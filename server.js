@@ -40,7 +40,7 @@ app.use(
 );
 
 // 🔁 Vérification du backend
-app.get('/health', (_, res) => res.json({ status: 'ok', timestamp: Date.now() }));
+app.get('/api/health', (_, res) => res.json({ status: 'ok', timestamp: Date.now() }));
 
 /* ───────────── Import des routes ───────────── */
 const setupAdminRoute       = require('./routes/setup-admin');
