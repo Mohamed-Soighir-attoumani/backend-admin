@@ -5,27 +5,19 @@ const Incident = require('../models/Incident');
 
 // 📦 Cloudinary
 const multer = require('multer');
-const { storage } = require('../utils/cloudinary'); // 🔗 depuis utils/cloudinary.js
+const { storage } = require('../utils/cloudinary');
 const upload = multer({ storage });
 
-/* ──────────────── GET /api/incidents (supporte ?period=7 ou 30 ou deviceId=...) ──────────────── */
+/* ──────────────── GET /api/incidents (filtre obligatoire par deviceId) ──────────────── */
 router.get("/", async (req, res) => {
-  const { period, deviceId } = req.query;
-  const filter = {};
+  const { deviceId } = req.query;
 
-  if (period === "7" || period === "30") {
-    const days = parseInt(period);
-    const fromDate = new Date();
-    fromDate.setDate(fromDate.getDate() - days);
-    filter.createdAt = { $gte: fromDate };
-  }
-
-  if (deviceId) {
-    filter.deviceId = deviceId;
+  if (!deviceId) {
+    return res.status(400).json({ message: "❌ deviceId est requis dans la requête" });
   }
 
   try {
-    const incidents = await Incident.find(filter).sort({ createdAt: -1 });
+    const incidents = await Incident.find({ deviceId }).sort({ createdAt: -1 });
     res.json(incidents);
   } catch (err) {
     console.error("Erreur récupération incidents:", err);
@@ -33,7 +25,7 @@ router.get("/", async (req, res) => {
   }
 });
 
-/* ──────────────── GET /api/incidents/count (supporte ?period=7 ou 30 ou vide) ──────────────── */
+/* ──────────────── GET /api/incidents/count (optionnel : ?period=7 ou 30) ──────────────── */
 router.get("/count", async (req, res) => {
   const { period } = req.query;
   const filter = {};
@@ -72,7 +64,7 @@ router.post('/', upload.single('image'), async (req, res) => {
     return res.status(400).json({ message: "❌ Champs requis manquants." });
   }
 
-  const imageUrl = req.file ? req.file.path : null; // ✅ URL Cloudinary automatique
+  const imageUrl = req.file ? req.file.path : null;
 
   try {
     const newIncident = new Incident({
@@ -106,7 +98,7 @@ router.put('/:id', async (req, res) => {
   }
 
   try {
-    req.body.updated = true; // ✅ Mise à jour détectée côté mobile
+    req.body.updated = true;
     const updatedIncident = await Incident.findByIdAndUpdate(id, req.body, {
       new: true,
       runValidators: true,
