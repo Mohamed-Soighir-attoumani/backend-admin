@@ -22,7 +22,7 @@ const GITHUB_TOKEN = process.env.GITHUB_TOKEN || null;
 /* ───────────── Middlewares globaux ───────────── */
 app.use(cors());
 app.use(express.json());
-app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+app.use('/uploads', express.static(path.join(__dirname, 'uploads'))); // ✅ permet d'accéder aux images/vidéos
 app.use(morgan('combined', { stream: { write: msg => logger.info(msg.trim()) } }));
 
 // 📈 Monitoring Prometheus
@@ -55,14 +55,14 @@ const changePasswordRoute   = require('./routes/changePassword'); // ✅ Route a
 
 /* ───────────── Routes applicatives ───────────── */
 app.use('/api', setupAdminRoute);
-app.use('/api/incidents', incidentRoutes);
+app.use('/api/incidents', incidentRoutes); // ✅ doit accepter les fichiers vidéo aussi
 app.use('/api/articles', articleRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/api/projects', projectRoutes);
 app.use('/api/devices', deviceRoutes);
 app.use('/api', authRoutes);
 app.use('/api', userRoutes);
-app.use('/api', changePasswordRoute); // ✅ Route ajoutée ici
+app.use('/api', changePasswordRoute);
 
 /* Page d’accueil */
 app.get('/', (_, res) => res.send('API SecuriDem opérationnelle ✅'));
