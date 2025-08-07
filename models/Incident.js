@@ -14,9 +14,14 @@ const incidentSchema = new mongoose.Schema({
     type: String,
     required: true
   },
-  photoUri: {
+  mediaUrl: {
     type: String,
     default: null
+  },
+  mediaType: {
+    type: String,
+    enum: ['image', 'video'],
+    default: 'image'
   },
   status: {
     type: String,
@@ -39,15 +44,13 @@ const incidentSchema = new mongoose.Schema({
     type: String,
     default: ''
   },
-
-  deviceId: {                     // ✅ CHAMP AJOUTÉ
+  deviceId: {
     type: String,
     required: true
   },
-
   userId: {
     type: String,
-    default: null // utile si tu veux lier l'incident à un utilisateur plus tard
+    default: null
   },
   messages: [
     {
