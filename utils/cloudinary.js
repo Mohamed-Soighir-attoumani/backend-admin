@@ -10,10 +10,19 @@ cloudinary.config({
 
 const storage = new CloudinaryStorage({
   cloudinary,
-  params: {
-    folder: 'securidem', // 📁 nom du dossier dans ton compte Cloudinary
-    allowed_formats: ['jpg', 'jpeg', 'png'],
-    transformation: [{ width: 1200, height: 1200, crop: 'limit' }],
+  params: async (req, file) => {
+    // 🎯 Détermine le type de ressource selon le mimetype
+    const isVideo = file.mimetype.startsWith('video');
+
+    return {
+      folder: 'securidem',
+      resource_type: isVideo ? 'video' : 'image', // 📌 important pour vidéos
+      public_id: Date.now() + '-' + file.originalname,
+      // 🎯 Optionnel : transformation pour les images uniquement
+      transformation: !isVideo
+        ? [{ width: 1200, height: 1200, crop: 'limit' }]
+        : undefined,
+    };
   },
 });
 
