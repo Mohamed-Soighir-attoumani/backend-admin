@@ -3,12 +3,11 @@ const router = express.Router();
 const mongoose = require('mongoose');
 const Incident = require('../models/Incident');
 
-// 📦 Cloudinary
 const multer = require('multer');
-const { storage } = require('../utils/cloudinary'); // 🔗 depuis utils/cloudinary.js
+const { storage } = require('../utils/cloudinary');
 const upload = multer({ storage });
 
-/* ──────────────── GET /api/incidents (supporte ?period=7 ou 30 ou deviceId=...) ──────────────── */
+/* ──────────────── GET /api/incidents ──────────────── */
 router.get("/", async (req, res) => {
   const { period, deviceId } = req.query;
   const filter = {};
@@ -33,7 +32,7 @@ router.get("/", async (req, res) => {
   }
 });
 
-/* ──────────────── GET /api/incidents/count (supporte ?period=7 ou 30 ou vide) ──────────────── */
+/* ──────────────── GET /api/incidents/count ──────────────── */
 router.get("/count", async (req, res) => {
   const { period } = req.query;
   const filter = {};
@@ -55,7 +54,7 @@ router.get("/count", async (req, res) => {
 });
 
 /* ──────────────── POST /api/incidents ──────────────── */
-router.post('/', upload.single('image'), async (req, res) => {
+router.post('/', upload.single('media'), async (req, res) => {
   const {
     title,
     description,
@@ -72,7 +71,9 @@ router.post('/', upload.single('image'), async (req, res) => {
     return res.status(400).json({ message: "❌ Champs requis manquants." });
   }
 
-  const imageUrl = req.file ? req.file.path : null; // ✅ URL Cloudinary automatique
+  const mediaUrl = req.file ? req.file.path : null;
+  const mimeType = req.file ? req.file.mimetype : null;
+  const mediaType = mimeType?.startsWith('video') ? 'video' : 'image';
 
   try {
     const newIncident = new Incident({
@@ -80,12 +81,13 @@ router.post('/', upload.single('image'), async (req, res) => {
       description,
       lieu,
       status,
-      photoUri: imageUrl,
       latitude,
       longitude,
       adresse,
       adminComment,
       deviceId,
+      mediaUrl,
+      mediaType,
       createdAt: new Date()
     });
 
@@ -106,7 +108,7 @@ router.put('/:id', async (req, res) => {
   }
 
   try {
-    req.body.updated = true; // ✅ Mise à jour détectée côté mobile
+    req.body.updated = true;
     const updatedIncident = await Incident.findByIdAndUpdate(id, req.body, {
       new: true,
       runValidators: true,
