@@ -3,6 +3,7 @@ const jwt = require('jsonwebtoken');
 const authMiddleware = (req, res, next) => {
   const authHeader = req.headers.authorization;
 
+  // Vérifie la présence d'un header "Authorization: Bearer <token>"
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
     return res.status(401).json({ message: 'Accès non autorisé - token manquant' });
   }
@@ -11,10 +12,19 @@ const authMiddleware = (req, res, next) => {
 
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    req.user = decoded; // doit contenir un champ `id`
+
+    // On injecte l'utilisateur décodé dans la requête
+    req.user = decoded;
+
+    // Si besoin : vérifier qu'un champ id est bien présent dans le token
+    if (!req.user || !req.user.id) {
+      return res.status(403).json({ message: 'Token invalide - identifiant manquant' });
+    }
+
     next();
   } catch (err) {
-    res.status(403).json({ message: 'Token invalide' });
+    console.error("Erreur authMiddleware :", err.message);
+    res.status(403).json({ message: 'Token invalide ou expiré' });
   }
 };
 
