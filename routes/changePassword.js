@@ -1,5 +1,4 @@
 // routes/changePassword.js
-
 const express = require('express');
 const bcrypt = require('bcryptjs');
 const Admin = require('../models/Admin');
@@ -7,12 +6,16 @@ const authMiddleware = require('../middleware/authMiddleware');
 
 const router = express.Router();
 
-// ✅ Route protégée pour changer le mot de passe admin
+// Route protégée : le middleware vérifie le JWT
 router.post('/change-password', authMiddleware, async (req, res) => {
-  const { oldPassword, newPassword } = req.body;
-  const adminId = req.user.id; // récupéré depuis le token JWT
-
   try {
+    const { oldPassword, newPassword } = req.body;
+    const adminId = req.user.id; // fourni par le JWT
+
+    if (!oldPassword || !newPassword) {
+      return res.status(400).json({ message: 'Champs manquants' });
+    }
+
     const admin = await Admin.findById(adminId);
     if (!admin) {
       return res.status(404).json({ message: "Administrateur non trouvé" });
@@ -28,7 +31,7 @@ router.post('/change-password', authMiddleware, async (req, res) => {
 
     return res.status(200).json({ message: "Mot de passe mis à jour avec succès" });
   } catch (err) {
-    console.error("Erreur lors du changement de mot de passe :", err.message);
+    console.error("Erreur lors du changement de mot de passe :", err);
     return res.status(500).json({ message: "Erreur interne du serveur" });
   }
 });
