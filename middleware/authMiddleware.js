@@ -1,24 +1,35 @@
 // backend/middleware/authMiddleware.js
 const jwt = require('jsonwebtoken');
-const { getJwtSecret } = require('../utils/jwt');
 
+function getJwtSecret() {
+  const s = process.env.JWT_SECRET;
+  if (!s) {
+    // En dev, fail fast pour éviter des tokens invalides silencieux
+    throw new Error('JWT_SECRET non défini côté serveur');
+  }
+  return s;
+}
+
+/**
+ * Exige un header Authorization: Bearer <token>
+ * Décode le token et remplit req.user = { id, role, email, ... }
+ */
 module.exports = function authMiddleware(req, res, next) {
-  try {
-    const authHeader = req.headers.authorization || req.headers.Authorization;
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      return res.status(401).json({ message: 'Accès non autorisé - token manquant' });
-    }
+  const authHeader = req.headers.authorization || req.headers.Authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return res.status(401).json({ message: 'Accès non autorisé - token manquant' });
+  }
 
-    const token = authHeader.split(' ')[1];
+  const token = authHeader.split(' ')[1];
+  try {
     const decoded = jwt.verify(token, getJwtSecret());
-    // On attend au minimum un id OU un email
-    if (!decoded?.id && !decoded?.email) {
+    if (!decoded?.id) {
       return res.status(403).json({ message: 'Token invalide - identifiant manquant' });
     }
-
-    req.user = decoded; // { id, email, role, ... }
+    req.user = decoded; // { id, role, email, iat, exp }
     next();
   } catch (err) {
+    console.error('❌ authMiddleware:', err.message);
     return res.status(403).json({ message: 'Token invalide ou expiré' });
   }
 };
