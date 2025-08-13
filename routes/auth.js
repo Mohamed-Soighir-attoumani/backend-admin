@@ -12,6 +12,7 @@ function getJwtSecret() {
   return s;
 }
 
+// POST /api/login
 router.post('/login', async (req, res) => {
   const { email, password } = req.body || {};
   try {
