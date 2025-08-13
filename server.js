@@ -51,7 +51,8 @@ const authRoutes            = require('./routes/auth');
 const projectRoutes         = require('./routes/projects');
 const deviceRoutes          = require('./routes/devices');
 const userRoutes            = require('./routes/userRoutes');
-const changePasswordRoute   = require('./routes/changePassword'); // ✅ Route ajoutée ici
+const changePasswordRoute   = require('./routes/changePassword'); 
+const meRoute = require('./routes/me');
 
 /* ───────────── Routes applicatives ───────────── */
 app.use('/api', setupAdminRoute);
@@ -63,6 +64,7 @@ app.use('/api/devices', deviceRoutes);
 app.use('/api', authRoutes);
 app.use('/api', userRoutes);
 app.use('/api', changePasswordRoute);
+app.use('/api', meRoute);
 
 /* Page d’accueil */
 app.get('/', (_, res) => res.send('API SecuriDem opérationnelle ✅'));
