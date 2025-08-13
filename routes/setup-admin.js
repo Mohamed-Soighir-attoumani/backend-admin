@@ -1,37 +1,47 @@
-// routes/setup-admin.js
-const express = require("express");
-const bcrypt = require("bcryptjs");
-const Admin = require("../models/Admin");
+// backend/routes/setup-admin.js
+const express = require('express');
+const bcrypt = require('bcryptjs');
+const Admin = require('../models/Admin');
 
 const router = express.Router();
 
-// Crée ou met à jour un admin
-router.post("/setup-admin", async (req, res) => {
+/**
+ * GET /api/setup-admin
+ * - Crée un compte admin si aucun n'existe.
+ * - Utilise les variables d'env ADMIN_EMAIL / ADMIN_PASSWORD si présentes
+ *   sinon des valeurs par défaut.
+ * - NE LOGUE JAMAIS le mot de passe en clair en prod.
+ */
+router.get('/setup-admin', async (req, res) => {
   try {
-    const email = "admin@email.com";
-    const plainPassword = "admin123";
-    const hashedPassword = await bcrypt.hash(plainPassword, 10);
-
-    const existingAdmin = await Admin.findOne({ email });
-
-    if (existingAdmin) {
-      existingAdmin.password = hashedPassword;
-      await existingAdmin.save();
-      return res.json({ message: "✅ Admin mis à jour avec succès" });
+    const count = await Admin.countDocuments();
+    if (count > 0) {
+      return res.json({ ok: true, created: false, message: 'Un admin existe déjà.' });
     }
 
-    const admin = new Admin({
-      name: "Super Admin",
+    const email = process.env.ADMIN_EMAIL || 'admin@mairie.fr';
+    const plain = process.env.ADMIN_PASSWORD || 'ChangeMoi!2025';
+    const name  = process.env.ADMIN_NAME || 'Administrateur';
+
+    const hash = await bcrypt.hash(plain, 10);
+
+    const admin = await Admin.create({
+      name,
       email,
-      password: hashedPassword,
-      role: "admin",
+      password: hash,
+      role: 'admin',
     });
 
-    await admin.save();
-    res.json({ message: "✅ Admin créé avec succès" });
-  } catch (err) {
-    console.error("❌ Erreur dans setup-admin:", err.message);
-    res.status(500).json({ message: "Erreur serveur" });
+    return res.json({
+      ok: true,
+      created: true,
+      admin: { id: admin._id, email: admin.email, name: admin.name },
+      // ⚠️ Ne renvoie pas le mot de passe hashé ni le clair en prod
+      hint: 'Admin de base créé. Change le mot de passe rapidement.',
+    });
+  } catch (e) {
+    console.error('❌ setup-admin error:', e);
+    return res.status(500).json({ ok: false, message: 'Erreur serveur' });
   }
 });
 
