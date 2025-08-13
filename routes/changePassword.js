@@ -20,15 +20,19 @@ router.post('/change-password', authMiddleware, async (req, res) => {
   }
 
   try {
-    // 1) On cherche d’abord dans Admin par id du token
-    let admin = await Admin.findById(authUser.id);
+    // 1) On tente ID depuis le token
+    let admin = null;
+    if (authUser?.id) {
+      admin = await Admin.findById(authUser.id);
+    }
 
-    // 2) Fallback: parfois d’anciens tokens/implémentations n’avaient pas id ; on tente par email
-    if (!admin && authUser.email) {
+    // 2) Fallback par email si besoin (utile si ancien token ou incohérence)
+    if (!admin && authUser?.email) {
       admin = await Admin.findOne({ email: authUser.email });
     }
 
     if (!admin) {
+      console.warn('⚠️ change-password: admin introuvable', { tokenUser: authUser });
       return res.status(404).json({ message: 'Utilisateur non trouvé' });
     }
 
