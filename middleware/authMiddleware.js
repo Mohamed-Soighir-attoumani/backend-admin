@@ -1,5 +1,6 @@
-// middleware/authMiddleware.js
+// backend/middleware/authMiddleware.js
 const jwt = require('jsonwebtoken');
+const { getJwtSecret } = require('../utils/jwt');
 
 module.exports = function authMiddleware(req, res, next) {
   const authHeader = req.headers.authorization || req.headers.Authorization;
@@ -7,23 +8,18 @@ module.exports = function authMiddleware(req, res, next) {
     return res.status(401).json({ message: 'Accès non autorisé - token manquant' });
   }
 
-  const token = authHeader.split(' ')[1];
-  const secret = process.env.JWT_SECRET;
-  if (!secret) {
-    // Important de le savoir en dev si on oublie la variable
-    return res.status(500).json({ message: 'JWT_SECRET non défini côté serveur' });
-  }
-
+  const token = authHeader.slice(7);
   try {
-    const decoded = jwt.verify(token, secret);
-    // On attend au minimum un id dans le payload
-    if (!decoded?.id) {
+    const decoded = jwt.verify(token, getJwtSecret());
+    const userId = decoded.id || decoded._id || decoded.userId || decoded.sub;
+    if (!userId) {
       return res.status(403).json({ message: 'Token invalide - identifiant manquant' });
     }
-    req.user = decoded; // { id, role, ... }
+    req.user = decoded; // { id, role, email, ... }
+    req.userId = userId;
+    req.userRole = decoded.role || null;
     next();
   } catch (err) {
-    // expiré ou signature invalide
     return res.status(403).json({ message: 'Token invalide ou expiré' });
   }
 };
