@@ -4,7 +4,7 @@ const jwt = require('jsonwebtoken');
 function getJwtSecret() {
   const s = process.env.JWT_SECRET;
   if (!s) {
-    // En dev, fail fast pour éviter des tokens invalides silencieux
+    // On fail fast en dev/hébergement pour éviter des tokens invalides silencieux
     throw new Error('JWT_SECRET non défini côté serveur');
   }
   return s;
