@@ -3,12 +3,17 @@ const express = require('express');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
 const Admin = require('../models/Admin');
-const { getJwtSecret } = require('../utils/jwt');
 
 const router = express.Router();
 
+function getJwtSecret() {
+  const s = process.env.JWT_SECRET;
+  if (!s) throw new Error('JWT_SECRET non défini côté serveur');
+  return s;
+}
+
 router.post('/login', async (req, res) => {
-  const { email, password } = req.body;
+  const { email, password } = req.body || {};
   try {
     const admin = await Admin.findOne({ email });
     if (!admin) {
@@ -26,10 +31,10 @@ router.post('/login', async (req, res) => {
       { expiresIn: '7d' }
     );
 
-    res.json({ token });
+    return res.json({ token });
   } catch (err) {
-    console.error('Erreur /login :', err);
-    res.status(500).json({ message: 'Erreur serveur' });
+    console.error('❌ /login:', err);
+    return res.status(500).json({ message: 'Erreur serveur' });
   }
 });
 
