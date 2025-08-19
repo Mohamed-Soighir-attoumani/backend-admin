@@ -11,24 +11,24 @@ try { Admin = require('../models/Admin'); } catch (_) {}
 const router = express.Router();
 const isValidObjectId = (id) => mongoose.Types.ObjectId.isValid(id || '');
 
-// Préflight CORS pour cette route
+// Préflight (OPTIONS) pour ce chemin
 router.options('/', (req, res) => {
   res.set('Access-Control-Allow-Origin', req.headers.origin || '*');
-  res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization, Cache-Control, Pragma, X-Requested-With, Accept, Origin');
   res.set('Access-Control-Allow-Methods', 'POST, OPTIONS, GET');
   return res.sendStatus(204);
 });
 
-// Ping/Help (GET /api/change-password)
+// GET informatif (utile pour tester rapidement)
 router.get('/', (req, res) => {
   return res.json({
     ok: true,
     route: '/api/change-password',
-    howTo: 'POST /api/change-password avec Authorization: Bearer <token> et body { oldPassword, newPassword }'
+    howTo: 'POST avec Authorization: Bearer <token> et body { oldPassword, newPassword }'
   });
 });
 
-// POST /api/change-password
+// POST réel
 router.post('/', authMiddleware, async (req, res) => {
   try {
     const { oldPassword, newPassword } = req.body || {};
@@ -39,29 +39,21 @@ router.post('/', authMiddleware, async (req, res) => {
 
     let doc = null;
 
-    // 1) par id
     if (authUser.id && isValidObjectId(authUser.id)) {
       doc = await User.findById(authUser.id).select('+password email role');
       if (!doc && Admin) doc = await Admin.findById(authUser.id).select('+password email role');
     }
-
-    // 2) par email
     if (!doc && authUser.email) {
       doc = await User.findOne({ email: authUser.email }).select('+password email role');
       if (!doc && Admin) doc = await Admin.findOne({ email: authUser.email }).select('+password email role');
     }
-
-    // 3) legacy username=admin -> ADMIN_EMAIL
     if (!doc && authUser.username === 'admin') {
       const legacyEmail = process.env.ADMIN_EMAIL || 'admin@mairie.fr';
       doc = await User.findOne({ email: legacyEmail }).select('+password email role');
       if (!doc && Admin) doc = await Admin.findOne({ email: legacyEmail }).select('+password email role');
     }
 
-    if (!doc) {
-      console.warn('⚠️ change-password: utilisateur introuvable', { tokenUser: authUser });
-      return res.status(404).json({ message: 'Utilisateur non trouvé' });
-    }
+    if (!doc) return res.status(404).json({ message: 'Utilisateur non trouvé' });
 
     const ok = await bcrypt.compare(oldPassword, doc.password);
     if (!ok) return res.status(400).json({ message: 'Ancien mot de passe incorrect' });
