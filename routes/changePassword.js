@@ -1,7 +1,7 @@
 // backend/routes/changePassword.js
 const express = require('express');
 const bcrypt = require('bcryptjs');
-const Admin = require('../models/Admin');
+const User = require('../models/User');
 const authMiddleware = require('../middleware/authMiddleware');
 
 const router = express.Router();
@@ -13,36 +13,28 @@ const router = express.Router();
  */
 router.post('/change-password', authMiddleware, async (req, res) => {
   const { oldPassword, newPassword } = req.body || {};
-  const authUser = req.user; // { id, role, email }
+  const authUser = req.user; // { id, email, role }
 
   if (!oldPassword || !newPassword) {
     return res.status(400).json({ message: 'Champs requis manquants' });
   }
 
   try {
-    // 1) On tente ID depuis le token
-    let admin = null;
-    if (authUser?.id) {
-      admin = await Admin.findById(authUser.id);
-    }
-
-    // 2) Fallback par email si besoin (utile si ancien token ou incohérence)
-    if (!admin && authUser?.email) {
-      admin = await Admin.findOne({ email: authUser.email });
-    }
-
-    if (!admin) {
-      console.warn('⚠️ change-password: admin introuvable', { tokenUser: authUser });
+    // Récupération de l'utilisateur authentifié avec le hash
+    const user = await User.findById(authUser.id).select('+password');
+    if (!user) {
+      console.warn('⚠️ change-password: user introuvable', { tokenUser: authUser });
       return res.status(404).json({ message: 'Utilisateur non trouvé' });
     }
 
-    const isMatch = await bcrypt.compare(oldPassword, admin.password);
+    const isMatch = await bcrypt.compare(oldPassword, user.password);
     if (!isMatch) {
       return res.status(400).json({ message: 'Ancien mot de passe incorrect' });
     }
 
-    admin.password = await bcrypt.hash(newPassword, 10);
-    await admin.save();
+    const salt = await bcrypt.genSalt(10);
+    user.password = await bcrypt.hash(newPassword, salt);
+    await user.save();
 
     return res.json({ message: 'Mot de passe mis à jour avec succès' });
   } catch (err) {
