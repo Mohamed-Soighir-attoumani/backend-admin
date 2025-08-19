@@ -20,21 +20,11 @@ const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/backen
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN || null;
 const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || '*';
 
-// CORS global (inclut headers vus dans tes erreurs)
+// CORS global : reflète automatiquement les headers demandés (évite l'erreur cache-control)
 app.use(cors({
   origin: FRONTEND_ORIGIN,
   credentials: true,
   methods: ['GET','POST','PUT','PATCH','DELETE','OPTIONS'],
-  allowedHeaders: [
-    'Content-Type',
-    'Authorization',
-    'Cache-Control',
-    'Pragma',
-    'X-Requested-With',
-    'Accept',
-    'Origin'
-  ],
-  exposedHeaders: ['Content-Length', 'Content-Type'],
 }));
 app.options('*', cors());
 
@@ -53,10 +43,10 @@ app.use(promBundle({
   promClient: { collectDefaultMetrics: { labels: { app: 'securidem-backend' } } },
 }));
 
-// Healthcheck
+// Health
 app.get('/api/health', (_, res) => res.json({ status: 'ok', timestamp: Date.now() }));
 
-// Routes
+/* ───────────── Import des routes ───────────── */
 const setupAdminRoute     = require('./routes/setup-admin');
 const incidentRoutes      = require('./routes/incidents');
 const articleRoutes       = require('./routes/articles');
@@ -65,9 +55,13 @@ const authRoutes          = require('./routes/auth');
 const projectRoutes       = require('./routes/projects');
 const deviceRoutes        = require('./routes/devices');
 const userRoutes          = require('./routes/userRoutes');
+
+// IMPORTANT: routeur dédié change-password monté sur le chemin final
 const changePasswordRoute = require('./routes/changePassword');
+
 const meRoute             = require('./routes/me');
 
+/* ───────────── Montage des routes ───────────── */
 app.use('/api', setupAdminRoute);
 app.use('/api/incidents', incidentRoutes);
 app.use('/api/articles', articleRoutes);
@@ -77,9 +71,8 @@ app.use('/api/devices', deviceRoutes);
 app.use('/api', authRoutes);
 app.use('/api', userRoutes);
 
-// Monte /api/change-password sur le chemin final (les routes internes utilisent '/')
+// Monte /api/change-password ; à l'intérieur les routes sont '/'
 app.use('/api/change-password',
-  // petit log debug utile (optionnel) :
   (req, _res, next) => { console.log('[HIT] /api/change-password', req.method); next(); },
   changePasswordRoute
 );
