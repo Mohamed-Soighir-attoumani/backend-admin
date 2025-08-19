@@ -7,7 +7,7 @@ const authMiddleware = require('../middleware/authMiddleware');
 
 let Admin = null;
 try {
-  Admin = require('../models/Admin'); // facultatif si tu le gardes
+  Admin = require('../models/Admin'); // ok si absent
 } catch (_) {}
 
 const router = express.Router();
@@ -16,24 +16,39 @@ function isValidObjectId(id) {
   return mongoose.Types.ObjectId.isValid(id || '');
 }
 
+/** 
+ * Aides debug/infra
+ * - OPTIONS: pour préflight CORS (évite 404)
+ * - GET /change-password/ping: pour vérifier que la route est bien montée en prod
+ */
+router.options('/change-password', (req, res) => {
+  res.set('Access-Control-Allow-Origin', req.headers.origin || '*');
+  res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  res.set('Access-Control-Allow-Methods', 'POST, OPTIONS, GET');
+  return res.sendStatus(204);
+});
+
+router.get('/change-password/ping', (req, res) => {
+  return res.json({ ok: true, route: '/api/change-password', hint: 'Route montée ✅' });
+});
+
 /**
  * POST /api/change-password
  * Header: Authorization: Bearer <token>
  * Body: { oldPassword, newPassword }
- * - Recherche via id (User puis Admin), sinon email, sinon (legacy) username → ADMIN_EMAIL.
  */
 router.post('/change-password', authMiddleware, async (req, res) => {
-  const { oldPassword, newPassword } = req.body || {};
-  const authUser = req.user || {};
-
-  if (!oldPassword || !newPassword) {
-    return res.status(400).json({ message: 'Champs requis manquants' });
-  }
-
   try {
+    const { oldPassword, newPassword } = req.body || {};
+    const authUser = req.user || {};
+
+    if (!oldPassword || !newPassword) {
+      return res.status(400).json({ message: 'Champs requis manquants' });
+    }
+
     let doc = null;
 
-    // 1) par id (token récent)
+    // 1) par id
     if (authUser.id && isValidObjectId(authUser.id)) {
       doc = await User.findById(authUser.id).select('+password email role');
       if (!doc && Admin) {
@@ -41,7 +56,7 @@ router.post('/change-password', authMiddleware, async (req, res) => {
       }
     }
 
-    // 2) par email (token récent ou semi-ancien)
+    // 2) par email
     if (!doc && authUser.email) {
       doc = await User.findOne({ email: authUser.email }).select('+password email role');
       if (!doc && Admin) {
@@ -49,7 +64,7 @@ router.post('/change-password', authMiddleware, async (req, res) => {
       }
     }
 
-    // 3) legacy: username=admin → tenter ADMIN_EMAIL
+    // 3) legacy username=admin → ADMIN_EMAIL
     if (!doc && authUser.username) {
       const legacyEmail = (authUser.username === 'admin') ? (process.env.ADMIN_EMAIL || 'admin@mairie.fr') : null;
       if (legacyEmail) {
@@ -65,8 +80,8 @@ router.post('/change-password', authMiddleware, async (req, res) => {
       return res.status(404).json({ message: 'Utilisateur non trouvé' });
     }
 
-    const isMatch = await bcrypt.compare(oldPassword, doc.password);
-    if (!isMatch) {
+    const ok = await bcrypt.compare(oldPassword, doc.password);
+    if (!ok) {
       return res.status(400).json({ message: 'Ancien mot de passe incorrect' });
     }
 
