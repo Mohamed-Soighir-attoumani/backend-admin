@@ -1,21 +1,22 @@
 // backend/routes/setup-admin.js
 const express = require('express');
 const bcrypt = require('bcryptjs');
-const Admin = require('../models/Admin');
+const User = require('../models/User'); // ✅ unifié: on utilise le modèle User
 
 const router = express.Router();
 
 /**
  * GET /api/setup-admin
- * - Crée un compte admin si aucun n'existe.
- * - Utilise les variables d'env ADMIN_EMAIL / ADMIN_PASSWORD si présentes
+ * - Crée un compte admin si aucun admin n'existe.
+ * - Utilise ADMIN_EMAIL / ADMIN_PASSWORD / ADMIN_NAME si présents,
  *   sinon des valeurs par défaut.
- * - NE LOGUE JAMAIS le mot de passe en clair en prod.
+ * - Ne log jamais le mot de passe en clair.
  */
 router.get('/setup-admin', async (req, res) => {
   try {
-    const count = await Admin.countDocuments();
-    if (count > 0) {
+    // S'il y a déjà AU MOINS un utilisateur admin, on ne recrée pas
+    const existingAdmin = await User.findOne({ role: 'admin' }).lean();
+    if (existingAdmin) {
       return res.json({ ok: true, created: false, message: 'Un admin existe déjà.' });
     }
 
@@ -23,21 +24,35 @@ router.get('/setup-admin', async (req, res) => {
     const plain = process.env.ADMIN_PASSWORD || 'ChangeMoi!2025';
     const name  = process.env.ADMIN_NAME || 'Administrateur';
 
+    // Si un user avec le même email existe déjà (mais pas admin),
+    // on peut l'élever en admin après vérification si tu veux.
+    const existingByEmail = await User.findOne({ email }).select('_id role').lean();
+    if (existingByEmail) {
+      // Ici, on choisit de ne PAS écraser son mot de passe.
+      // On met juste son rôle à admin (si tu veux écraser le mdp, fais un update avec hash).
+      await User.updateOne({ _id: existingByEmail._id }, { $set: { role: 'admin' } });
+      return res.json({
+        ok: true,
+        created: false,
+        message: 'Un utilisateur existant a été promu admin.',
+      });
+    }
+
     const hash = await bcrypt.hash(plain, 10);
 
-    const admin = await Admin.create({
-      name,
+    const admin = await User.create({
       email,
       password: hash,
       role: 'admin',
+      // Si tu veux stocker le nom, ajoute un champ "name" dans le schema User
+      // name,
     });
 
     return res.json({
       ok: true,
       created: true,
-      admin: { id: admin._id, email: admin.email, name: admin.name },
-      // ⚠️ Ne renvoie pas le mot de passe hashé ni le clair en prod
-      hint: 'Admin de base créé. Change le mot de passe rapidement.',
+      admin: { id: admin._id, email: admin.email, role: admin.role },
+      hint: 'Admin de base créé. Pense à changer le mot de passe rapidement.',
     });
   } catch (e) {
     console.error('❌ setup-admin error:', e);
