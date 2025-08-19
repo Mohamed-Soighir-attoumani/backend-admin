@@ -1,8 +1,16 @@
 // backend/routes/auth.js
 const express = require('express');
-const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
-const Admin = require('../models/Admin');
+const jwt = require('jsonwebtoken');
+const User = require('../models/User');
+
+let Admin = null;
+try {
+  // Optionnel si tu as encore le modèle Admin pour anciens comptes
+  Admin = require('../models/Admin');
+} catch (_) {
+  // pas grave si le modèle n'existe plus
+}
 
 const router = express.Router();
 
@@ -12,30 +20,53 @@ function getJwtSecret() {
   return s;
 }
 
-// POST /api/login
+/**
+ * POST /api/login
+ * Body: { email, password }
+ * Retour: { token }
+ * - Auth standard sur User (email)
+ * - Fallback sur Admin si User inexistant (compat héritage)
+ */
 router.post('/login', async (req, res) => {
-  const { email, password } = req.body || {};
   try {
-    const admin = await Admin.findOne({ email });
-    if (!admin) {
+    const { email, password } = req.body || {};
+    if (!email || !password) {
+      return res.status(400).json({ message: 'Email et mot de passe requis' });
+    }
+
+    // User d'abord (password est select:false dans le schema proposé)
+    let doc = await User.findOne({ email }).select('+password role email');
+    let model = 'User';
+
+    // Fallback sur Admin si pas de User
+    if (!doc && Admin) {
+      // selon ton schema Admin, ajuste select si besoin
+      doc = await Admin.findOne({ email }).select('+password role email');
+      model = doc ? 'Admin' : model;
+    }
+
+    if (!doc) {
       return res.status(401).json({ message: 'Identifiants invalides' });
     }
 
-    const ok = await bcrypt.compare(password, admin.password);
+    const ok = await bcrypt.compare(password, doc.password);
     if (!ok) {
       return res.status(401).json({ message: 'Identifiants invalides' });
     }
 
-    const token = jwt.sign(
-      { id: admin._id.toString(), role: admin.role || 'admin', email: admin.email },
-      getJwtSecret(),
-      { expiresIn: '7d' }
-    );
+    const payload = {
+      id: doc._id.toString(),
+      email: doc.email,
+      role: doc.role || 'admin',
+      // Optionnel: source du compte pour debug
+      src: model,
+    };
 
+    const token = jwt.sign(payload, getJwtSecret(), { expiresIn: '12h' });
     return res.json({ token });
-  } catch (err) {
-    console.error('❌ /login:', err);
-    return res.status(500).json({ message: 'Erreur serveur' });
+  } catch (e) {
+    console.error('❌ /login:', e);
+    return res.status(500).json({ message: 'Erreur interne du serveur' });
   }
 });
 
