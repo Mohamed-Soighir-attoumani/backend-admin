@@ -6,11 +6,8 @@ const User = require('../models/User');
 
 let Admin = null;
 try {
-  // Optionnel si tu as encore le modèle Admin pour anciens comptes
-  Admin = require('../models/Admin');
-} catch (_) {
-  // pas grave si le modèle n'existe plus
-}
+  Admin = require('../models/Admin'); // facultatif si tu le gardes
+} catch (_) {}
 
 const router = express.Router();
 
@@ -23,9 +20,8 @@ function getJwtSecret() {
 /**
  * POST /api/login
  * Body: { email, password }
- * Retour: { token }
- * - Auth standard sur User (email)
- * - Fallback sur Admin si User inexistant (compat héritage)
+ * - Auth sur User (email), fallback sur Admin si non trouvé.
+ * - Signe un token contenant { id, email, role }.
  */
 router.post('/login', async (req, res) => {
   try {
@@ -34,35 +30,23 @@ router.post('/login', async (req, res) => {
       return res.status(400).json({ message: 'Email et mot de passe requis' });
     }
 
-    // User d'abord (password est select:false dans le schema proposé)
-    let doc = await User.findOne({ email }).select('+password role email');
-    let model = 'User';
+    let doc = await User.findOne({ email }).select('+password email role');
+    let src = 'User';
 
-    // Fallback sur Admin si pas de User
     if (!doc && Admin) {
-      // selon ton schema Admin, ajuste select si besoin
-      doc = await Admin.findOne({ email }).select('+password role email');
-      model = doc ? 'Admin' : model;
+      // Si le schema Admin n’a pas select:false, ça marche aussi
+      doc = await Admin.findOne({ email }).select('+password email role');
+      if (doc) src = 'Admin';
     }
 
-    if (!doc) {
-      return res.status(401).json({ message: 'Identifiants invalides' });
-    }
+    if (!doc) return res.status(401).json({ message: 'Identifiants invalides' });
 
     const ok = await bcrypt.compare(password, doc.password);
-    if (!ok) {
-      return res.status(401).json({ message: 'Identifiants invalides' });
-    }
+    if (!ok) return res.status(401).json({ message: 'Identifiants invalides' });
 
-    const payload = {
-      id: doc._id.toString(),
-      email: doc.email,
-      role: doc.role || 'admin',
-      // Optionnel: source du compte pour debug
-      src: model,
-    };
-
+    const payload = { id: doc._id.toString(), email: doc.email, role: doc.role || 'admin', src };
     const token = jwt.sign(payload, getJwtSecret(), { expiresIn: '12h' });
+
     return res.json({ token });
   } catch (e) {
     console.error('❌ /login:', e);
