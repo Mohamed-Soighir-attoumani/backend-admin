@@ -5,9 +5,7 @@ const jwt = require('jsonwebtoken');
 const User = require('../models/User');
 
 let Admin = null;
-try {
-  Admin = require('../models/Admin'); // facultatif si tu le gardes
-} catch (_) {}
+try { Admin = require('../models/Admin'); } catch (_) {}
 
 const router = express.Router();
 
@@ -34,7 +32,6 @@ router.post('/login', async (req, res) => {
     let src = 'User';
 
     if (!doc && Admin) {
-      // Si le schema Admin n’a pas select:false, ça marche aussi
       doc = await Admin.findOne({ email }).select('+password email role');
       if (doc) src = 'Admin';
     }
