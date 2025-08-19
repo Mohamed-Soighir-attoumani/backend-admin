@@ -9,7 +9,7 @@ function getJwtSecret() {
 
 /**
  * Authorization: Bearer <token>
- * Attendu après décodage: { id, email, role, ... }
+ * Remplit req.user = { id, email, role, username? }
  */
 module.exports = function authMiddleware(req, res, next) {
   const authHeader = req.headers.authorization || req.headers.Authorization;
@@ -20,7 +20,6 @@ module.exports = function authMiddleware(req, res, next) {
   const token = authHeader.split(' ')[1];
   try {
     const decoded = jwt.verify(token, getJwtSecret());
-    // Rendre le middleware tolérant aux anciens tokens
     const id = decoded.id || decoded._id || decoded.sub || null;
     req.user = {
       id,
