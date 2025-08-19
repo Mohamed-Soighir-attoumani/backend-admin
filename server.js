@@ -20,17 +20,29 @@ const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/backen
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN || null;
 const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || '*';
 
-// Middlewares globaux
+// CORS global (inclut headers vus dans tes erreurs)
 app.use(cors({
   origin: FRONTEND_ORIGIN,
   credentials: true,
-  allowedHeaders: ['Content-Type', 'Authorization'],
   methods: ['GET','POST','PUT','PATCH','DELETE','OPTIONS'],
+  allowedHeaders: [
+    'Content-Type',
+    'Authorization',
+    'Cache-Control',
+    'Pragma',
+    'X-Requested-With',
+    'Accept',
+    'Origin'
+  ],
+  exposedHeaders: ['Content-Length', 'Content-Type'],
 }));
 app.options('*', cors());
 
+// Body & static
 app.use(express.json());
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+
+// Logs HTTP
 app.use(morgan('combined', { stream: { write: msg => logger.info(msg.trim()) } }));
 
 // Prometheus
@@ -41,7 +53,7 @@ app.use(promBundle({
   promClient: { collectDefaultMetrics: { labels: { app: 'securidem-backend' } } },
 }));
 
-// Health
+// Healthcheck
 app.get('/api/health', (_, res) => res.json({ status: 'ok', timestamp: Date.now() }));
 
 // Routes
@@ -53,7 +65,7 @@ const authRoutes          = require('./routes/auth');
 const projectRoutes       = require('./routes/projects');
 const deviceRoutes        = require('./routes/devices');
 const userRoutes          = require('./routes/userRoutes');
-const changePasswordRoute = require('./routes/changePassword'); 
+const changePasswordRoute = require('./routes/changePassword');
 const meRoute             = require('./routes/me');
 
 app.use('/api', setupAdminRoute);
@@ -65,16 +77,19 @@ app.use('/api/devices', deviceRoutes);
 app.use('/api', authRoutes);
 app.use('/api', userRoutes);
 
-// 🔴 IMPORTANT : on monte le routeur SUR le chemin final
-// → dans le fichier de route, les chemins sont juste '/'
-app.use('/api/change-password', changePasswordRoute);
+// Monte /api/change-password sur le chemin final (les routes internes utilisent '/')
+app.use('/api/change-password',
+  // petit log debug utile (optionnel) :
+  (req, _res, next) => { console.log('[HIT] /api/change-password', req.method); next(); },
+  changePasswordRoute
+);
 
 app.use('/api', meRoute);
 
-// Page d’accueil
+// Accueil
 app.get('/', (_, res) => res.send('API SecuriDem opérationnelle ✅'));
 
-// Cron
+// CRON backup
 cron.schedule('0 3 * * *', async () => {
   logger.info('Lancement sauvegarde quotidienne');
   try {
