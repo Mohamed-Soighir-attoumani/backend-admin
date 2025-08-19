@@ -55,6 +55,7 @@ const authRoutes          = require('./routes/auth');
 const projectRoutes       = require('./routes/projects');
 const deviceRoutes        = require('./routes/devices');
 const userRoutes          = require('./routes/userRoutes');
+const debugRoutes = require('./routes/debug');
 
 // IMPORTANT: routeur dédié change-password monté sur le chemin final
 const changePasswordRoute = require('./routes/changePassword');
@@ -70,6 +71,7 @@ app.use('/api/projects', projectRoutes);
 app.use('/api/devices', deviceRoutes);
 app.use('/api', authRoutes);
 app.use('/api', userRoutes);
+app.use('/api', debugRoutes);
 
 // Monte /api/change-password ; à l'intérieur les routes sont '/'
 app.use('/api/change-password',
