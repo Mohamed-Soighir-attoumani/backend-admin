@@ -7,11 +7,8 @@ const authMiddleware = require('../middleware/authMiddleware');
 
 let Admin = null;
 try {
-  // Optionnel si tu as encore le modèle Admin pour anciens comptes
-  Admin = require('../models/Admin');
-} catch (_) {
-  // pas grave si le modèle n'existe plus
-}
+  Admin = require('../models/Admin'); // facultatif si tu le gardes
+} catch (_) {}
 
 const router = express.Router();
 
@@ -23,12 +20,11 @@ function isValidObjectId(id) {
  * POST /api/change-password
  * Header: Authorization: Bearer <token>
  * Body: { oldPassword, newPassword }
- * - Cherche d'abord via req.user.id dans User, puis Admin
- * - Fallback via email (ou username→email) si id manquant (anciens tokens)
+ * - Recherche via id (User puis Admin), sinon email, sinon (legacy) username → ADMIN_EMAIL.
  */
 router.post('/change-password', authMiddleware, async (req, res) => {
-  const { oldPassword, newPassword } = (req.body || {});
-  const authUser = req.user || {}; // attendu: { id, email, role }
+  const { oldPassword, newPassword } = req.body || {};
+  const authUser = req.user || {};
 
   if (!oldPassword || !newPassword) {
     return res.status(400).json({ message: 'Champs requis manquants' });
@@ -37,7 +33,7 @@ router.post('/change-password', authMiddleware, async (req, res) => {
   try {
     let doc = null;
 
-    // 1) Recherche par id (nouveaux tokens)
+    // 1) par id (token récent)
     if (authUser.id && isValidObjectId(authUser.id)) {
       doc = await User.findById(authUser.id).select('+password email role');
       if (!doc && Admin) {
@@ -45,7 +41,7 @@ router.post('/change-password', authMiddleware, async (req, res) => {
       }
     }
 
-    // 2) Fallback: par email (anciens tokens qui embarquent l'email)
+    // 2) par email (token récent ou semi-ancien)
     if (!doc && authUser.email) {
       doc = await User.findOne({ email: authUser.email }).select('+password email role');
       if (!doc && Admin) {
@@ -53,7 +49,7 @@ router.post('/change-password', authMiddleware, async (req, res) => {
       }
     }
 
-    // 3) Fallback ultime: si token ancien contient username=admin (très vieux flux)
+    // 3) legacy: username=admin → tenter ADMIN_EMAIL
     if (!doc && authUser.username) {
       const legacyEmail = (authUser.username === 'admin') ? (process.env.ADMIN_EMAIL || 'admin@mairie.fr') : null;
       if (legacyEmail) {
