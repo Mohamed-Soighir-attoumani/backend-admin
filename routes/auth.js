@@ -18,8 +18,8 @@ function getJwtSecret() {
 /**
  * POST /api/login
  * Body: { email, password }
- * - Auth sur User (email), fallback sur Admin si non trouvé.
- * - Signe un token contenant { id, email, role }.
+ * - Cherche d’abord dans User, puis Admin.
+ * - Signe un JWT { id, email, role, src }.
  */
 router.post('/login', async (req, res) => {
   try {
@@ -36,10 +36,21 @@ router.post('/login', async (req, res) => {
       if (doc) src = 'Admin';
     }
 
-    if (!doc) return res.status(401).json({ message: 'Identifiants invalides' });
+    if (!doc) {
+      return res.status(401).json({ message: 'Identifiants invalides' });
+    }
+
+    if (!doc.password) {
+      // si le champ password n’est pas sélectionné pour une raison X
+      const errmsg = `Mot de passe non disponible pour ${src}. Vérifie select('+password') et le schema.`;
+      console.error('❌ /login:', errmsg);
+      return res.status(500).json({ message: 'Erreur interne du serveur (password non sélectionné)' });
+    }
 
     const ok = await bcrypt.compare(password, doc.password);
-    if (!ok) return res.status(401).json({ message: 'Identifiants invalides' });
+    if (!ok) {
+      return res.status(401).json({ message: 'Identifiants invalides' });
+    }
 
     const payload = { id: doc._id.toString(), email: doc.email, role: doc.role || 'admin', src };
     const token = jwt.sign(payload, getJwtSecret(), { expiresIn: '12h' });
