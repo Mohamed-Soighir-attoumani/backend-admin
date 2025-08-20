@@ -20,13 +20,28 @@ const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/backen
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN || null;
 const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || '*';
 
-// CORS global : reflète automatiquement les headers demandés (évite l'erreur cache-control)
+/* ───────────── CORS ─────────────
+   - Autorise Authorization & Cache-Control
+   - Préflight qui reflète les headers demandés par le navigateur
+*/
 app.use(cors({
-  origin: FRONTEND_ORIGIN,
+  origin: FRONTEND_ORIGIN === '*' ? true : FRONTEND_ORIGIN,
   credentials: true,
-  methods: ['GET','POST','PUT','PATCH','DELETE','OPTIONS'],
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'Cache-Control', 'X-Requested-With'],
 }));
-app.options('*', cors());
+
+app.options('*', (req, res) => {
+  res.header('Access-Control-Allow-Origin', req.headers.origin || FRONTEND_ORIGIN || '*');
+  res.header('Access-Control-Allow-Credentials', 'true');
+  res.header('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
+  // Reflète la liste exacte demandée par le navigateur pour éviter les 4xx préflight
+  res.header(
+    'Access-Control-Allow-Headers',
+    req.headers['access-control-request-headers'] || 'Content-Type, Authorization, Cache-Control, X-Requested-With'
+  );
+  return res.sendStatus(204);
+});
 
 // Body & static
 app.use(express.json());
@@ -55,11 +70,8 @@ const authRoutes          = require('./routes/auth');
 const projectRoutes       = require('./routes/projects');
 const deviceRoutes        = require('./routes/devices');
 const userRoutes          = require('./routes/userRoutes');
-const debugRoutes = require('./routes/debug');
-
-// IMPORTANT: routeur dédié change-password monté sur le chemin final
-const changePasswordRoute = require('./routes/changePassword');
-
+const debugRoutes         = require('./routes/debug');
+const changePasswordRoute = require('./routes/changePassword'); // ← routeur dédié
 const meRoute             = require('./routes/me');
 
 /* ───────────── Montage des routes ───────────── */
@@ -73,12 +85,14 @@ app.use('/api', authRoutes);
 app.use('/api', userRoutes);
 app.use('/api', debugRoutes);
 
-// Monte /api/change-password ; à l'intérieur les routes sont '/'
-app.use('/api/change-password',
-  (req, _res, next) => { console.log('[HIT] /api/change-password', req.method); next(); },
+// Monte /api/change-password ; à l'intérieur, les chemins sont '/' et 'POST /'
+app.use(
+  '/api/change-password',
+  (req, _res, next) => { console.log('[HIT] /api/change-password', req.method, req.path || '/'); next(); },
   changePasswordRoute
 );
 
+// /api/me (profil connecté)
 app.use('/api', meRoute);
 
 // Accueil
