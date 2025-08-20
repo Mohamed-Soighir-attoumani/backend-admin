@@ -1,3 +1,4 @@
+// backend/routes/me.js
 const express = require('express');
 const mongoose = require('mongoose');
 const auth = require('../middleware/authMiddleware');
@@ -13,19 +14,14 @@ router.get('/me', auth, async (req, res) => {
   try {
     const { id, email } = req.user || {};
     let doc = null;
-    // 1) par id
+
     if (id && isValidObjectId(id)) {
       doc = await User.findById(id).select('email role name communeName photo');
-      if (!doc && Admin) {
-        doc = await Admin.findById(id).select('email role name communeName photo');
-      }
+      if (!doc && Admin) doc = await Admin.findById(id).select('email role name communeName photo');
     }
-    // 2) fallback par email
     if (!doc && email) {
       doc = await User.findOne({ email }).select('email role name communeName photo');
-      if (!doc && Admin) {
-        doc = await Admin.findOne({ email }).select('email role name communeName photo');
-      }
+      if (!doc && Admin) doc = await Admin.findOne({ email }).select('email role name communeName photo');
     }
 
     if (!doc) return res.status(404).json({ message: 'Utilisateur non trouvé' });
