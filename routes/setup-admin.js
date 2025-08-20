@@ -10,20 +10,18 @@ const router = express.Router();
 
 /**
  * GET /api/setup-admin
- * - Assure un admin dans User ET (si modèle présent) dans Admin (upsert, sans écraser un mot de passe existant).
- * - Remplit optionnellement name et communeName à partir des variables d'env.
- * - En cas d'erreur, renvoie name/code/message (sans secrets) pour diagnostic.
+ * - Assure un admin (User) et (si modèle présent) un Admin.
+ * - N’écrase pas un mot de passe existant.
+ * - Remplit éventuellement name/communeName via ADMIN_NAME / ADMIN_COMMUNE.
  */
 router.get('/setup-admin', async (_req, res) => {
   try {
     const email = process.env.ADMIN_EMAIL || 'admin@mairie.fr';
     const plain = process.env.ADMIN_PASSWORD || 'ChangeMoi!2025';
-
-    // Champs d'affichage optionnels
     const adminName = process.env.ADMIN_NAME || 'Administrateur';
-    const adminCommune = process.env.ADMIN_COMMUNE || ''; // ex. "Mairie de Dembeni"
+    const adminCommune = process.env.ADMIN_COMMUNE || '';
 
-    // ───────────────────────── USER ─────────────────────────
+    // USER
     let user = await User.findOne({ email }).select('_id email role name communeName');
     if (!user) {
       const hash = await bcrypt.hash(plain, 10);
@@ -34,7 +32,6 @@ router.get('/setup-admin', async (_req, res) => {
       );
       user = await User.findOne({ email }).select('_id email role name communeName');
     } else {
-      // s’assure du rôle + renseigne name/communeName si vides
       let changed = false;
       if (user.role !== 'admin') { user.role = 'admin'; changed = true; }
       if (!user.name && adminName) { user.name = adminName; changed = true; }
@@ -42,7 +39,7 @@ router.get('/setup-admin', async (_req, res) => {
       if (changed) await user.save();
     }
 
-    // ───────────────────────── ADMIN (si modèle existant) ─────────────────────────
+    // ADMIN (si présent)
     let admin = null;
     if (Admin) {
       admin = await Admin.findOne({ email }).select('_id email role name communeName');
