@@ -3,72 +3,67 @@ const express = require('express');
 const bcrypt = require('bcryptjs');
 const User = require('../models/User');
 
-let Admin = null;
-try { Admin = require('../models/Admin'); } catch (_) {}
-
 const router = express.Router();
 
 /**
  * GET /api/setup-admin
- * - Crée/assure un superadmin par défaut (ou admin selon vars env).
- * Vars: ADMIN_EMAIL, ADMIN_PASSWORD, ADMIN_NAME, ADMIN_COMMUNE_ID, ADMIN_COMMUNE
+ * - Assure l’existence d’un superadmin (via SUPERADMIN_EMAIL/PASSWORD) + d’un admin “classique” (via ADMIN_EMAIL/PASSWORD) si tu veux.
+ * - Ne remplace JAMAIS un mot de passe existant.
  */
-router.get('/setup-admin', async (_req, res) => {
+router.get('/setup-admin', async (req, res) => {
   try {
-    const email = process.env.ADMIN_EMAIL || 'admin@mairie.fr';
-    const plain = process.env.ADMIN_PASSWORD || 'ChangeMoi!2025';
-    const name = process.env.ADMIN_NAME || 'Super Admin';
-    const communeId = process.env.ADMIN_COMMUNE_ID || '';
-    const communeName = process.env.ADMIN_COMMUNE || '';
+    // --- SUPERADMIN ---
+    const superEmail = process.env.SUPERADMIN_EMAIL || 'superadmin@mairie.fr';
+    const superPlain = process.env.SUPERADMIN_PASSWORD || 'ChangeMoi!2025';
 
-    // Superadmin de démarrage
-    let user = await User.findOne({ email }).select('_id email role');
-    if (!user) {
-      const hash = await bcrypt.hash(plain, 10);
-      user = await User.create({
-        email,
-        password: hash,
-        role: 'superadmin',
-        name,
-        communeId,
-        communeName,
-      });
-    } else if (user.role !== 'superadmin') {
-      user.role = 'superadmin';
-      await user.save();
+    let superU = await User.findOne({ email: superEmail }).select('_id email role');
+    if (!superU) {
+      const hash = await bcrypt.hash(superPlain, 10);
+      await User.updateOne(
+        { email: superEmail },
+        { $setOnInsert: { email: superEmail, password: hash, role: 'superadmin', name: 'Super Admin' } },
+        { upsert: true }
+      );
+      superU = await User.findOne({ email: superEmail }).select('_id email role');
+    } else if (superU.role !== 'superadmin') {
+      superU.role = 'superadmin';
+      await superU.save();
     }
 
-    // miroir dans Admin si modèle présent
-    let admin = null;
-    if (Admin) {
-      admin = await Admin.findOne({ email }).select('_id email role');
-      if (!admin) {
-        const hash = await bcrypt.hash(plain, 10);
-        admin = await Admin.create({
-          email,
-          password: hash,
-          role: 'superadmin',
-          name,
-          communeId,
-          communeName,
-        });
-      } else if (admin.role !== 'superadmin') {
-        admin.role = 'superadmin';
-        await admin.save();
-      }
+    // --- (Optionnel) ADMIN de base ---
+    const adminEmail = process.env.ADMIN_EMAIL || 'admin@mairie.fr';
+    const adminPlain = process.env.ADMIN_PASSWORD || 'ChangeMoi!2025';
+
+    let adminU = await User.findOne({ email: adminEmail }).select('_id email role');
+    if (!adminU) {
+      const hash = await bcrypt.hash(adminPlain, 10);
+      await User.updateOne(
+        { email: adminEmail },
+        { $setOnInsert: { email: adminEmail, password: hash, role: 'admin', name: 'Administrateur' } },
+        { upsert: true }
+      );
+      adminU = await User.findOne({ email: adminEmail }).select('_id email role');
+    } else if (adminU.role !== 'admin') {
+      adminU.role = 'admin';
+      await adminU.save();
     }
 
     return res.json({
       ok: true,
       ensured: {
-        user: user ? { id: user._id, email: user.email, role: user.role } : null,
-        admin: admin ? { id: admin._id, email: admin.email, role: admin.role } : null,
+        superadmin: superU ? { id: superU._id, email: superU.email, role: superU.role } : null,
+        admin: adminU ? { id: adminU._id, email: adminU.email, role: adminU.role } : null,
       },
-      hint: 'Superadmin prêt. Utilise /api/admins (superadmin) pour gérer les admins de communes.',
+      hint: 'Connecte-toi avec SUPERADMIN_EMAIL/SUPERADMIN_PASSWORD pour voir le menu superadmin.',
     });
   } catch (e) {
     console.error('❌ setup-admin error:', e);
-    return res.status(500).json({ ok: false, message: 'Erreur interne du serveur' });
+    return res.status(500).json({
+      ok: false,
+      name: e.name,
+      code: e.code || null,
+      message: e.message,
+    });
   }
 });
 
