@@ -1,3 +1,4 @@
+// backend/server.js
 require('dotenv').config();
 
 const express = require('express');
@@ -13,14 +14,14 @@ const runBackup = require('./scripts/backup');
 
 const app = express();
 
-// ENV
+/* ===================== ENV ===================== */
 const PORT = process.env.PORT || 4000;
 const HOST = process.env.HOST || '0.0.0.0';
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/backend_admin';
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN || null;
 const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || '*';
 
-/* ───────────── CORS ─────────────
+/* ===================== CORS =====================
    - Autorise Authorization & Cache-Control
    - Préflight qui reflète les headers demandés par le navigateur
 */
@@ -43,14 +44,14 @@ app.options('*', (req, res) => {
   return res.sendStatus(204);
 });
 
-// Body & static
+/* ===================== Body & Static ===================== */
 app.use(express.json());
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
-// Logs HTTP
+/* ===================== Logs HTTP ===================== */
 app.use(morgan('combined', { stream: { write: msg => logger.info(msg.trim()) } }));
 
-// Prometheus
+/* ===================== Prometheus ===================== */
 app.use(promBundle({
   metricsPath: '/metrics',
   includeMethod: true,
@@ -58,47 +59,52 @@ app.use(promBundle({
   promClient: { collectDefaultMetrics: { labels: { app: 'securidem-backend' } } },
 }));
 
-// Health
+/* ===================== Health ===================== */
 app.get('/api/health', (_, res) => res.json({ status: 'ok', timestamp: Date.now() }));
 
-/* ───────────── Import des routes ───────────── */
+/* ===================== Import des routes ===================== */
 const setupAdminRoute     = require('./routes/setup-admin');
+const authRoutes          = require('./routes/auth');
+const meRoute             = require('./routes/me');
+const adminsRoutes        = require('./routes/admins');           // ⬅ multi-communes (liste/fiche admin)
+const changePasswordRoute = require('./routes/changePassword');   // ⬅ change password
+
+// Tes autres routes applicatives
 const incidentRoutes      = require('./routes/incidents');
 const articleRoutes       = require('./routes/articles');
 const notificationRoutes  = require('./routes/notifications');
-const authRoutes          = require('./routes/auth');
 const projectRoutes       = require('./routes/projects');
 const deviceRoutes        = require('./routes/devices');
 const userRoutes          = require('./routes/userRoutes');
 const debugRoutes         = require('./routes/debug');
-const changePasswordRoute = require('./routes/changePassword'); // ← routeur dédié
-const meRoute             = require('./routes/me');
 
-/* ───────────── Montage des routes ───────────── */
+/* ===================== Montage des routes ===================== */
+// Auth / profil / admin management
 app.use('/api', setupAdminRoute);
-app.use('/api/incidents', incidentRoutes);
-app.use('/api/articles', articleRoutes);
-app.use('/api/notifications', notificationRoutes);
-app.use('/api/projects', projectRoutes);
-app.use('/api/devices', deviceRoutes);
 app.use('/api', authRoutes);
-app.use('/api', userRoutes);
-app.use('/api', debugRoutes);
+app.use('/api', meRoute);
+app.use('/api', adminsRoutes);
 
-// Monte /api/change-password ; à l'intérieur, les chemins sont '/' et 'POST /'
+// Change password : monté sur le chemin final
 app.use(
   '/api/change-password',
   (req, _res, next) => { console.log('[HIT] /api/change-password', req.method, req.path || '/'); next(); },
   changePasswordRoute
 );
 
-// /api/me (profil connecté)
-app.use('/api', meRoute);
+// Autres domaines (incidents, etc.)
+app.use('/api/incidents', incidentRoutes);
+app.use('/api/articles', articleRoutes);
+app.use('/api/notifications', notificationRoutes);
+app.use('/api/projects', projectRoutes);
+app.use('/api/devices', deviceRoutes);
+app.use('/api', userRoutes);
+app.use('/api', debugRoutes);
 
-// Accueil
+/* ===================== Accueil ===================== */
 app.get('/', (_, res) => res.send('API SecuriDem opérationnelle ✅'));
 
-// CRON backup
+/* ===================== CRON backup ===================== */
 cron.schedule('0 3 * * *', async () => {
   logger.info('Lancement sauvegarde quotidienne');
   try {
@@ -109,16 +115,16 @@ cron.schedule('0 3 * * *', async () => {
   }
 });
 
-// Handler d’erreurs
+/* ===================== Handler d’erreurs ===================== */
 app.use((err, req, res, _next) => {
   logger.error('Erreur serveur 🧨', { error: err.stack });
   res.status(500).json({ message: 'Erreur interne du serveur' });
 });
 
-// 404 API – à la fin
+/* ===================== 404 API – à la fin ===================== */
 app.use('/api/*', (_, res) => res.status(404).json({ message: 'Route API introuvable ❌' }));
 
-// DB + serveur
+/* ===================== DB + serveur ===================== */
 mongoose
   .connect(MONGODB_URI, { useNewUrlParser: true, useUnifiedTopology: true })
   .then(() => {
