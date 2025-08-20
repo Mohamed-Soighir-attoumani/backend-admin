@@ -11,10 +11,10 @@ try { Admin = require('../models/Admin'); } catch (_) {}
 const router = express.Router();
 const isValidObjectId = (id) => mongoose.Types.ObjectId.isValid(id || '');
 
-// --------- CORS + Ping ----------
+// ====== CORS + Ping ======
 router.options('/', (req, res) => {
   res.set('Access-Control-Allow-Origin', req.headers.origin || '*');
-  res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization, Cache-Control');
+  res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization, Cache-Control, X-Requested-With');
   res.set('Access-Control-Allow-Methods', 'POST, OPTIONS, GET');
   return res.sendStatus(204);
 });
@@ -27,12 +27,12 @@ router.get('/', (_req, res) => {
   });
 });
 
-// ---------- DEBUG 1 : qui suis-je ? ----------
+// ====== DEBUG : qui suis-je ? ======
 router.get('/whoami', auth, (req, res) => {
   return res.json({ userFromToken: req.user });
 });
 
-// ---------- DEBUG 2 : que trouve-t-on en DB ? ----------
+// ====== DEBUG : que voit-on en base ? ======
 router.get('/debug', auth, async (req, res) => {
   try {
     const u = req.user || {};
@@ -56,7 +56,9 @@ router.get('/debug', auth, async (req, res) => {
       }
     }
 
-    if (!doc) return res.status(404).json({ ok:false, code:'E_USER_NOT_FOUND', message:'Utilisateur non trouvé', tokenUser: u });
+    if (!doc) {
+      return res.status(404).json({ ok:false, code:'E_USER_NOT_FOUND', message:'Utilisateur non trouvé', tokenUser: u });
+    }
 
     return res.json({
       ok: true,
@@ -64,7 +66,7 @@ router.get('/debug', auth, async (req, res) => {
       user: { id: doc._id, email: doc.email, role: doc.role },
       hasPassword: !!doc.password,
       passwordType: typeof doc.password,
-      passwordPreview: typeof doc.password === 'string' ? doc.password.slice(0, 10) + '…' : null
+      passwordPreview: typeof doc.password === 'string' ? (doc.password.slice(0, 12) + '…') : null
     });
   } catch (e) {
     console.error('❌ GET /change-password/debug:', e);
@@ -72,7 +74,7 @@ router.get('/debug', auth, async (req, res) => {
   }
 });
 
-// ---------- Changement de mot de passe ----------
+// ====== Changement de mot de passe (robuste & verbeux) ======
 router.post('/', auth, async (req, res) => {
   const fail = (code, message, http = 400, extra = {}) =>
     res.status(http).json({ ok: false, code, message, ...extra });
@@ -83,11 +85,11 @@ router.post('/', auth, async (req, res) => {
       return fail('E_MISSING_FIELDS', 'Champs requis manquants: oldPassword, newPassword');
     }
 
-    const u = req.user || {}; // { id, email, role, ... }
+    const u = req.user || {}; // { id, email, role, src, ... }
     let doc = null;
     let source = null;
 
-    // 1) by id
+    // 1) recherche par id
     if (u.id && isValidObjectId(u.id)) {
       try {
         doc = await User.findById(u.id).select('+password email role');
@@ -98,10 +100,11 @@ router.post('/', auth, async (req, res) => {
         }
       } catch (e) {
         console.error('🔎 findById error:', e);
-        return fail('E_DB', 'Erreur de lecture (findById)', 500);
+        return fail('E_DB_FIND_BY_ID', 'Erreur de lecture (findById)', 500);
       }
     }
-    // 2) fallback by email
+
+    // 2) fallback par email
     if (!doc && u.email) {
       try {
         doc = await User.findOne({ email: u.email }).select('+password email role');
@@ -112,27 +115,27 @@ router.post('/', auth, async (req, res) => {
         }
       } catch (e) {
         console.error('🔎 findOne error:', e);
-        return fail('E_DB', 'Erreur de lecture (findOne)', 500);
+        return fail('E_DB_FIND_ONE', 'Erreur de lecture (findOne)', 500);
       }
     }
 
     if (!doc) {
+      console.error('⛔ Utilisateur introuvable pour token:', u);
       return fail('E_USER_NOT_FOUND', 'Utilisateur non trouvé', 404, { tokenUser: u });
     }
 
-    if (!doc.password || typeof doc.password !== 'string') {
-      console.error('⛔ password manquant ou invalide', { source, typeofPassword: typeof doc.password });
+    if (typeof doc.password !== 'string' || !doc.password.length) {
+      console.error('⛔ password manquant/invalid', { source, typeofPassword: typeof doc.password });
       return fail('E_NO_PASSWORD_SELECTED', 'Mot de passe non sélectionné depuis la base', 500, { source });
     }
 
-    let ok;
+    let ok = false;
     try {
       ok = await bcrypt.compare(oldPassword, doc.password);
     } catch (e) {
       console.error('⛔ bcrypt.compare error:', e);
-      return fail('E_BCRYPT', 'Erreur de comparaison de mot de passe', 500, { source });
+      return fail('E_BCRYPT_COMPARE', 'Erreur comparaison de mot de passe', 500, { source });
     }
-
     if (!ok) return fail('E_OLD_PASSWORD', 'Ancien mot de passe incorrect', 400, { source });
 
     try {
@@ -145,12 +148,8 @@ router.post('/', auth, async (req, res) => {
 
     return res.json({ ok: true, message: 'Mot de passe mis à jour avec succès', source });
   } catch (e) {
-    console.error('❌ POST /change-password failed (outer):', e);
-    return res.status(500).json({
-      ok: false,
-      code: 'E_INTERNAL',
-      message: 'Erreur interne du serveur',
-    });
+    console.error('❌ POST /change-password failed:', e);
+    return res.status(500).json({ ok: false, code: 'E_INTERNAL', message: 'Erreur interne du serveur' });
   }
 });
 
