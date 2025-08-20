@@ -18,41 +18,36 @@ function getJwtSecret() {
 /**
  * POST /api/login
  * Body: { email, password }
- * - Cherche d’abord dans User, puis Admin.
- * - Signe un JWT { id, email, role, src }.
+ * - Cherche dans User puis Admin
+ * - Signe un JWT avec id, email, role, communeId, communeName
  */
 router.post('/login', async (req, res) => {
   try {
-    const { email, password } = req.body || {};
+    const { email, password } = (req.body || {});
     if (!email || !password) {
       return res.status(400).json({ message: 'Email et mot de passe requis' });
     }
 
-    let doc = await User.findOne({ email }).select('+password email role');
+    let doc = await User.findOne({ email }).select('+password email role communeId communeName name photo');
     let src = 'User';
-
     if (!doc && Admin) {
-      doc = await Admin.findOne({ email }).select('+password email role');
+      doc = await Admin.findOne({ email }).select('+password email role communeId communeName name photo');
       if (doc) src = 'Admin';
     }
 
-    if (!doc) {
-      return res.status(401).json({ message: 'Identifiants invalides' });
-    }
-
-    if (!doc.password) {
-      // si le champ password n’est pas sélectionné pour une raison X
-      const errmsg = `Mot de passe non disponible pour ${src}. Vérifie select('+password') et le schema.`;
-      console.error('❌ /login:', errmsg);
-      return res.status(500).json({ message: 'Erreur interne du serveur (password non sélectionné)' });
-    }
+    if (!doc) return res.status(401).json({ message: 'Identifiants invalides' });
 
     const ok = await bcrypt.compare(password, doc.password);
-    if (!ok) {
-      return res.status(401).json({ message: 'Identifiants invalides' });
-    }
+    if (!ok) return res.status(401).json({ message: 'Identifiants invalides' });
 
-    const payload = { id: doc._id.toString(), email: doc.email, role: doc.role || 'admin', src };
+    const payload = {
+      id: doc._id.toString(),
+      email: doc.email,
+      role: doc.role || 'admin',
+      communeId: doc.communeId || '',
+      communeName: doc.communeName || '',
+      src,
+    };
     const token = jwt.sign(payload, getJwtSecret(), { expiresIn: '12h' });
 
     return res.json({ token });
