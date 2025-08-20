@@ -3,7 +3,7 @@ const express = require('express');
 const bcrypt = require('bcryptjs');
 const mongoose = require('mongoose');
 const User = require('../models/User');
-const authMiddleware = require('../middleware/authMiddleware');
+const auth = require('../middleware/authMiddleware');
 
 let Admin = null;
 try { Admin = require('../models/Admin'); } catch (_) {}
@@ -11,52 +11,42 @@ try { Admin = require('../models/Admin'); } catch (_) {}
 const router = express.Router();
 const isValidObjectId = (id) => mongoose.Types.ObjectId.isValid(id || '');
 
-// Préflight (OPTIONS)
+// Préflight + Ping (debug)
 router.options('/', (req, res) => {
   res.set('Access-Control-Allow-Origin', req.headers.origin || '*');
-  res.set('Access-Control-Allow-Headers', req.headers['access-control-request-headers'] || 'Content-Type, Authorization');
+  res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization, Cache-Control');
   res.set('Access-Control-Allow-Methods', 'POST, OPTIONS, GET');
   return res.sendStatus(204);
 });
 
-// GET aide
 router.get('/', (_req, res) => {
-  return res.json({
+  res.json({
     ok: true,
     route: '/api/change-password',
     howTo: 'POST /api/change-password avec Authorization: Bearer <token> et body { oldPassword, newPassword }'
   });
 });
 
-// POST réel
-router.post('/', authMiddleware, async (req, res) => {
+// POST /api/change-password
+router.post('/', auth, async (req, res) => {
   try {
     const { oldPassword, newPassword } = req.body || {};
-    const authUser = req.user || {};
-
     if (!oldPassword || !newPassword) {
       return res.status(400).json({ message: 'Champs requis manquants' });
     }
 
+    const u = req.user || {}; // { id, email, role, ... }
     let doc = null;
 
     // 1) par id
-    if (authUser.id && isValidObjectId(authUser.id)) {
-      doc = await User.findById(authUser.id).select('+password email role');
-      if (!doc && Admin) doc = await Admin.findById(authUser.id).select('+password email role');
+    if (u.id && isValidObjectId(u.id)) {
+      doc = await User.findById(u.id).select('+password email role');
+      if (!doc && Admin) doc = await Admin.findById(u.id).select('+password email role');
     }
-
-    // 2) par email
-    if (!doc && authUser.email) {
-      doc = await User.findOne({ email: authUser.email }).select('+password email role');
-      if (!doc && Admin) doc = await Admin.findOne({ email: authUser.email }).select('+password email role');
-    }
-
-    // 3) legacy
-    if (!doc && authUser.username === 'admin') {
-      const legacyEmail = process.env.ADMIN_EMAIL || 'admin@mairie.fr';
-      doc = await User.findOne({ email: legacyEmail }).select('+password email role');
-      if (!doc && Admin) doc = await Admin.findOne({ email: legacyEmail }).select('+password email role');
+    // 2) fallback par email
+    if (!doc && u.email) {
+      doc = await User.findOne({ email: u.email }).select('+password email role');
+      if (!doc && Admin) doc = await Admin.findOne({ email: u.email }).select('+password email role');
     }
 
     if (!doc) return res.status(404).json({ message: 'Utilisateur non trouvé' });
@@ -68,8 +58,8 @@ router.post('/', authMiddleware, async (req, res) => {
     await doc.save();
 
     return res.json({ message: 'Mot de passe mis à jour avec succès' });
-  } catch (err) {
-    console.error('❌ /change-password:', err);
+  } catch (e) {
+    console.error('❌ POST /change-password:', e);
     return res.status(500).json({ message: 'Erreur interne du serveur' });
   }
 });
