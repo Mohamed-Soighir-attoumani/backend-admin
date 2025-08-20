@@ -11,7 +11,7 @@ try { Admin = require('../models/Admin'); } catch (_) {}
 const router = express.Router();
 const isValidObjectId = (id) => mongoose.Types.ObjectId.isValid(id || '');
 
-// --------- Aide CORS + Ping ----------
+// --------- CORS + Ping ----------
 router.options('/', (req, res) => {
   res.set('Access-Control-Allow-Origin', req.headers.origin || '*');
   res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization, Cache-Control');
@@ -27,10 +27,49 @@ router.get('/', (_req, res) => {
   });
 });
 
-// ---------- DEBUG: qui suis-je ? ----------
+// ---------- DEBUG 1 : qui suis-je ? ----------
 router.get('/whoami', auth, (req, res) => {
-  // Te permet de vérifier ce que contient le token côté serveur
   return res.json({ userFromToken: req.user });
+});
+
+// ---------- DEBUG 2 : que trouve-t-on en DB ? ----------
+router.get('/debug', auth, async (req, res) => {
+  try {
+    const u = req.user || {};
+    let doc = null;
+    let source = null;
+
+    if (u.id && isValidObjectId(u.id)) {
+      doc = await User.findById(u.id).select('+password email role');
+      source = doc ? 'User' : source;
+      if (!doc && Admin) {
+        doc = await Admin.findById(u.id).select('+password email role');
+        source = doc ? 'Admin' : source;
+      }
+    }
+    if (!doc && u.email) {
+      doc = await User.findOne({ email: u.email }).select('+password email role');
+      source = doc ? 'User' : source;
+      if (!doc && Admin) {
+        doc = await Admin.findOne({ email: u.email }).select('+password email role');
+        source = doc ? 'Admin' : source;
+      }
+    }
+
+    if (!doc) return res.status(404).json({ ok:false, code:'E_USER_NOT_FOUND', message:'Utilisateur non trouvé', tokenUser: u });
+
+    return res.json({
+      ok: true,
+      source,
+      user: { id: doc._id, email: doc.email, role: doc.role },
+      hasPassword: !!doc.password,
+      passwordType: typeof doc.password,
+      passwordPreview: typeof doc.password === 'string' ? doc.password.slice(0, 10) + '…' : null
+    });
+  } catch (e) {
+    console.error('❌ GET /change-password/debug:', e);
+    return res.status(500).json({ ok:false, code:'E_INTERNAL', message:'Erreur interne du serveur' });
+  }
 });
 
 // ---------- Changement de mot de passe ----------
@@ -50,44 +89,63 @@ router.post('/', auth, async (req, res) => {
 
     // 1) by id
     if (u.id && isValidObjectId(u.id)) {
-      doc = await User.findById(u.id).select('+password email role');
-      source = doc ? 'User' : source;
-      if (!doc && Admin) {
-        doc = await Admin.findById(u.id).select('+password email role');
-        source = doc ? 'Admin' : source;
+      try {
+        doc = await User.findById(u.id).select('+password email role');
+        source = doc ? 'User' : source;
+        if (!doc && Admin) {
+          doc = await Admin.findById(u.id).select('+password email role');
+          source = doc ? 'Admin' : source;
+        }
+      } catch (e) {
+        console.error('🔎 findById error:', e);
+        return fail('E_DB', 'Erreur de lecture (findById)', 500);
       }
     }
     // 2) fallback by email
     if (!doc && u.email) {
-      doc = await User.findOne({ email: u.email }).select('+password email role');
-      source = doc ? 'User' : source;
-      if (!doc && Admin) {
-        doc = await Admin.findOne({ email: u.email }).select('+password email role');
-        source = doc ? 'Admin' : source;
+      try {
+        doc = await User.findOne({ email: u.email }).select('+password email role');
+        source = doc ? 'User' : source;
+        if (!doc && Admin) {
+          doc = await Admin.findOne({ email: u.email }).select('+password email role');
+          source = doc ? 'Admin' : source;
+        }
+      } catch (e) {
+        console.error('🔎 findOne error:', e);
+        return fail('E_DB', 'Erreur de lecture (findOne)', 500);
       }
     }
 
     if (!doc) {
-      // On renvoie aussi ce qu'il y a dans le token pour t'aider à diagnostiquer
       return fail('E_USER_NOT_FOUND', 'Utilisateur non trouvé', 404, { tokenUser: u });
     }
 
-    if (!doc.password) {
-      // Cas rare: le champ password n'a pas été sélectionné
+    if (!doc.password || typeof doc.password !== 'string') {
+      console.error('⛔ password manquant ou invalide', { source, typeofPassword: typeof doc.password });
       return fail('E_NO_PASSWORD_SELECTED', 'Mot de passe non sélectionné depuis la base', 500, { source });
     }
 
-    const ok = await bcrypt.compare(oldPassword, doc.password);
-    if (!ok) {
-      return fail('E_OLD_PASSWORD', 'Ancien mot de passe incorrect', 400, { source });
+    let ok;
+    try {
+      ok = await bcrypt.compare(oldPassword, doc.password);
+    } catch (e) {
+      console.error('⛔ bcrypt.compare error:', e);
+      return fail('E_BCRYPT', 'Erreur de comparaison de mot de passe', 500, { source });
     }
 
-    doc.password = await bcrypt.hash(newPassword, 10);
-    await doc.save();
+    if (!ok) return fail('E_OLD_PASSWORD', 'Ancien mot de passe incorrect', 400, { source });
+
+    try {
+      doc.password = await bcrypt.hash(newPassword, 10);
+      await doc.save();
+    } catch (e) {
+      console.error('⛔ save error:', e);
+      return fail('E_SAVE', 'Erreur lors de la sauvegarde du nouveau mot de passe', 500, { source });
+    }
 
     return res.json({ ok: true, message: 'Mot de passe mis à jour avec succès', source });
   } catch (e) {
-    console.error('❌ POST /change-password failed:', e);
+    console.error('❌ POST /change-password failed (outer):', e);
     return res.status(500).json({
       ok: false,
       code: 'E_INTERNAL',
