@@ -1,13 +1,22 @@
+// backend/models/User.js
 const mongoose = require('mongoose');
 
 const userSchema = new mongoose.Schema(
   {
-    email:       { type: String, required: true, unique: true, index: true },
-    password:    { type: String, required: true, select: false },
-    role:        { type: String, default: 'admin' },
-    name:        { type: String, default: '' },         // ⬅️ nom affichable
-    communeName: { type: String, default: '' },         // ⬅️ nom de la commune (optionnel)
-    photo:       { type: String, default: '' },         // ⬅️ avatar (optionnel)
+    // Identité
+    name: { type: String, default: '' },
+    email: { type: String, required: true, unique: true, index: true },
+
+    // Auth
+    password: { type: String, required: true, select: false }, // hash bcrypt
+    role: { type: String, enum: ['admin', 'superadmin'], default: 'admin', index: true },
+
+    // Rattachement "tenant" (commune)
+    communeId: { type: String, default: '', index: true },     // ex: ID interne ou code INSEE
+    communeName: { type: String, default: '' },
+
+    // UI
+    photo: { type: String, default: '' },
   },
   { timestamps: true }
 );
