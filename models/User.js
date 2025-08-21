@@ -1,22 +1,22 @@
-// backend/models/User.js
 const mongoose = require('mongoose');
 
 const userSchema = new mongoose.Schema(
   {
-    // Identité
     name: { type: String, default: '' },
-    email: { type: String, required: true, unique: true, index: true },
-
-    // Auth
-    password: { type: String, required: true, select: false }, // hash bcrypt
+    email: { type: String, required: true, unique: true },
+    password: { type: String, required: true },
     role: { type: String, enum: ['admin', 'superadmin'], default: 'admin', index: true },
 
-    // Rattachement "tenant" (commune)
-    communeId: { type: String, default: '', index: true },     // ex: ID interne ou code INSEE
+    // Multi-communes
+    communeId: { type: String, default: '', index: true },
     communeName: { type: String, default: '' },
 
     // UI
-    photo: { type: String, default: '' }, // URL publique vers /uploads/avatars/...
+    photo: { type: String, default: '' },
+
+    // Super-pouvoirs
+    isActive: { type: Boolean, default: true, index: true }, // si false → refus d’accès
+    tokenVersion: { type: Number, default: 0 }, // pour invalider tous les jetons
   },
   { timestamps: true }
 );
