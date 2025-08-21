@@ -1,59 +1,36 @@
-// backend/routes/auth.js
 const express = require('express');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
 
-let Admin = null;
-try { Admin = require('../models/Admin'); } catch (_) {}
-
 const router = express.Router();
 
-function getJwtSecret() {
-  const s = process.env.JWT_SECRET;
-  if (!s) throw new Error('JWT_SECRET non défini côté serveur');
-  return s;
-}
-
-/**
- * POST /api/login
- * Body: { email, password }
- * - Cherche dans User puis Admin
- * - Signe un JWT avec id, email, role, communeId, communeName
- */
 router.post('/login', async (req, res) => {
+  const { email, password } = req.body;
+
   try {
-    const { email, password } = (req.body || {});
-    if (!email || !password) {
-      return res.status(400).json({ message: 'Email et mot de passe requis' });
-    }
+    const doc = await User.findOne({ email });
+    if (!doc) return res.status(400).json({ message: 'Identifiants invalides' });
 
-    let doc = await User.findOne({ email }).select('+password email role communeId communeName name photo');
-    let src = 'User';
-    if (!doc && Admin) {
-      doc = await Admin.findOne({ email }).select('+password email role communeId communeName name photo');
-      if (doc) src = 'Admin';
-    }
+    const match = await bcrypt.compare(password, doc.password);
+    if (!match) return res.status(400).json({ message: 'Identifiants invalides' });
 
-    if (!doc) return res.status(401).json({ message: 'Identifiants invalides' });
-
-    const ok = await bcrypt.compare(password, doc.password);
-    if (!ok) return res.status(401).json({ message: 'Identifiants invalides' });
+    if (!doc.isActive) return res.status(403).json({ message: 'Compte désactivé' });
 
     const payload = {
       id: doc._id.toString(),
       email: doc.email,
-      role: doc.role || 'admin',
-      communeId: doc.communeId || '',
-      communeName: doc.communeName || '',
-      src,
+      role: doc.role,
+      communeId: doc.communeId,
+      communeName: doc.communeName,
+      tokenVersion: doc.tokenVersion,
     };
-    const token = jwt.sign(payload, getJwtSecret(), { expiresIn: '12h' });
 
-    return res.json({ token });
+    const token = jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: '12h' });
+
+    res.json({ token });
   } catch (e) {
-    console.error('❌ /login:', e);
-    return res.status(500).json({ message: 'Erreur interne du serveur' });
+    res.status(500).json({ message: 'Erreur serveur' });
   }
 });
 
