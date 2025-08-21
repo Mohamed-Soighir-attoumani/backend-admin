@@ -1,6 +1,10 @@
 // backend/routes/me.js
 const express = require('express');
 const mongoose = require('mongoose');
+const fs = require('fs');
+const path = require('path');
+const multer = require('multer');
+const sharp = require('sharp'); // ✅ conversion/resize
 const auth = require('../middleware/authMiddleware');
 const User = require('../models/User');
 let Admin = null; try { Admin = require('../models/Admin'); } catch (_) {}
@@ -8,6 +12,51 @@ let Admin = null; try { Admin = require('../models/Admin'); } catch (_) {}
 const router = express.Router();
 const isValidObjectId = (id) => mongoose.Types.ObjectId.isValid(id || '');
 
+// --------- Répertoire des avatars ----------
+const AVATAR_DIR = path.join(__dirname, '..', 'uploads', 'avatars');
+fs.mkdirSync(AVATAR_DIR, { recursive: true });
+
+// --------- Multer: mémoire + filtre MIME + limite 5 Mo ----------
+const upload = multer({
+  storage: multer.memoryStorage(),
+  fileFilter: (_req, file, cb) => {
+    const ok = ['image/jpeg', 'image/png', 'image/webp'].includes(file.mimetype);
+    if (!ok) return cb(new Error('Type de fichier invalide (jpg, png, webp uniquement)'));
+    cb(null, true);
+  },
+  limits: { fileSize: 5 * 1024 * 1024 }, // 5 Mo
+});
+
+// --------- Utilitaires ----------
+function publicBaseUrl(req) {
+  // Render / reverse proxy : x-forwarded-proto est fiable
+  const proto = (req.headers['x-forwarded-proto'] || req.protocol || 'http').split(',')[0].trim();
+  const host = req.get('host');
+  return `${proto}://${host}`;
+}
+
+function localPathFromPublicUrl(url) {
+  // On ne supprime que si le fichier est bien dans /uploads/avatars
+  try {
+    const u = new URL(url);
+    if (!u.pathname.startsWith('/uploads/avatars/')) return null;
+    return path.join(__dirname, '..', u.pathname);
+  } catch {
+    return null;
+  }
+}
+
+async function deleteIfExists(filePath) {
+  if (!filePath) return;
+  try {
+    await fs.promises.unlink(filePath);
+  } catch (e) {
+    // ignore ENOENT
+    if (e.code !== 'ENOENT') console.warn('⚠️ unlink avatar:', e.message);
+  }
+}
+
+// --------- GET /api/me ----------
 router.get('/me', auth, async (req, res) => {
   try {
     const { id, email } = req.user || {};
@@ -23,7 +72,6 @@ router.get('/me', auth, async (req, res) => {
     }
 
     if (!doc) return res.status(404).json({ message: 'Utilisateur non trouvé' });
-
     return res.json({ user: doc });
   } catch (e) {
     console.error('GET /api/me error', e);
@@ -31,7 +79,7 @@ router.get('/me', auth, async (req, res) => {
   }
 });
 
-// Mise à jour de soi (champs autorisés)
+// --------- PATCH /api/me (name, communeName, photo URL manuelle) ----------
 router.patch('/me', auth, async (req, res) => {
   try {
     const updatable = ['name', 'communeName', 'photo'];
@@ -55,6 +103,62 @@ router.patch('/me', auth, async (req, res) => {
   } catch (e) {
     console.error('PATCH /api/me:', e);
     return res.status(500).json({ message: 'Erreur interne du serveur' });
+  }
+});
+
+// --------- POST /api/me/photo (multipart) ----------
+router.post('/me/photo', auth, upload.single('photo'), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ message: 'Aucun fichier envoyé' });
+
+    // 1) Normalisation de l’image: rotate → cover 512x512 → WEBP q=85
+    const filename = `${(req.user?.id || 'user')}-${Date.now()}.webp`;
+    const outPath = path.join(AVATAR_DIR, filename);
+
+    await sharp(req.file.buffer)
+      .rotate()
+      .resize(512, 512, { fit: 'cover' })
+      .toFormat('webp', { quality: 85 })
+      .toFile(outPath);
+
+    const url = `${publicBaseUrl(req)}/uploads/avatars/${filename}`;
+
+    // 2) Récupérer le user & supprimer l’ancienne photo si locale
+    const { id, email } = req.user || {};
+    let doc = null;
+
+    // On a besoin du doc actuel pour connaître l’ancienne photo
+    if (id && isValidObjectId(id)) {
+      doc = await User.findById(id).select('email role name communeId communeName photo');
+      if (!doc && Admin) doc = await Admin.findById(id).select('email role name communeId communeName photo');
+    }
+    if (!doc && email) {
+      doc = await User.findOne({ email }).select('email role name communeId communeName photo');
+      if (!doc && Admin) doc = await Admin.findOne({ email }).select('email role name communeId communeName photo');
+    }
+    if (!doc) return res.status(404).json({ message: 'Utilisateur non trouvé' });
+
+    // Supprimer l’ancienne si elle pointe vers /uploads/avatars/...
+    if (doc.photo) {
+      const localOld = localPathFromPublicUrl(doc.photo);
+      await deleteIfExists(localOld);
+    }
+
+    // 3) Mettre à jour le champ photo
+    if (doc.constructor.modelName === 'User') {
+      doc = await User.findByIdAndUpdate(doc._id, { photo: url }, { new: true, select: 'email role name communeId communeName photo' });
+    } else {
+      // fallback si modèle Admin utilisé
+      doc = await Admin.findByIdAndUpdate(doc._id, { photo: url }, { new: true, select: 'email role name communeId communeName photo' });
+    }
+
+    return res.json({ message: 'Photo mise à jour', url, user: doc });
+  } catch (e) {
+    console.error('POST /api/me/photo:', e);
+    const msg = e.message?.includes('File too large')
+      ? 'Fichier trop lourd (max 5 Mo)'
+      : (e.message || 'Erreur interne du serveur');
+    return res.status(500).json({ message: msg });
   }
 });
 
