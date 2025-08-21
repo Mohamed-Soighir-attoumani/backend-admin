@@ -16,7 +16,7 @@ const userSchema = new mongoose.Schema(
     communeName: { type: String, default: '' },
 
     // UI
-    photo: { type: String, default: '' },
+    photo: { type: String, default: '' }, // URL publique vers /uploads/avatars/...
   },
   { timestamps: true }
 );
