@@ -20,9 +20,51 @@ function requireAppKey(req, res, next) {
 // Petit log
 router.use((req, _res, next) => { console.log(`[devices] ${req.method} ${req.originalUrl}`); next(); });
 
+// --------- Utils affichage legacy ---------
+function normalizeLegacy(d) {
+  const installationId = d.installationId || d.deviceId || '';
+
+  let brand = (d.brand || '').trim();
+  let model = (d.model || '').trim();
+  let osVersion = (d.osVersion || '').trim();
+
+  // Si vide, essaie de parser l’ancien "platform"
+  // Ex 1: "Xiaomi/22120RN86G/14"
+  // Ex 2: "samsung/a05mxx/a05m:15/AP3A...:user/release-keys"
+  if ((!brand || !model || !osVersion) && d.platform) {
+    const p = String(d.platform);
+    const parts = p.split('/');
+    if (parts.length >= 3) {
+      brand ||= parts[0];
+      if (!model) {
+        model = parts[1];
+        if (model.includes(':')) model = model.split(':')[0];
+      }
+      if (!osVersion) {
+        osVersion = parts[2].includes(':') ? parts[2].split(':')[1] : parts[2];
+      }
+    }
+  }
+
+  const firstSeenAt = d.firstSeenAt || d.registeredAt || d.createdAt || null;
+  const lastSeenAt  = d.lastSeenAt  || d.updatedAt   || null;
+
+  return {
+    installationId,
+    platform: d.platform || (brand && model && osVersion ? `${brand}/${model}/${osVersion}` : ''),
+    brand,
+    model,
+    osVersion,
+    appVersion: d.appVersion || '',
+    firstSeenAt,
+    lastSeenAt,
+    communeId: d.communeId || '',
+    communeName: d.communeName || '',
+  };
+}
+
 /**
  * POST /api/devices/register  (côté app)
- * body: { installationId, platform, brand, model, osVersion, appVersion, pushToken?, userId?, communeId?, communeName? }
  */
 router.post('/register', requireAppKey, async (req, res) => {
   try {
@@ -35,26 +77,26 @@ router.post('/register', requireAppKey, async (req, res) => {
 
     const update = {
       platform: (platform || '').toLowerCase(),
-      brand: brand || '',
-      model: model || '',
-      osVersion: osVersion || '',
-      appVersion: appVersion || '',
-      pushToken: pushToken || '',
+      brand: (brand || '').trim(),
+      model: (model || '').trim(),
+      osVersion: (osVersion || '').trim(),
+      appVersion: (appVersion || '').trim(),
+      pushToken: (pushToken || '').trim(),
       lastSeenAt: new Date(),
     };
     if (userId && isObjectId(userId)) update.userId = userId;
     if (communeId)   update.communeId = String(communeId);
     if (communeName) update.communeName = String(communeName);
 
-    // ✅ Upsert en 1 seul appel (crée si n'existe pas, met à jour sinon)
     const doc = await Device.findOneAndUpdate(
       { installationId },
       { $set: update, $setOnInsert: { firstSeenAt: new Date(), installationId } },
       { upsert: true, new: true }
     );
 
-    const created = doc && doc.createdAt && (doc.createdAt.getTime() === doc.updatedAt.getTime());
-    return res.status(created ? 201 : 200).json({ ok: true, created: !!created, updated: !created });
+    // createdAt/updatedAt existent si timestamps: true sur le schema
+    const created = !!(doc.createdAt && doc.updatedAt && doc.createdAt.getTime() === doc.updatedAt.getTime());
+    return res.status(created ? 201 : 200).json({ ok: true, created, updated: !created });
   } catch (e) {
     console.error('POST /devices/register', e);
     res.status(500).json({ message: 'Erreur serveur' });
@@ -63,7 +105,6 @@ router.post('/register', requireAppKey, async (req, res) => {
 
 /**
  * POST /api/devices/ping  (côté app)
- * body: { installationId, appVersion?, osVersion?, pushToken?, brand?, model?, platform?, communeId?, communeName? }
  */
 router.post('/ping', requireAppKey, async (req, res) => {
   try {
@@ -75,7 +116,6 @@ router.post('/ping', requireAppKey, async (req, res) => {
       if (req.body[k] !== undefined && req.body[k] !== null) set[k] = String(req.body[k]);
     });
 
-    // ✅ On accepte la création via ping si register a raté (robuste)
     await Device.findOneAndUpdate(
       { installationId },
       { $set: set, $setOnInsert: { firstSeenAt: new Date(), installationId } },
@@ -91,7 +131,6 @@ router.post('/ping', requireAppKey, async (req, res) => {
 
 /**
  * GET /api/devices/count  (admin)
- * ?activeDays=30  => nombre total et actifs sur N jours
  */
 router.get('/count', auth, requireRole('admin','superadmin'), async (req, res) => {
   try {
@@ -112,7 +151,6 @@ router.get('/count', auth, requireRole('admin','superadmin'), async (req, res) =
 
 /**
  * GET /api/devices/brands  (admin)
- * Retour { items: [{ brand, count }] }
  */
 router.get('/brands', auth, requireRole('admin','superadmin'), async (_req, res) => {
   try {
@@ -129,21 +167,48 @@ router.get('/brands', auth, requireRole('admin','superadmin'), async (_req, res)
 });
 
 /**
- * GET /api/devices (admin) — liste brute (optionnel, pour DevicesTable)
+ * GET /api/devices/metrics  (admin)
+ */
+router.get('/metrics', auth, requireRole('admin','superadmin'), async (_req, res) => {
+  try {
+    const since30 = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+    const [total, active30, brands] = await Promise.all([
+      Device.countDocuments({}),
+      Device.countDocuments({ lastSeenAt: { $gte: since30 } }),
+      Device.aggregate([
+        { $group: { _id: { $ifNull: ['$brand',''] }, count: { $sum: 1 } } },
+        { $project: { _id: 0, brand: '$_id', count: 1 } },
+        { $sort: { count: -1 } },
+        { $limit: 10 },
+      ]),
+    ]);
+    res.json({ total, active30, brands });
+  } catch (e) {
+    console.error('GET /devices/metrics', e);
+    res.status(500).json({ message: 'Erreur serveur' });
+  }
+});
+
+/**
+ * GET /api/devices (admin) — liste
  */
 router.get('/', auth, requireRole('admin','superadmin'), async (req, res) => {
   try {
     const p  = Math.max(1,  parseInt(req.query.page || '1', 10));
     const ps = Math.min(100, Math.max(1, parseInt(req.query.pageSize || '50', 10)));
 
-    const list = await Device.find({})
-      .select('installationId platform brand model osVersion appVersion lastSeenAt firstSeenAt communeId communeName')
-      .sort({ lastSeenAt: -1 })
-      .skip((p-1)*ps)
-      .limit(ps)
-      .lean();
+    const [list, total] = await Promise.all([
+      Device.find({})
+        .select('installationId deviceId platform brand model osVersion appVersion lastSeenAt firstSeenAt registeredAt communeId communeName createdAt updatedAt')
+        .sort({ lastSeenAt: -1, createdAt: -1 })
+        .skip((p-1)*ps)
+        .limit(ps)
+        .lean(),
+      Device.countDocuments({}),
+    ]);
 
-    res.json({ items: list, page: p, pageSize: ps });
+    const items = list.map(normalizeLegacy);
+    res.json({ items, page: p, pageSize: ps, total });
   } catch (e) {
     console.error('GET /devices', e);
     res.status(500).json({ message: 'Erreur serveur' });
