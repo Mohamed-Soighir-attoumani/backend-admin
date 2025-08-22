@@ -4,7 +4,7 @@ const mongoose = require('mongoose');
 const fs = require('fs');
 const path = require('path');
 const multer = require('multer');
-const sharp = require('sharp'); // ✅ conversion/resize
+const sharp = require('sharp');
 const auth = require('../middleware/authMiddleware');
 const User = require('../models/User');
 let Admin = null; try { Admin = require('../models/Admin'); } catch (_) {}
@@ -16,7 +16,7 @@ const isValidObjectId = (id) => mongoose.Types.ObjectId.isValid(id || '');
 const AVATAR_DIR = path.join(__dirname, '..', 'uploads', 'avatars');
 fs.mkdirSync(AVATAR_DIR, { recursive: true });
 
-// --------- Multer: mémoire + filtre MIME + limite 5 Mo ----------
+// --------- Multer ----------
 const upload = multer({
   storage: multer.memoryStorage(),
   fileFilter: (_req, file, cb) => {
@@ -24,19 +24,16 @@ const upload = multer({
     if (!ok) return cb(new Error('Type de fichier invalide (jpg, png, webp uniquement)'));
     cb(null, true);
   },
-  limits: { fileSize: 5 * 1024 * 1024 }, // 5 Mo
+  limits: { fileSize: 5 * 1024 * 1024 },
 });
 
-// --------- Utilitaires ----------
+// --------- Utils ----------
 function publicBaseUrl(req) {
-  // Render / reverse proxy : x-forwarded-proto est fiable
   const proto = (req.headers['x-forwarded-proto'] || req.protocol || 'http').split(',')[0].trim();
   const host = req.get('host');
   return `${proto}://${host}`;
 }
-
 function localPathFromPublicUrl(url) {
-  // On ne supprime que si le fichier est bien dans /uploads/avatars
   try {
     const u = new URL(url);
     if (!u.pathname.startsWith('/uploads/avatars/')) return null;
@@ -45,15 +42,10 @@ function localPathFromPublicUrl(url) {
     return null;
   }
 }
-
 async function deleteIfExists(filePath) {
   if (!filePath) return;
-  try {
-    await fs.promises.unlink(filePath);
-  } catch (e) {
-    // ignore ENOENT
-    if (e.code !== 'ENOENT') console.warn('⚠️ unlink avatar:', e.message);
-  }
+  try { await fs.promises.unlink(filePath); }
+  catch (e) { if (e.code !== 'ENOENT') console.warn('⚠️ unlink avatar:', e.message); }
 }
 
 // --------- GET /api/me ----------
@@ -79,7 +71,7 @@ router.get('/me', auth, async (req, res) => {
   }
 });
 
-// --------- PATCH /api/me (name, communeName, photo URL manuelle) ----------
+// --------- PATCH /api/me ----------
 router.patch('/me', auth, async (req, res) => {
   try {
     const updatable = ['name', 'communeName', 'photo'];
@@ -106,12 +98,11 @@ router.patch('/me', auth, async (req, res) => {
   }
 });
 
-// --------- POST /api/me/photo (multipart) ----------
+// --------- POST /api/me/photo ----------
 router.post('/me/photo', auth, upload.single('photo'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ message: 'Aucun fichier envoyé' });
 
-    // 1) Normalisation de l’image: rotate → cover 512x512 → WEBP q=85
     const filename = `${(req.user?.id || 'user')}-${Date.now()}.webp`;
     const outPath = path.join(AVATAR_DIR, filename);
 
@@ -123,11 +114,10 @@ router.post('/me/photo', auth, upload.single('photo'), async (req, res) => {
 
     const url = `${publicBaseUrl(req)}/uploads/avatars/${filename}`;
 
-    // 2) Récupérer le user & supprimer l’ancienne photo si locale
+    // Récupérer le doc actuel pour supprimer l’ancienne photo si locale
     const { id, email } = req.user || {};
     let doc = null;
 
-    // On a besoin du doc actuel pour connaître l’ancienne photo
     if (id && isValidObjectId(id)) {
       doc = await User.findById(id).select('email role name communeId communeName photo');
       if (!doc && Admin) doc = await Admin.findById(id).select('email role name communeId communeName photo');
@@ -138,17 +128,15 @@ router.post('/me/photo', auth, upload.single('photo'), async (req, res) => {
     }
     if (!doc) return res.status(404).json({ message: 'Utilisateur non trouvé' });
 
-    // Supprimer l’ancienne si elle pointe vers /uploads/avatars/...
     if (doc.photo) {
       const localOld = localPathFromPublicUrl(doc.photo);
       await deleteIfExists(localOld);
     }
 
-    // 3) Mettre à jour le champ photo
+    // Mettre à jour la photo dans le bon modèle
     if (doc.constructor.modelName === 'User') {
       doc = await User.findByIdAndUpdate(doc._id, { photo: url }, { new: true, select: 'email role name communeId communeName photo' });
     } else {
-      // fallback si modèle Admin utilisé
       doc = await Admin.findByIdAndUpdate(doc._id, { photo: url }, { new: true, select: 'email role name communeId communeName photo' });
     }
 
