@@ -1,131 +1,192 @@
 // backend/routes/admins.js
 const express = require('express');
+const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
-const jwt = require('jsonwebtoken');
 const auth = require('../middleware/authMiddleware');
-const User = require('../models/User');
+const requireRole = require('../middleware/requireRole');
+const Admin = require('../models/Admin');
 
 const router = express.Router();
+const isObjectId = (id) => mongoose.Types.ObjectId.isValid(id || '');
 
-/* --- Ping debug: GET /api/admins/ping --- */
-router.get('/admins/ping', (_req, res) => {
-  res.json({ ok: true, route: '/api/admins/*', hint: 'Route admins montée ✅' });
+// (debug) logge les hits dans ce routeur
+router.use((req, _res, next) => {
+  console.log(`[admins.js] ${req.method} baseUrl=${req.baseUrl} path=${req.path}`);
+  next();
 });
 
-function assertSuperadmin(req, res) {
-  if (!req.user || req.user.role !== 'superadmin') {
-    res.status(403).json({ message: 'Réservé au superadmin' });
-    return false;
-  }
-  return true;
-}
+/**
+ * GET /api/admins
+ * Liste les admins (filtres facultatifs : q, communeId)
+ */
+router.get('/', auth, requireRole('superadmin'), async (req, res) => {
+  const { q = '', communeId = '' } = req.query || {};
+  const cond = {};
 
-/* --- GET /api/admins  (liste, optionnel ?communeId=) --- */
-router.get('/admins', auth, async (req, res) => {
-  if (!assertSuperadmin(req, res)) return;
-  try {
-    const q = {};
-    if (req.query.communeId) q.communeId = req.query.communeId;
-    const list = await User.find(q)
-      .select('email name role communeId communeName photo isActive createdAt updatedAt');
-    res.json({ admins: list });
-  } catch (e) {
-    res.status(500).json({ message: 'Erreur serveur' });
+  if (q) {
+    cond.$or = [
+      { name:  new RegExp(q, 'i') },
+      { email: new RegExp(q, 'i') },
+    ];
   }
+  if (communeId) cond.communeId = communeId;
+
+  const items = await Admin.find(cond)
+    .select('name email role communeId communeName photo isActive createdAt updatedAt')
+    .lean();
+
+  res.json({ items });
 });
 
-/* --- POST /api/admins  (créer un admin) --- */
-router.post('/admins', auth, async (req, res) => {
-  if (!assertSuperadmin(req, res)) return;
-  try {
-    const { email, password, name, communeId, communeName, photo, role } = req.body || {};
-    if (!email || !password) {
-      return res.status(400).json({ message: 'Email et mot de passe requis' });
-    }
-    const hash = await bcrypt.hash(password, 10);
-    const doc = await User.create({
-      email,
-      password: hash,
-      name: name || '',
-      communeId: communeId || '',
-      communeName: communeName || '',
-      photo: photo || '',
-      role: role === 'superadmin' ? 'superadmin' : 'admin',
-      isActive: true,
-    });
-    res.status(201).json({
-      admin: {
-        id: doc._id,
-        email: doc.email,
-        role: doc.role,
-        communeId: doc.communeId,
-        communeName: doc.communeName,
-        photo: doc.photo,
-        isActive: doc.isActive
-      }
-    });
-  } catch (e) {
-    if (e.code === 11000) {
-      return res.status(409).json({ message: 'Email déjà utilisé' });
-    }
-    res.status(500).json({ message: 'Erreur serveur' });
+/**
+ * POST /api/admins
+ * Crée un admin
+ * body: { name, email, password, role?, communeId?, communeName?, photo? }
+ */
+router.post('/', auth, requireRole('superadmin'), async (req, res) => {
+  let {
+    name = '',
+    email = '',
+    password = '',
+    role = 'admin',
+    communeId = '',
+    communeName = '',
+    photo = '',
+  } = req.body || {};
+
+  email = String(email).trim().toLowerCase();
+  if (!email || !password) {
+    return res.status(400).json({ message: 'Email et mot de passe requis.' });
   }
+  if (!['admin', 'superadmin'].includes(role)) role = 'admin';
+
+  const exists = await Admin.findOne({ email }).lean();
+  if (exists) return res.status(409).json({ message: 'Un compte existe déjà avec cet email.' });
+
+  const salt = await bcrypt.genSalt(10);
+  const hash = await bcrypt.hash(password, salt);
+
+  const doc = await Admin.create({
+    name, email, password: hash, role, communeId, communeName, photo,
+  });
+
+  res.status(201).json({ id: String(doc._id), message: 'Admin créé.' });
 });
 
-/* --- PATCH /api/admins/:id/disable  (activer/désactiver) --- */
-router.patch('/admins/:id/disable', auth, async (req, res) => {
-  if (!assertSuperadmin(req, res)) return;
-  try {
-    const isActive = !!req.body.isActive;
-    const u = await User.findByIdAndUpdate(
-      req.params.id,
-      { isActive },
-      { new: true }
-    ).select('email name role communeId communeName photo isActive');
-    if (!u) return res.status(404).json({ message: 'Admin introuvable' });
-    res.json({ admin: u });
-  } catch (e) {
-    res.status(500).json({ message: 'Erreur serveur' });
+/**
+ * PUT /api/admins/:id
+ * Met à jour un admin (pas le mot de passe ici)
+ */
+router.put('/:id', auth, requireRole('superadmin'), async (req, res) => {
+  const { id } = req.params;
+  if (!isObjectId(id)) return res.status(400).json({ message: 'ID invalide.' });
+
+  const meId = String(req.user.id);
+  if (meId === id) {
+    return res.status(400).json({ message: 'Impossible de modifier votre propre rôle ici.' });
   }
+
+  const target = await Admin.findById(id).select('email role');
+  if (!target) return res.status(404).json({ message: 'Admin introuvable.' });
+
+  if (target.role === 'superadmin') {
+    return res.status(403).json({ message: 'Action interdite sur un superadmin.' });
+  }
+
+  const payload = {};
+  if (typeof req.body.name === 'string') payload.name = req.body.name;
+  if (typeof req.body.email === 'string') payload.email = req.body.email.trim().toLowerCase();
+  if (typeof req.body.role === 'string' && ['admin','superadmin'].includes(req.body.role)) payload.role = req.body.role;
+  if (typeof req.body.communeId === 'string') payload.communeId = req.body.communeId;
+  if (typeof req.body.communeName === 'string') payload.communeName = req.body.communeName;
+  if (typeof req.body.photo === 'string') payload.photo = req.body.photo;
+
+  // unicité email
+  if (payload.email && payload.email !== target.email) {
+    const dupe = await Admin.findOne({ email: payload.email, _id: { $ne: id } }).lean();
+    if (dupe) return res.status(409).json({ message: 'Cet email est déjà utilisé.' });
+  }
+
+  await Admin.updateOne({ _id: id }, { $set: payload });
+  res.json({ message: 'Admin mis à jour.' });
 });
 
-/* --- POST /api/admins/:id/force-logout  (invalider tous ses tokens) --- */
-router.post('/admins/:id/force-logout', auth, async (req, res) => {
-  if (!assertSuperadmin(req, res)) return;
-  try {
-    const u = await User.findById(req.params.id);
-    if (!u) return res.status(404).json({ message: 'Admin introuvable' });
-    u.tokenVersion = (u.tokenVersion || 0) + 1;
-    await u.save();
-    res.json({ ok: true, tokenVersion: u.tokenVersion });
-  } catch (e) {
-    res.status(500).json({ message: 'Erreur serveur' });
+/**
+ * POST /api/admins/:id/reset-password
+ * Change le mot de passe d’un admin (par superadmin)
+ * body: { newPassword }
+ */
+router.post('/:id/reset-password', auth, requireRole('superadmin'), async (req, res) => {
+  const { id } = req.params;
+  const { newPassword } = req.body || {};
+  if (!isObjectId(id)) return res.status(400).json({ message: 'ID invalide.' });
+  if (typeof newPassword !== 'string' || newPassword.trim().length < 8) {
+    return res.status(400).json({ message: 'Nouveau mot de passe invalide (min 8 caractères).' });
   }
+
+  const meId = String(req.user.id);
+  if (meId === id) {
+    return res.status(400).json({ message: 'Utilisez /api/change-password pour votre propre compte.' });
+  }
+
+  const doc = await Admin.findById(id).select('+password role');
+  if (!doc) return res.status(404).json({ message: 'Admin introuvable.' });
+  if (doc.role === 'superadmin') return res.status(403).json({ message: 'Action interdite sur un superadmin.' });
+
+  const salt = await bcrypt.genSalt(10);
+  doc.password = await bcrypt.hash(newPassword, salt);
+  await doc.save();
+
+  // Si tu ajoutes tokenVersion sur Admin, incrémente ici pour invalider les sessions
+  // doc.tokenVersion = (doc.tokenVersion || 0) + 1;
+
+  res.json({ message: 'Mot de passe réinitialisé.' });
 });
 
-/* --- POST /api/admins/:id/impersonate  (se connecter comme) --- */
-router.post('/admins/:id/impersonate', auth, async (req, res) => {
-  if (!assertSuperadmin(req, res)) return;
-  try {
-    const target = await User.findById(req.params.id);
-    if (!target) return res.status(404).json({ message: 'Admin introuvable' });
-    if (!target.isActive) return res.status(403).json({ message: 'Compte désactivé' });
+/**
+ * POST /api/admins/:id/toggle-active
+ * Active/désactive un admin (soft delete)
+ * body: { active: boolean }
+ * ⚠️ Ajoute isActive:Boolean par défaut dans Admin.js si pas encore présent.
+ */
+router.post('/:id/toggle-active', auth, requireRole('superadmin'), async (req, res) => {
+  const { id } = req.params;
+  const { active } = req.body || {};
+  if (!isObjectId(id)) return res.status(400).json({ message: 'ID invalide.' });
 
-    const payload = {
-      id: target._id.toString(),
-      email: target.email,
-      role: target.role,
-      communeId: target.communeId,
-      communeName: target.communeName,
-      tokenVersion: target.tokenVersion || 0,
-      impersonated: true,
-      origUserId: req.user.id,
-    };
-    const token = jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: '2h' });
-    res.json({ token, target: { id: target._id, email: target.email } });
-  } catch (e) {
-    res.status(500).json({ message: 'Erreur serveur' });
-  }
+  const meId = String(req.user.id);
+  if (meId === id) return res.status(400).json({ message: 'Impossible de désactiver votre propre compte.' });
+
+  const doc = await Admin.findById(id).select('role isActive');
+  if (!doc) return res.status(404).json({ message: 'Admin introuvable.' });
+  if (doc.role === 'superadmin') return res.status(403).json({ message: 'Action interdite sur un superadmin.' });
+
+  // si le schéma n'a pas encore isActive, tu peux gérer un défaut
+  const next = !!active;
+  doc.isActive = next;
+  // doc.tokenVersion = (doc.tokenVersion || 0) + 1; // si tu gères l’invalidation des tokens
+  await doc.save();
+
+  res.json({ message: next ? 'Compte réactivé.' : 'Compte désactivé.' });
+});
+
+/**
+ * DELETE /api/admins/:id
+ * Supprime un admin
+ */
+router.delete('/:id', auth, requireRole('superadmin'), async (req, res) => {
+  const { id } = req.params;
+  if (!isObjectId(id)) return res.status(400).json({ message: 'ID invalide.' });
+
+  const meId = String(req.user.id);
+  if (meId === id) return res.status(400).json({ message: 'Impossible de supprimer votre propre compte.' });
+
+  const doc = await Admin.findById(id).select('role');
+  if (!doc) return res.status(404).json({ message: 'Admin introuvable.' });
+  if (doc.role === 'superadmin') return res.status(403).json({ message: 'Action interdite sur un superadmin.' });
+
+  await Admin.deleteOne({ _id: id });
+  res.json({ message: 'Admin supprimé.' });
 });
 
 module.exports = router;
