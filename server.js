@@ -66,10 +66,10 @@ app.get('/api/health', (_, res) => res.json({ status: 'ok', timestamp: Date.now(
 const setupAdminRoute     = require('./routes/setup-admin');
 const authRoutes          = require('./routes/auth');
 const meRoute             = require('./routes/me');
-const adminsRoutes        = require('./routes/admins');           // ⬅ multi-communes (liste/fiche admin)
-const changePasswordRoute = require('./routes/changePassword');   // ⬅ change password
+const adminsRoutes        = require('./routes/admins');           // ⬅ routes de gestion des admins
+const changePasswordRoute = require('./routes/changePassword');   // ⬅ change password (self-service)
 
-// Tes autres routes applicatives
+// Autres routes applicatives
 const incidentRoutes      = require('./routes/incidents');
 const articleRoutes       = require('./routes/articles');
 const notificationRoutes  = require('./routes/notifications');
@@ -79,20 +79,26 @@ const userRoutes          = require('./routes/userRoutes');
 const debugRoutes         = require('./routes/debug');
 
 /* ===================== Montage des routes ===================== */
-// Auth / profil / admin management
-app.use('/api', setupAdminRoute);
-app.use('/api', authRoutes);
-app.use('/api', meRoute);
-app.use('/api', adminsRoutes);
+// Auth / profil / setup
+app.use('/api', setupAdminRoute); // ex: POST /api/setup-admin
+app.use('/api', authRoutes);      // ex: POST /api/auth/login
+app.use('/api', meRoute);         // ex: GET /api/me
 
-// Change password : monté sur le chemin final
+// Admin management (⚠️ monté sur /api/admins)
+app.use(
+  '/api/admins',
+  (req, _res, next) => { console.log('[HIT] /api/admins', req.method, req.originalUrl); next(); },
+  adminsRoutes
+);
+
+// Change password (self-service utilisateur/admin connecté)
 app.use(
   '/api/change-password',
   (req, _res, next) => { console.log('[HIT] /api/change-password', req.method, req.path || '/'); next(); },
   changePasswordRoute
 );
 
-// Autres domaines (incidents, etc.)
+// Autres domaines (incidents, articles, notifications, projets, devices, users, debug)
 app.use('/api/incidents', incidentRoutes);
 app.use('/api/articles', articleRoutes);
 app.use('/api/notifications', notificationRoutes);
@@ -122,7 +128,9 @@ app.use((err, req, res, _next) => {
 });
 
 /* ===================== 404 API – à la fin ===================== */
-app.use('/api/*', (_, res) => res.status(404).json({ message: 'Route API introuvable ❌' }));
+app.use('/api/*', (req, res) => {
+  res.status(404).json({ message: `Route API introuvable ❌ (${req.method} ${req.originalUrl})` });
+});
 
 /* ===================== DB + serveur ===================== */
 mongoose
