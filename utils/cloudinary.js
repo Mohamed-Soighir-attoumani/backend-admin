@@ -1,17 +1,16 @@
 // backend/utils/cloudinary.js
-const multer = require('multer');
-const fs = require('fs');
 const path = require('path');
+const fs = require('fs');
+const multer = require('multer');
 
-const hasCloudinaryCreds =
+const hasCreds =
   !!process.env.CLOUDINARY_CLOUD_NAME &&
   !!process.env.CLOUDINARY_API_KEY &&
   !!process.env.CLOUDINARY_API_SECRET;
 
 let storage;
-let isCloudinaryEnabled = false;
 
-if (hasCloudinaryCreds) {
+if (hasCreds) {
   const cloudinary = require('cloudinary').v2;
   const { CloudinaryStorage } = require('multer-storage-cloudinary');
 
@@ -23,39 +22,31 @@ if (hasCloudinaryCreds) {
 
   storage = new CloudinaryStorage({
     cloudinary,
-    params: async () => ({
-      folder: 'incidents',
-      resource_type: 'auto',
-      use_filename: true,
-      unique_filename: true,
-    }),
+    params: async (_req, file) => {
+      const isVideo = (file.mimetype || '').startsWith('video');
+      return {
+        folder: 'securidem/incidents',
+        resource_type: isVideo ? 'video' : 'image',
+        // public_id automatique si tu ne précises pas
+      };
+    },
   });
 
-  isCloudinaryEnabled = true;
   console.log('[cloudinary] enabled ✅');
+  module.exports = { storage, cloudinary, hasCloudinary: true };
 } else {
-  // Fallback disque: /uploads/media
-  const uploadDir = path.join(__dirname, '..', 'uploads', 'media');
-  fs.mkdirSync(uploadDir, { recursive: true });
+  const uploadDir = path.join(__dirname, '..', 'uploads');
+  if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
 
   storage = multer.diskStorage({
     destination: (_req, _file, cb) => cb(null, uploadDir),
     filename: (_req, file, cb) => {
-      const extFromName = path.extname(file.originalname || '');
-      let ext = extFromName || '';
-      if (!ext) {
-        // petit mapping si pas d’extension dans le nom
-        const mt = (file.mimetype || '').toLowerCase();
-        if (mt.includes('jpeg')) ext = '.jpg';
-        else if (mt.includes('png')) ext = '.png';
-        else if (mt.includes('mp4')) ext = '.mp4';
-      }
-      const name = `${Date.now()}-${Math.random().toString(36).slice(2)}${ext}`;
+      const ext = path.extname(file.originalname || '').toLowerCase();
+      const name = `${Date.now()}-${Math.random().toString(16).slice(2)}${ext || ''}`;
       cb(null, name);
     },
   });
 
-  console.warn('[cloudinary] disabled ❌ (no credentials) – using disk storage');
+  console.log('[cloudinary] disabled ❌ (no credentials) – using disk storage');
+  module.exports = { storage, cloudinary: null, hasCloudinary: false };
 }
-
-module.exports = { storage, isCloudinaryEnabled };
