@@ -2,12 +2,14 @@
 const express = require('express');
 const mongoose = require('mongoose');
 const multer = require('multer');
-const { storage } = require('../utils/cloudinary');
+const path = require('path');
+const { storage, isCloudinaryEnabled } = require('../utils/cloudinary');
 const Incident = require('../models/Incident');
 
 const router = express.Router();
 const upload = multer({ storage });
 
+// GET /api/incidents
 router.get("/", async (req, res) => {
   const { period, deviceId } = req.query;
   const filter = {};
@@ -27,6 +29,7 @@ router.get("/", async (req, res) => {
   }
 });
 
+// GET /api/incidents/count
 router.get("/count", async (req, res) => {
   const { period } = req.query;
   const filter = {};
@@ -44,6 +47,7 @@ router.get("/count", async (req, res) => {
   }
 });
 
+// POST /api/incidents
 router.post('/', upload.single('media'), async (req, res) => {
   try {
     const {
@@ -62,9 +66,23 @@ router.post('/', upload.single('media'), async (req, res) => {
       return res.status(400).json({ message: "❌ Champs requis manquants." });
     }
 
-    const mediaUrl = (req.file && req.file.path) ? req.file.path : null;
-    const mimeType = req.file ? req.file.mimetype : null;
-    const mediaType = mimeType?.startsWith('video') ? 'video' : 'image';
+    // URL publique du média
+    let mediaUrl = null;
+    let mediaType = 'image';
+    if (req.file) {
+      const mime = (req.file.mimetype || '').toLowerCase();
+      mediaType = mime.startsWith('video') ? 'video' : 'image';
+
+      if (isCloudinaryEnabled) {
+        // Cloudinary donne une URL HTTPS dans req.file.path
+        mediaUrl = req.file.path || null;
+      } else {
+        // Disque: servir via /uploads/media/<filename>
+        mediaUrl = req.file.filename
+          ? `/uploads/media/${req.file.filename}`
+          : null;
+      }
+    }
 
     const newIncident = new Incident({
       title: String(title).trim(),
@@ -89,6 +107,7 @@ router.post('/', upload.single('media'), async (req, res) => {
   }
 });
 
+// PUT /api/incidents/:id
 router.put('/:id', async (req, res) => {
   const { id } = req.params;
   if (!mongoose.Types.ObjectId.isValid(id)) {
@@ -105,6 +124,7 @@ router.put('/:id', async (req, res) => {
   }
 });
 
+// DELETE /api/incidents/:id
 router.delete('/:id', async (req, res) => {
   const { id } = req.params;
   if (!mongoose.Types.ObjectId.isValid(id)) {
@@ -120,6 +140,7 @@ router.delete('/:id', async (req, res) => {
   }
 });
 
+// GET /api/incidents/:id
 router.get('/:id', async (req, res) => {
   const { id } = req.params;
   if (!mongoose.Types.ObjectId.isValid(id)) {
