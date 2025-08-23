@@ -1,4 +1,3 @@
-// backend/server.js
 require('dotenv').config();
 
 const express = require('express');
@@ -21,25 +20,31 @@ const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/backen
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN || null;
 const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || '*';
 
-/* ===================== CORS =====================
-   - Autorise Authorization & Cache-Control
-   - Préflight qui reflète les headers demandés par le navigateur
-*/
+/* ===================== CORS ===================== */
 app.use(cors({
   origin: FRONTEND_ORIGIN === '*' ? true : FRONTEND_ORIGIN,
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'Cache-Control', 'X-Requested-With'],
+  // 👇 IMPORTANT : on autorise aussi la clé app
+  allowedHeaders: [
+    'Content-Type',
+    'Authorization',
+    'Cache-Control',
+    'X-Requested-With',
+    'x-app-key',
+    'X-App-Key'
+  ],
 }));
 
 app.options('*', (req, res) => {
   res.header('Access-Control-Allow-Origin', req.headers.origin || FRONTEND_ORIGIN || '*');
   res.header('Access-Control-Allow-Credentials', 'true');
   res.header('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
-  // Reflète la liste exacte demandée par le navigateur pour éviter les 4xx préflight
+  // On reflète les headers préflight demandés par le navigateur
   res.header(
     'Access-Control-Allow-Headers',
-    req.headers['access-control-request-headers'] || 'Content-Type, Authorization, Cache-Control, X-Requested-With'
+    req.headers['access-control-request-headers']
+      || 'Content-Type, Authorization, Cache-Control, X-Requested-With, x-app-key, X-App-Key'
   );
   return res.sendStatus(204);
 });
@@ -66,10 +71,9 @@ app.get('/api/health', (_, res) => res.json({ status: 'ok', timestamp: Date.now(
 const setupAdminRoute     = require('./routes/setup-admin');
 const authRoutes          = require('./routes/auth');
 const meRoute             = require('./routes/me');
-const adminsRoutes        = require('./routes/admins');           // ⬅ routes de gestion des admins
-const changePasswordRoute = require('./routes/changePassword');   // ⬅ change password (self-service)
+const adminsRoutes        = require('./routes/admins');
+const changePasswordRoute = require('./routes/changePassword');
 
-// Autres routes applicatives
 const incidentRoutes      = require('./routes/incidents');
 const articleRoutes       = require('./routes/articles');
 const notificationRoutes  = require('./routes/notifications');
@@ -79,26 +83,20 @@ const userRoutes          = require('./routes/userRoutes');
 const debugRoutes         = require('./routes/debug');
 
 /* ===================== Montage des routes ===================== */
-// Auth / profil / setup
-app.use('/api', setupAdminRoute); // ex: POST /api/setup-admin
-app.use('/api', authRoutes);      // ex: POST /api/auth/login
-app.use('/api', meRoute);         // ex: GET /api/me
+app.use('/api', setupAdminRoute);
+app.use('/api', authRoutes);
+app.use('/api', meRoute);
 
-// Admin management (⚠️ monté sur /api/admins)
-app.use(
-  '/api/admins',
+app.use('/api/admins',
   (req, _res, next) => { console.log('[HIT] /api/admins', req.method, req.originalUrl); next(); },
   adminsRoutes
 );
 
-// Change password (self-service utilisateur/admin connecté)
-app.use(
-  '/api/change-password',
+app.use('/api/change-password',
   (req, _res, next) => { console.log('[HIT] /api/change-password', req.method, req.path || '/'); next(); },
   changePasswordRoute
 );
 
-// Autres domaines (incidents, articles, notifications, projets, devices, users, debug)
 app.use('/api/incidents', incidentRoutes);
 app.use('/api/articles', articleRoutes);
 app.use('/api/notifications', notificationRoutes);
@@ -127,7 +125,7 @@ app.use((err, req, res, _next) => {
   res.status(500).json({ message: 'Erreur interne du serveur' });
 });
 
-/* ===================== 404 API – à la fin ===================== */
+/* ===================== 404 API ===================== */
 app.use('/api/*', (req, res) => {
   res.status(404).json({ message: `Route API introuvable ❌ (${req.method} ${req.originalUrl})` });
 });
