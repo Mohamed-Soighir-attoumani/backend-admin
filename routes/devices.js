@@ -1,4 +1,3 @@
-// backend/routes/devices.js
 const express = require('express');
 const mongoose = require('mongoose');
 const auth = require('../middleware/authMiddleware');
@@ -28,9 +27,6 @@ function normalizeLegacy(d) {
   let model = (d.model || '').trim();
   let osVersion = (d.osVersion || '').trim();
 
-  // Si vide, essaie de parser l’ancien "platform"
-  // Ex 1: "Xiaomi/22120RN86G/14"
-  // Ex 2: "samsung/a05mxx/a05m:15/AP3A...:user/release-keys"
   if ((!brand || !model || !osVersion) && d.platform) {
     const p = String(d.platform);
     const parts = p.split('/');
@@ -94,7 +90,6 @@ router.post('/register', requireAppKey, async (req, res) => {
       { upsert: true, new: true }
     );
 
-    // createdAt/updatedAt existent si timestamps: true sur le schema
     const created = !!(doc.createdAt && doc.updatedAt && doc.createdAt.getTime() === doc.updatedAt.getTime());
     return res.status(created ? 201 : 200).json({ ok: true, created, updated: !created });
   } catch (e) {
@@ -150,47 +145,7 @@ router.get('/count', auth, requireRole('admin','superadmin'), async (req, res) =
 });
 
 /**
- * GET /api/devices/brands  (admin)
- */
-router.get('/brands', auth, requireRole('admin','superadmin'), async (_req, res) => {
-  try {
-    const aggr = await Device.aggregate([
-      { $group: { _id: { $ifNull: ['$brand', ''] }, count: { $sum: 1 } } },
-      { $project: { _id: 0, brand: '$_id', count: 1 } },
-      { $sort: { count: -1 } },
-    ]);
-    res.json({ items: aggr });
-  } catch (e) {
-    console.error('GET /devices/brands', e);
-    res.status(500).json({ message: 'Erreur serveur' });
-  }
-});
-
-/**
- * GET /api/devices/metrics  (admin)
- */
-router.get('/metrics', auth, requireRole('admin','superadmin'), async (_req, res) => {
-  try {
-    const since30 = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
-    const [total, active30, brands] = await Promise.all([
-      Device.countDocuments({}),
-      Device.countDocuments({ lastSeenAt: { $gte: since30 } }),
-      Device.aggregate([
-        { $group: { _id: { $ifNull: ['$brand',''] }, count: { $sum: 1 } } },
-        { $project: { _id: 0, brand: '$_id', count: 1 } },
-        { $sort: { count: -1 } },
-        { $limit: 10 },
-      ]),
-    ]);
-    res.json({ total, active30, brands });
-  } catch (e) {
-    console.error('GET /devices/metrics', e);
-    res.status(500).json({ message: 'Erreur serveur' });
-  }
-});
-
-/**
- * GET /api/devices (admin) — liste
+ * GET /api/devices (admin)
  */
 router.get('/', auth, requireRole('admin','superadmin'), async (req, res) => {
   try {
