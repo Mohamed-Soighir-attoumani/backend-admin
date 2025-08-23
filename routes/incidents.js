@@ -1,20 +1,38 @@
+// backend/routes/incidents.js
 const express = require('express');
 const router = express.Router();
 const mongoose = require('mongoose');
 const Incident = require('../models/Incident');
 
 const multer = require('multer');
-const { storage } = require('../utils/cloudinary'); // cloudinary OU disque (fallback)
+const { storage } = require('../utils/cloudinary'); // disque local si cloudinary non configuré
 const upload = multer({ storage });
 
-// --- util pour fabriquer une URL absolue côté API (Render/Proxy) ---
-function toAbsUrl(req, u) {
-  if (!u) return null;
-  if (/^https?:\/\//i.test(u)) return u;
-  const proto = req.headers['x-forwarded-proto'] || req.protocol || 'http';
-  const host  = req.get('host');
-  const path  = u.startsWith('/') ? u : `/${u}`;
-  return `${proto}://${host}${path}`;
+/**
+ * Base publique à utiliser pour fabriquer les URLs absolues des médias.
+ * - Si PUBLIC_BASE_URL est défini (ex: https://backend-admin-tygd.onrender.com), on l'utilise.
+ * - Sinon, on reconstruit avec req.protocol + req.get('host').
+ */
+const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || null;
+
+function toAbsUrl(req, rel) {
+  if (!rel) return null;
+  if (/^https?:\/\//i.test(rel)) return rel; // déjà absolu (cloudinary par ex.)
+  const base = PUBLIC_BASE_URL || `${req.protocol}://${req.get('host')}`;
+  // s'assurer qu'on ne duplique pas les slashes
+  return `${base.replace(/\/+$/, '')}${rel.startsWith('/') ? '' : '/'}${rel}`;
+}
+
+/**
+ * Sérialise un Incident en forçant mediaUrl à une URL absolue,
+ * pour que le panel puisse l'afficher directement.
+ */
+function serializeIncident(req, doc) {
+  const obj = doc.toObject ? doc.toObject() : doc;
+  return {
+    ...obj,
+    mediaUrl: obj.mediaUrl ? toAbsUrl(req, obj.mediaUrl) : null,
+  };
 }
 
 /* ──────────────── GET /api/incidents ──────────────── */
@@ -27,17 +45,14 @@ router.get("/", async (req, res) => {
     const fromDate = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
     filter.createdAt = { $gte: fromDate };
   }
-  if (deviceId) filter.deviceId = deviceId;
+
+  if (deviceId) {
+    filter.deviceId = deviceId;
+  }
 
   try {
-    const incidents = await Incident.find(filter).sort({ createdAt: -1 }).lean();
-
-    const mapped = incidents.map(it => ({
-      ...it,
-      mediaAbsUrl: toAbsUrl(req, it.mediaUrl || null),
-    }));
-
-    res.json(mapped);
+    const incidents = await Incident.find(filter).sort({ createdAt: -1 });
+    res.json(incidents.map((d) => serializeIncident(req, d)));
   } catch (err) {
     console.error("Erreur récupération incidents:", err);
     res.status(500).json({ message: "Erreur serveur" });
@@ -82,21 +97,14 @@ router.post('/', upload.single('media'), async (req, res) => {
     return res.status(400).json({ message: "❌ Champs requis manquants." });
   }
 
-  let mediaUrl = null;
-  let mediaType = null;
+  // Si Cloudinary n'est pas configuré, req.file.path ressemble à "/uploads/xxx.jpg"
+  // On garde la valeur relative en DB mais on renverra une URL absolue au client.
+  const mediaUrl = req.file ? (req.file.path || req.file.secure_url || null) : null;
+  const mimeType = req.file ? req.file.mimetype : null;
+  const mediaType = mimeType?.startsWith('video') ? 'video' : 'image';
 
   try {
-    if (req.file) {
-      // Si Cloudinary : req.file.path est déjà une URL http(s)
-      // Si stockage disque : on fabrique un chemin public servi par Express (/uploads/...)
-      const isHttp = req.file.path && /^https?:\/\//i.test(req.file.path);
-      mediaUrl = isHttp ? req.file.path : `/uploads/${req.file.filename}`;
-
-      const mime = req.file.mimetype || '';
-      mediaType = mime.startsWith('video') ? 'video' : 'image';
-    }
-
-    const newIncident = new Incident({
+    const created = await Incident.create({
       title,
       description,
       lieu,
@@ -111,13 +119,8 @@ router.post('/', upload.single('media'), async (req, res) => {
       createdAt: new Date()
     });
 
-    const saved = await newIncident.save();
-
-    // renvoie aussi l’URL absolue pour usage immédiat si besoin
-    const out = saved.toObject();
-    out.mediaAbsUrl = toAbsUrl(req, out.mediaUrl || null);
-
-    res.status(201).json(out);
+    // ⚠️ On renvoie mediaUrl déjà absolu
+    res.status(201).json(serializeIncident(req, created));
   } catch (err) {
     console.error("Erreur serveur :", err);
     res.status(500).json({ message: "Erreur lors de l'enregistrement." });
@@ -143,10 +146,8 @@ router.put('/:id', async (req, res) => {
       return res.status(404).json({ message: '⚠️ Incident non trouvé' });
     }
 
-    const out = updatedIncident.toObject();
-    out.mediaAbsUrl = toAbsUrl(req, out.mediaUrl || null);
-
-    res.json(out);
+    // ⚠️ Renvoi avec mediaUrl absolu
+    res.json(serializeIncident(req, updatedIncident));
   } catch (error) {
     console.error("❌ Erreur modification :", error);
     res.status(500).json({ message: 'Erreur lors de la mise à jour' });
@@ -163,11 +164,9 @@ router.delete('/:id', async (req, res) => {
 
   try {
     const deleted = await Incident.findByIdAndDelete(id);
-
     if (!deleted) {
       return res.status(404).json({ message: '⚠️ Incident non trouvé' });
     }
-
     res.json({ message: '✅ Incident supprimé' });
   } catch (error) {
     console.error("❌ Erreur suppression :", error);
@@ -184,12 +183,12 @@ router.get('/:id', async (req, res) => {
   }
 
   try {
-    const incident = await Incident.findById(id).lean();
+    const incident = await Incident.findById(id);
     if (!incident) {
       return res.status(404).json({ message: 'Incident non trouvé' });
     }
-    incident.mediaAbsUrl = toAbsUrl(req, incident.mediaUrl || null);
-    res.json(incident);
+    // ⚠️ Renvoi avec mediaUrl absolu
+    res.json(serializeIncident(req, incident));
   } catch (error) {
     console.error("Erreur récupération incident par ID :", error);
     res.status(500).json({ message: 'Erreur serveur' });
