@@ -1,21 +1,37 @@
 // backend/utils/cloudinary.js
-const cloudinary = require('cloudinary').v2;
-const { CloudinaryStorage } = require('multer-storage-cloudinary');
+const multer = require('multer');
 
-cloudinary.config({
-  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
-  api_key:    process.env.CLOUDINARY_API_KEY,
-  api_secret: process.env.CLOUDINARY_API_SECRET,
-});
+const hasCloudinaryCreds =
+  !!process.env.CLOUDINARY_CLOUD_NAME &&
+  !!process.env.CLOUDINARY_API_KEY &&
+  !!process.env.CLOUDINARY_API_SECRET;
 
-const storage = new CloudinaryStorage({
-  cloudinary,
-  params: {
-    folder: 'securidem',
-    resource_type: 'auto', // 💡 nécessaire pour supporter vidéos ET images
-    allowed_formats: ['jpg', 'jpeg', 'png', 'mp4', 'mov', 'avi'],
-    transformation: [{ width: 1280, height: 720, crop: 'limit' }], // optionnel
-  },
-});
+let storage;
 
-module.exports = { cloudinary, storage };
+if (hasCloudinaryCreds) {
+  const cloudinary = require('cloudinary').v2;
+  const { CloudinaryStorage } = require('multer-storage-cloudinary');
+
+  cloudinary.config({
+    cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+    api_key: process.env.CLOUDINARY_API_KEY,
+    api_secret: process.env.CLOUDINARY_API_SECRET,
+  });
+
+  storage = new CloudinaryStorage({
+    cloudinary,
+    params: async () => ({
+      folder: 'incidents',
+      resource_type: 'auto',
+      use_filename: true,
+      unique_filename: true,
+    }),
+  });
+  console.log('[cloudinary] enabled');
+} else {
+  // Pas de config cloudinary -> on n’envoie pas le média, mais on n’échoue pas
+  storage = multer.memoryStorage();
+  console.warn('[cloudinary] disabled (no credentials) – using memoryStorage');
+}
+
+module.exports = { storage };
