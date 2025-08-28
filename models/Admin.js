@@ -5,14 +5,13 @@ const AdminSchema = new mongoose.Schema(
   {
     name: { type: String, default: '' },
 
-    // on garde l'email "original" pour l'affichage
+    // email "affiché"
     email: { type: String, required: true, trim: true },
 
-    // email normalisé pour l'unicité (toujours minuscule + trim)
+    // email normalisé pour l’unicité
     emailLower: { type: String, required: true, index: true },
 
     password: { type: String, required: true, select: false },
-
     role: { type: String, enum: ['admin', 'superadmin'], default: 'admin', index: true },
 
     // multi-communes
@@ -29,16 +28,18 @@ const AdminSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-// Unicité sur (emailLower, communeId)
+// Unicité sur (emailLower, communeId) — communeId est normalisé (trim+lowercase)
 AdminSchema.index({ emailLower: 1, communeId: 1 }, { unique: true, name: 'uniq_email_commune' });
 
-// Normalisation avant save
+// Normaliser avant validation
 AdminSchema.pre('validate', function (next) {
   if (typeof this.email === 'string') {
     this.email = this.email.trim();
     this.emailLower = this.email.toLowerCase();
   }
-  if (typeof this.communeId !== 'string') {
+  if (typeof this.communeId === 'string') {
+    this.communeId = this.communeId.trim().toLowerCase();
+  } else {
     this.communeId = '';
   }
   next();
@@ -46,10 +47,7 @@ AdminSchema.pre('validate', function (next) {
 
 // sécurité JSON
 AdminSchema.set('toJSON', {
-  transform: (_doc, ret) => {
-    delete ret.password;
-    return ret;
-  },
+  transform: (_doc, ret) => { delete ret.password; return ret; },
 });
 
 module.exports = mongoose.model('Admin', AdminSchema);
