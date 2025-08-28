@@ -7,7 +7,7 @@ const jwt = require('jsonwebtoken');
 const auth = require('../middleware/authMiddleware');
 const requireRole = require('../middleware/requireRole');
 
-const Admin = require('../models/Admin'); // <-- corrigé : modèle ci-dessus
+const Admin = require('../models/Admin');
 const User  = require('../models/User');
 
 const router = express.Router();
@@ -19,15 +19,13 @@ router.use((req, _res, next) => {
   next();
 });
 
-/**
- * GET /api/admins
- */
+// GET /api/admins
 router.get('/', auth, requireRole('superadmin'), async (req, res) => {
   const { q = '', communeId = '' } = req.query || {};
 
   const baseCond = {};
   if (q) baseCond.$or = [{ name: new RegExp(q, 'i') }, { email: new RegExp(q, 'i') }];
-  if (communeId) baseCond.communeId = communeId;
+  if (communeId) baseCond.communeId = String(communeId).trim().toLowerCase();
 
   const adminsA = await Admin.find(baseCond)
     .select('name email role communeId communeName photo isActive createdAt updatedAt')
@@ -45,10 +43,7 @@ router.get('/', auth, requireRole('superadmin'), async (req, res) => {
   res.json({ admins: Array.from(byEmail.values()) });
 });
 
-/**
- * POST /api/admins
- * body: { name, email, password, role?, communeId?, communeName?, photo? }
- */
+// POST /api/admins
 router.post('/', auth, requireRole('superadmin'), async (req, res) => {
   try {
     let {
@@ -63,25 +58,23 @@ router.post('/', auth, requireRole('superadmin'), async (req, res) => {
 
     email = String(email).trim();
     const emailLower = email.toLowerCase();
+    communeId = String(communeId || '').trim().toLowerCase();
 
     if (!email || !password) return res.status(400).json({ message: 'Email et mot de passe requis.' });
     if (!['admin','superadmin'].includes(role)) role = 'admin';
-    communeId = String(communeId || '');
 
-    // Doublon dans Admin : composé (emailLower, communeId)
+    // Doublon normalisé (emailLower, communeId)
     const existsAdmin = await Admin.findOne({ emailLower, communeId }).lean();
     if (existsAdmin) {
       return res.status(409).json({ message: 'Cet email est déjà utilisé pour cette commune.' });
     }
 
-    // On autorise l’existence dans Users (héritage), c’est géré au listing
-
     const hash = await bcrypt.hash(password, 10);
 
     const doc = await Admin.create({
       name,
-      email,        // l’original affichable
-      emailLower,   // indexé pour l’unicité
+      email,       // affichage
+      emailLower,  // normalisé pour unicité
       password: hash,
       role,
       communeId,
@@ -94,7 +87,6 @@ router.post('/', auth, requireRole('superadmin'), async (req, res) => {
     res.status(201).json({ id: String(doc._id), message: 'Admin créé.' });
   } catch (e) {
     if (e?.code === 11000) {
-      // conflit d'index (probablement uniq_email_commune)
       return res.status(409).json({ message: 'Cet email est déjà utilisé pour cette commune.' });
     }
     console.error('POST /api/admins error:', e);
@@ -102,9 +94,7 @@ router.post('/', auth, requireRole('superadmin'), async (req, res) => {
   }
 });
 
-/**
- * PUT /api/admins/:id
- */
+// PUT /api/admins/:id
 router.put('/:id', auth, requireRole('superadmin'), async (req, res) => {
   const { id } = req.params;
   if (!isObjectId(id)) return res.status(400).json({ message: 'ID invalide.' });
@@ -118,20 +108,21 @@ router.put('/:id', auth, requireRole('superadmin'), async (req, res) => {
 
   const payload = {};
   if (typeof req.body.name === 'string') payload.name = req.body.name;
+
   if (typeof req.body.email === 'string') {
     const email = req.body.email.trim();
     payload.email = email;
     payload.emailLower = email.toLowerCase();
   }
   if (typeof req.body.role === 'string' && ['admin','superadmin'].includes(req.body.role)) payload.role = req.body.role;
-  if (typeof req.body.communeId === 'string') payload.communeId = req.body.communeId;
+  if (typeof req.body.communeId === 'string') payload.communeId = req.body.communeId.trim().toLowerCase();
   if (typeof req.body.communeName === 'string') payload.communeName = req.body.communeName;
   if (typeof req.body.photo === 'string') payload.photo = req.body.photo;
 
-  // si email/commune changent → vérifier unicité
   const nextEmailLower = payload.emailLower ?? target.emailLower;
   const nextCommuneId  = payload.communeId  ?? target.communeId;
 
+  // Doublon si on change email/commune
   if (nextEmailLower !== target.emailLower || nextCommuneId !== target.communeId) {
     const dupe = await Admin.findOne({
       _id: { $ne: id },
@@ -145,9 +136,7 @@ router.put('/:id', auth, requireRole('superadmin'), async (req, res) => {
   res.json({ message: 'Admin mis à jour.' });
 });
 
-/**
- * POST /api/admins/:id/reset-password
- */
+// POST /api/admins/:id/reset-password
 router.post('/:id/reset-password', auth, requireRole('superadmin'), async (req, res) => {
   const { id } = req.params;
   const { newPassword } = req.body || {};
@@ -170,9 +159,7 @@ router.post('/:id/reset-password', auth, requireRole('superadmin'), async (req, 
   res.json({ message: 'Mot de passe réinitialisé.' });
 });
 
-/**
- * POST /api/admins/:id/toggle-active
- */
+// POST /api/admins/:id/toggle-active
 router.post('/:id/toggle-active', auth, requireRole('superadmin'), async (req, res) => {
   const { id } = req.params;
   const { active } = req.body || {};
@@ -192,25 +179,7 @@ router.post('/:id/toggle-active', auth, requireRole('superadmin'), async (req, r
   res.json({ message: doc.isActive ? 'Compte réactivé.' : 'Compte désactivé.' });
 });
 
-/**
- * POST /api/admins/:id/force-logout
- */
-router.post('/:id/force-logout', auth, requireRole('superadmin'), async (req, res) => {
-  const { id } = req.params;
-  if (!isObjectId(id)) return res.status(400).json({ message: 'ID invalide.' });
-
-  const doc = await Admin.findById(id).select('tokenVersion');
-  if (!doc) return res.status(404).json({ message: 'Admin introuvable.' });
-
-  doc.tokenVersion = (doc.tokenVersion || 0) + 1;
-  await doc.save();
-
-  res.json({ ok: true, tokenVersion: doc.tokenVersion });
-});
-
-/**
- * POST /api/admins/:id/impersonate
- */
+// POST /api/admins/:id/impersonate
 router.post('/:id/impersonate', auth, requireRole('superadmin'), async (req, res) => {
   const { id } = req.params;
   if (!isObjectId(id)) return res.status(400).json({ message: 'ID invalide.' });
@@ -235,9 +204,7 @@ router.post('/:id/impersonate', auth, requireRole('superadmin'), async (req, res
   res.json({ token, target: { id: String(target._id), email: target.email } });
 });
 
-/**
- * DELETE /api/admins/:id
- */
+// DELETE /api/admins/:id
 router.delete('/:id', auth, requireRole('superadmin'), async (req, res) => {
   const { id } = req.params;
   if (!isObjectId(id)) return res.status(400).json({ message: 'ID invalide.' });
