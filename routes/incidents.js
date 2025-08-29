@@ -1,70 +1,108 @@
+// backend/routes/incidents.js
 const express = require('express');
 const router = express.Router();
 const mongoose = require('mongoose');
-const multer = require('multer');
-
 const Incident = require('../models/Incident');
+
+const multer = require('multer');
 const { storage } = require('../utils/cloudinary');
 const upload = multer({ storage });
 
-const tenant = require('../middleware/tenant');
 const auth = require('../middleware/authMiddleware');
 const requireRole = require('../middleware/requireRole');
-const requireCommuneAccess = require('../middleware/requireCommuneAccess');
 
 // 🔐 même valeur que MOBILE_APP_KEY dans .env serveur
 const APP_KEY = process.env.MOBILE_APP_KEY || null;
 const isMobile = (req) => APP_KEY && req.header('x-app-key') === APP_KEY;
 
 const isObjectId = (id) => mongoose.Types.ObjectId.isValid(id || '');
-const getDeviceIdFromReq = (req) => String(req.query.deviceId || req.body?.deviceId || '').trim();
+const getDeviceIdFromReq = (req) =>
+  String(req.query.deviceId || req.body?.deviceId || '').trim();
 
-/* ============ LISTE ============ */
-router.get('/',
-  // Panel/admin : on exige communeId + auth + rôle + accès à la commune
-  (req, res, next) => isMobile(req) ? next() : tenant({ require: true })(req, res, next),
-  (req, res, next) => isMobile(req) ? next() : auth(req, res, next),
-  (req, res, next) => isMobile(req) ? next() : requireRole('admin')(req, res, next),
-  (req, res, next) => isMobile(req) ? next() : requireCommuneAccess()(req, res, next),
-  async (req, res) => {
-    try {
-      const filter = {};
-      if (isMobile(req)) {
-        const deviceId = getDeviceIdFromReq(req);
-        if (!deviceId) return res.status(400).json({ message: 'deviceId requis (mobile)' });
-        filter.deviceId = deviceId;
+/* Utilitaire: récupère le communeId "côté panel" depuis header ou query */
+function getPanelCommuneId(req) {
+  return String(
+    req.header('x-commune-id') || req.query.communeId || ''
+  ).trim();
+}
 
-        // Optionnel si l’app envoie communeId (utile si tu veux filtrer côté app)
-        if (req.query.communeId) filter.communeId = String(req.query.communeId);
-      } else {
-        filter.communeId = req.communeId;
+/* ──────────────── GET /api/incidents ────────────────
+   - MOBILE : deviceId obligatoire
+   - PANEL  : 
+       * superadmin -> communeId facultatif (renvoie tout si absent)
+       * admin      -> communeId obligatoire et doit correspondre à son compte
+*/
+router.get('/', authOptional, async (req, res) => {
+  try {
+    const filter = {};
 
-        const { period } = req.query;
-        if (period === '7' || period === '30') {
-          const days = parseInt(period, 10);
-          const from = new Date();
-          from.setDate(from.getDate() - days);
-          filter.createdAt = { $gte: from };
+    if (isMobile(req)) {
+      const deviceId = getDeviceIdFromReq(req);
+      if (!deviceId) {
+        return res.status(400).json({ message: 'deviceId requis (mobile)' });
+      }
+      filter.deviceId = deviceId;
+
+      // (optionnel) si l’app envoie aussi communeId
+      if (req.query.communeId) filter.communeId = String(req.query.communeId);
+    } else {
+      // PANEL
+      if (!req.user) {
+        return res.status(401).json({ message: 'Non connecté' });
+      }
+      const cid = getPanelCommuneId(req);
+
+      if (req.user.role === 'admin') {
+        if (!cid) return res.status(400).json({ message: 'communeId requis' });
+        if (String(req.user.communeId || '') !== cid) {
+          return res.status(403).json({ message: 'Accès interdit à cette commune' });
         }
-        if (req.query.deviceId) filter.deviceId = String(req.query.deviceId);
+        filter.communeId = cid;
+      } else if (req.user.role === 'superadmin') {
+        // superadmin : si cid présent → filtre ; sinon → tout
+        if (cid) filter.communeId = cid;
+      } else {
+        return res.status(403).json({ message: 'Accès interdit' });
       }
 
-      const incidents = await Incident.find(filter).sort({ createdAt: -1 });
-      res.json(incidents);
-    } catch (err) {
-      console.error('Erreur récupération incidents:', err);
-      res.status(500).json({ message: 'Erreur serveur' });
+      // Période (optionnelle)
+      const { period } = req.query;
+      if (period === '7' || period === '30') {
+        const days = parseInt(period, 10);
+        const fromDate = new Date();
+        fromDate.setDate(fromDate.getDate() - days);
+        filter.createdAt = { $gte: fromDate };
+      }
+
+      // (optionnel) filtre deviceId depuis le panel
+      if (req.query.deviceId) filter.deviceId = String(req.query.deviceId);
     }
+
+    const incidents = await Incident.find(filter).sort({ createdAt: -1 });
+    res.json(incidents);
+  } catch (err) {
+    console.error('Erreur récupération incidents:', err);
+    res.status(500).json({ message: 'Erreur serveur' });
   }
-);
+});
 
-/* ============ COUNT (panel) ============ */
-router.get('/count',
-  tenant({ require: true }), auth, requireRole('admin'), requireCommuneAccess(),
-  async (req, res) => {
+/* ──────────────── GET /api/incidents/count ──────────────── */
+router.get('/count', auth, requireRole('admin'), async (req, res) => {
+  try {
+    const cid = getPanelCommuneId(req);
+    const filter = {};
+
+    if (req.user.role === 'admin') {
+      if (!cid) return res.status(400).json({ message: 'communeId requis' });
+      if (String(req.user.communeId || '') !== cid) {
+        return res.status(403).json({ message: 'Accès interdit à cette commune' });
+      }
+      filter.communeId = cid;
+    } else if (req.user.role === 'superadmin') {
+      if (cid) filter.communeId = cid; // sinon total global
+    }
+
     const { period } = req.query;
-    const filter = { communeId: req.communeId };
-
     if (period === '7' || period === '30') {
       const days = parseInt(period, 10);
       const fromDate = new Date();
@@ -72,23 +110,28 @@ router.get('/count',
       filter.createdAt = { $gte: fromDate };
     }
 
-    try {
-      const total = await Incident.countDocuments(filter);
-      res.json({ total });
-    } catch (err) {
-      console.error('Erreur récupération count incidents:', err);
-      res.status(500).json({ message: 'Erreur serveur' });
-    }
+    const total = await Incident.countDocuments(filter);
+    res.json({ total });
+  } catch (err) {
+    console.error('Erreur récupération count incidents:', err);
+    res.status(500).json({ message: 'Erreur serveur' });
   }
-);
+});
 
-/* ============ CREATE (app + autres clients) ============ */
+/* ──────────────── POST /api/incidents ──────────────── */
 router.post('/', upload.single('media'), async (req, res) => {
   try {
     const {
-      title, description, lieu, status,
-      latitude, longitude, adresse, adminComment,
-      deviceId, communeId
+      title,
+      description,
+      lieu,
+      status,
+      latitude,
+      longitude,
+      adresse,
+      adminComment,
+      deviceId,
+      communeId, // 🔑 on veut le stocker si fourni par le mobile
     } = req.body;
 
     if (!title || !description || !lieu || !status || !latitude || !longitude || !deviceId) {
@@ -99,125 +142,169 @@ router.post('/', upload.single('media'), async (req, res) => {
     const mimeType = req.file ? req.file.mimetype : null;
     const mediaType = mimeType?.startsWith('video') ? 'video' : 'image';
 
-    const newIncident = await Incident.create({
-      title, description, lieu, status,
-      latitude, longitude, adresse, adminComment,
+    const newIncident = new Incident({
+      title,
+      description,
+      lieu,
+      status,
+      latitude,
+      longitude,
+      adresse,
+      adminComment,
       deviceId,
-      communeId: communeId ? String(communeId) : undefined, // 🔑 multi-commune si fourni
-      mediaUrl, mediaType
+      mediaUrl,
+      mediaType,
+      createdAt: new Date()
     });
 
-    res.status(201).json(newIncident);
+    // multi-commune si fourni
+    if (communeId) newIncident.communeId = String(communeId);
+
+    const saved = await newIncident.save();
+    res.status(201).json(saved);
   } catch (err) {
     console.error("Erreur serveur (POST /incidents) :", err);
     res.status(500).json({ message: "Erreur lors de l'enregistrement." });
   }
 });
 
-/* ============ UPDATE ============ */
-router.put('/:id',
-  (req, res, next) => isMobile(req) ? next() :
-    tenant({ require: true })(req, res, () =>
-      auth(req, res, () =>
-        requireRole('admin')(req, res, () =>
-          requireCommuneAccess()(req, res, next)
-        ))),
-  async (req, res) => {
-    const { id } = req.params;
-    if (!isObjectId(id)) {
-      return res.status(400).json({ message: '❌ ID invalide' });
-    }
+/* ──────────────── PUT /api/incidents/:id ──────────────── */
+router.put('/:id', authOptional, async (req, res) => {
+  const { id } = req.params;
+  if (!isObjectId(id)) {
+    return res.status(400).json({ message: '❌ ID invalide' });
+  }
 
-    try {
-      if (isMobile(req)) {
-        const deviceId = getDeviceIdFromReq(req);
-        if (!deviceId) return res.status(400).json({ message: 'deviceId requis (mobile)' });
+  try {
+    if (isMobile(req)) {
+      const deviceId = getDeviceIdFromReq(req);
+      if (!deviceId) return res.status(400).json({ message: 'deviceId requis (mobile)' });
 
-        const incident = await Incident.findOne({ _id: id, deviceId });
-        if (!incident) return res.status(404).json({ message: '⚠️ Incident introuvable pour ce device' });
+      const incident = await Incident.findOne({ _id: id, deviceId });
+      if (!incident) return res.status(404).json({ message: '⚠️ Incident introuvable pour ce device' });
 
-        // Mobile : ACK seulement
-        const updatedIncident = await Incident.findByIdAndUpdate(
-          id,
-          { $set: { updated: false } },
-          { new: true, runValidators: true }
-        );
-        return res.json(updatedIncident);
-      }
-
-      // Panel : impose la commune + déclenche updated:true (pour notifier l’app)
-      const body = { ...req.body, updated: true, communeId: req.communeId };
-      const updatedIncident = await Incident.findOneAndUpdate(
-        { _id: id, communeId: req.communeId },
-        { $set: body },
+      // Mobile : ACK uniquement
+      const updatedIncident = await Incident.findByIdAndUpdate(
+        id,
+        { $set: { updated: false } },
         { new: true, runValidators: true }
       );
-      if (!updatedIncident) {
-        return res.status(404).json({ message: '⚠️ Incident non trouvé' });
+      return res.json(updatedIncident);
+    }
+
+    // PANEL
+    if (!req.user) return res.status(401).json({ message: 'Non connecté' });
+    const cid = getPanelCommuneId(req);
+
+    let panelFilter = { _id: id };
+    if (req.user.role === 'admin') {
+      if (!cid) return res.status(400).json({ message: 'communeId requis' });
+      if (String(req.user.communeId || '') !== cid) {
+        return res.status(403).json({ message: 'Accès interdit à cette commune' });
       }
-      res.json(updatedIncident);
-    } catch (error) {
-      console.error('❌ Erreur modification :', error);
-      res.status(500).json({ message: 'Erreur lors de la mise à jour' });
+      panelFilter.communeId = cid;
+    } else if (req.user.role === 'superadmin') {
+      if (cid) panelFilter.communeId = cid;
+    } else {
+      return res.status(403).json({ message: 'Accès interdit' });
     }
+
+    const body = { ...req.body, updated: true };
+    const updatedIncident = await Incident.findOneAndUpdate(panelFilter, body, {
+      new: true,
+      runValidators: true,
+    });
+    if (!updatedIncident) {
+      return res.status(404).json({ message: '⚠️ Incident non trouvé' });
+    }
+    res.json(updatedIncident);
+  } catch (error) {
+    console.error('❌ Erreur modification :', error);
+    res.status(500).json({ message: 'Erreur lors de la mise à jour' });
   }
-);
+});
 
-/* ============ DELETE (panel) ============ */
-router.delete('/:id',
-  tenant({ require: true }), auth, requireRole('admin'), requireCommuneAccess(),
-  async (req, res) => {
-    const { id } = req.params;
-    if (!isObjectId(id)) {
-      return res.status(400).json({ message: '❌ ID invalide' });
-    }
+/* ──────────────── DELETE /api/incidents/:id ──────────────── */
+router.delete('/:id', auth, requireRole('admin'), async (req, res) => {
+  const { id } = req.params;
+  if (!isObjectId(id)) {
+    return res.status(400).json({ message: '❌ ID invalide' });
+  }
 
-    try {
-      const deleted = await Incident.findOneAndDelete({ _id: id, communeId: req.communeId });
-      if (!deleted) {
-        return res.status(404).json({ message: '⚠️ Incident non trouvé' });
+  try {
+    const cid = getPanelCommuneId(req);
+    let filter = { _id: id };
+
+    if (req.user.role === 'admin') {
+      if (!cid) return res.status(400).json({ message: 'communeId requis' });
+      if (String(req.user.communeId || '') !== cid) {
+        return res.status(403).json({ message: 'Accès interdit à cette commune' });
       }
-      res.json({ message: '✅ Incident supprimé' });
-    } catch (error) {
-      console.error('❌ Erreur suppression :', error);
-      res.status(500).json({ message: 'Erreur serveur' });
+      filter.communeId = cid;
+    } else if (req.user.role === 'superadmin') {
+      if (cid) filter.communeId = cid;
     }
+
+    const deleted = await Incident.findOneAndDelete(filter);
+    if (!deleted) {
+      return res.status(404).json({ message: '⚠️ Incident non trouvé' });
+    }
+    res.json({ message: '✅ Incident supprimé' });
+  } catch (error) {
+    console.error('❌ Erreur suppression :', error);
+    res.status(500).json({ message: 'Erreur serveur' });
   }
-);
+});
 
-/* ============ GET BY ID ============ */
-router.get('/:id',
-  (req, res, next) => isMobile(req) ? next() :
-    tenant({ require: true })(req, res, () =>
-      auth(req, res, () =>
-        requireRole('admin')(req, res, () =>
-          requireCommuneAccess()(req, res, next)
-        ))),
-  async (req, res) => {
-    const { id } = req.params;
-    if (!isObjectId(id)) {
-      return res.status(400).json({ message: 'ID invalide' });
-    }
+/* ──────────────── GET /api/incidents/:id ──────────────── */
+router.get('/:id', authOptional, async (req, res) => {
+  const { id } = req.params;
+  if (!isObjectId(id)) {
+    return res.status(400).json({ message: 'ID invalide' });
+  }
 
-    try {
-      let incident;
-      if (isMobile(req)) {
-        const deviceId = getDeviceIdFromReq(req);
-        if (!deviceId) return res.status(400).json({ message: 'deviceId requis (mobile)' });
-        incident = await Incident.findOne({ _id: id, deviceId });
+  try {
+    let incident;
+    if (isMobile(req)) {
+      const deviceId = getDeviceIdFromReq(req);
+      if (!deviceId) return res.status(400).json({ message: 'deviceId requis (mobile)' });
+      incident = await Incident.findOne({ _id: id, deviceId });
+    } else {
+      if (!req.user) return res.status(401).json({ message: 'Non connecté' });
+      const cid = getPanelCommuneId(req);
+
+      let filter = { _id: id };
+      if (req.user.role === 'admin') {
+        if (!cid) return res.status(400).json({ message: 'communeId requis' });
+        if (String(req.user.communeId || '') !== cid) {
+          return res.status(403).json({ message: 'Accès interdit à cette commune' });
+        }
+        filter.communeId = cid;
+      } else if (req.user.role === 'superadmin') {
+        if (cid) filter.communeId = cid;
       } else {
-        incident = await Incident.findOne({ _id: id, communeId: req.communeId });
+        return res.status(403).json({ message: 'Accès interdit' });
       }
 
-      if (!incident) {
-        return res.status(404).json({ message: 'Incident non trouvé' });
-      }
-      res.json(incident);
-    } catch (error) {
-      console.error('Erreur récupération incident par ID :', error);
-      res.status(500).json({ message: 'Erreur serveur' });
+      incident = await Incident.findOne(filter);
     }
+
+    if (!incident) {
+      return res.status(404).json({ message: 'Incident non trouvé' });
+    }
+    res.json(incident);
+  } catch (error) {
+    console.error('Erreur récupération incident par ID :', error);
+    res.status(500).json({ message: 'Erreur serveur' });
   }
-);
+});
+
+/* ====== petit helper pour autoriser anonyme (mobile) ou connecté (panel) ====== */
+function authOptional(req, res, next) {
+  // si mobile → pas d’auth JWT
+  if (isMobile(req)) return next();
+  // sinon panel → auth JWT requise
+  return auth(req, res, next);
+}
 
 module.exports = router;
