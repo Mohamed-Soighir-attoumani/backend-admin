@@ -3,47 +3,30 @@ const express = require('express');
 const router = express.Router();
 const mongoose = require('mongoose');
 const jwt = require('jsonwebtoken');
-
 const Notification = require('../models/Notification');
 const auth = require('../middleware/authMiddleware');
 const requireRole = require('../middleware/requireRole');
 const { buildVisibilityQuery } = require('../utils/visibility');
 
-/**
- * Auth optionnelle :
- * - si "Authorization: Bearer <token>" est présent, on décode le JWT
- * - on récupère l'id utilisateur même si le champ diffère (id/userId/_id/sub)
- */
+/** Auth optionnelle: si Authorization présent, on essaie d’extraire quelques infos */
 function optionalAuth(req, _res, next) {
   const authz = req.header('authorization') || '';
   if (authz.startsWith('Bearer ')) {
     const token = authz.slice(7).trim();
     try {
       const payload = jwt.verify(token, process.env.JWT_SECRET);
-
-      const userId =
-        (payload.id && String(payload.id)) ||
-        (payload.userId && String(payload.userId)) ||
-        (payload._id && String(payload._id)) ||
-        (payload.sub && String(payload.sub)) ||
-        '';
-
       req.user = {
-        id: userId,
-        email: payload.email || '',
-        role: payload.role || null,
+        role: payload.role,
         communeId: payload.communeId || '',
+        email: payload.email || '',
+        id: payload.id ? String(payload.id) : '',
       };
-    } catch (_) {
-      // token invalide → on continue en anonyme
-    }
+    } catch (_) { /* ignore */ }
   }
   next();
 }
 
-/* =========================================================================
- *                               CREATE (panel)
- * ========================================================================= */
+/* --------------------- CREATE (panel) --------------------- */
 router.post('/', auth, requireRole('admin'), async (req, res) => {
   try {
     let {
@@ -61,27 +44,29 @@ router.post('/', auth, requireRole('admin'), async (req, res) => {
       return res.status(400).json({ message: 'Titre et message requis' });
     }
 
+    // Normalisation basique
     title = String(title).trim();
     message = String(message).trim();
-    priority = ['normal', 'pinned', 'urgent'].includes(priority) ? priority : 'normal';
+    priority = ['normal','pinned','urgent'].includes(priority) ? priority : 'normal';
 
+    // Conversion dates si strings
     const toDateOrNull = (v) => (v ? new Date(v) : null);
 
     const base = {
       title,
       message,
-      visibility: 'local',                // par défaut
-      communeId: req.user.communeId || '',// admin => sa commune
+      visibility: 'local',
+      communeId: req.user.communeId || '',
       audienceCommunes: [],
       priority,
       startAt: toDateOrNull(startAt),
       endAt: toDateOrNull(endAt),
-      authorId: req.user.id || '',
-      authorEmail: req.user.email || '',
+      authorId: req.user.id,
+      authorEmail: req.user.email,
     };
 
     if (req.user.role === 'superadmin') {
-      if (visibility && ['local', 'global', 'custom'].includes(visibility)) {
+      if (visibility && ['local','global','custom'].includes(visibility)) {
         base.visibility = visibility;
       }
       if (base.visibility === 'local') {
@@ -90,14 +75,14 @@ router.post('/', auth, requireRole('admin'), async (req, res) => {
           return res.status(400).json({ message: 'communeId requis pour visibility=local' });
         }
       } else if (base.visibility === 'custom') {
-        base.communeId = '';
         base.audienceCommunes = Array.isArray(audienceCommunes) ? audienceCommunes : [];
+        base.communeId = '';
       } else if (base.visibility === 'global') {
         base.communeId = '';
         base.audienceCommunes = [];
       }
     } else {
-      // Admin simple : forcé en local sur SA commune
+      // Admin: forcé en local sur sa commune
       if (!base.communeId) {
         return res.status(403).json({ message: 'Votre compte n’est pas rattaché à une commune' });
       }
@@ -111,9 +96,7 @@ router.post('/', auth, requireRole('admin'), async (req, res) => {
   }
 });
 
-/* =========================================================================
- *                        MARK ALL READ (public)
- * ========================================================================= */
+/* ----------------- MARK ALL READ (public) ----------------- */
 router.patch('/mark-all-read', async (_req, res) => {
   try {
     await Notification.updateMany({}, { isRead: true });
@@ -124,9 +107,7 @@ router.patch('/mark-all-read', async (_req, res) => {
   }
 });
 
-/* =========================================================================
- *                                UPDATE
- * ========================================================================= */
+/* ------------------------ UPDATE ------------------------- */
 router.patch('/:id', auth, requireRole('admin'), async (req, res) => {
   const { id } = req.params;
   if (!mongoose.Types.ObjectId.isValid(id)) {
@@ -137,11 +118,15 @@ router.patch('/:id', auth, requireRole('admin'), async (req, res) => {
     const current = await Notification.findById(id);
     if (!current) return res.status(404).json({ message: 'Notification non trouvée' });
 
-    // Admin simple : peut modifier uniquement LOCAL de SA commune
+    // Admin: ne peut modifier que LOCAL de sa commune
     if (req.user.role === 'admin') {
       if (current.visibility !== 'local' || current.communeId !== (req.user.communeId || '')) {
         return res.status(403).json({ message: 'Interdit pour votre commune' });
       }
+      // Optionnel : si vous voulez limiter à ses propres notifs:
+      // if (String(current.authorId || '') !== String(req.user.id || '')) {
+      //   return res.status(403).json({ message: 'Vous ne pouvez éditer que vos propres notifications' });
+      // }
     }
 
     const payload = {};
@@ -149,8 +134,7 @@ router.patch('/:id', auth, requireRole('admin'), async (req, res) => {
 
     assignIf('title',   typeof req.body.title   === 'string' ? req.body.title.trim()   : undefined);
     assignIf('message', typeof req.body.message === 'string' ? req.body.message.trim() : undefined);
-
-    if (req.body.priority && ['normal', 'pinned', 'urgent'].includes(req.body.priority)) {
+    if (req.body.priority && ['normal','pinned','urgent'].includes(req.body.priority)) {
       payload.priority = req.body.priority;
     }
     if (req.body.isRead !== undefined) payload.isRead = !!req.body.isRead;
@@ -161,7 +145,7 @@ router.patch('/:id', auth, requireRole('admin'), async (req, res) => {
 
     if (req.user.role === 'superadmin') {
       const { visibility, communeId, audienceCommunes } = req.body || {};
-      if (visibility && ['local', 'global', 'custom'].includes(visibility)) {
+      if (visibility && ['local','global','custom'].includes(visibility)) {
         payload.visibility = visibility;
         if (visibility === 'local') {
           payload.communeId = String(communeId || '').trim();
@@ -187,9 +171,7 @@ router.patch('/:id', auth, requireRole('admin'), async (req, res) => {
   }
 });
 
-/* =========================================================================
- *                                DELETE
- * ========================================================================= */
+/* ------------------------ DELETE ------------------------- */
 router.delete('/:id', auth, requireRole('admin'), async (req, res) => {
   const { id } = req.params;
   if (!mongoose.Types.ObjectId.isValid(id)) {
@@ -204,6 +186,10 @@ router.delete('/:id', auth, requireRole('admin'), async (req, res) => {
       if (current.visibility !== 'local' || current.communeId !== (req.user.communeId || '')) {
         return res.status(403).json({ message: 'Interdit pour votre commune' });
       }
+      // Optionnel : limiter à ses propres notifs
+      // if (String(current.authorId || '') !== String(req.user.id || '')) {
+      //   return res.status(403).json({ message: 'Vous ne pouvez supprimer que vos propres notifications' });
+      // }
     }
 
     await Notification.deleteOne({ _id: id });
@@ -214,15 +200,14 @@ router.delete('/:id', auth, requireRole('admin'), async (req, res) => {
   }
 });
 
-/* =========================================================================
- *                                 LIST
+/* ------------------------- LIST -------------------------- */
+/**
  * - Public + panel (auth optionnelle)
  * - Filtrage période (?period=7|30)
- * - Multi-commune via header x-commune-id ou ?communeId=
- * - Compatibilité anciennes données (sans visibility)
- * - Fenêtre d’affichage startAt/endAt
- * - Admin simple = ne voit que ses propres notifications
- * ========================================================================= */
+ * - Multi-commune: header x-commune-id ou ?communeId=
+ * - Inclut AUSSI les anciennes notifications (sans visibility/communeId)
+ * - Fenêtre d’affichage (startAt/endAt) : APPLIQUÉE UNIQUEMENT au public
+ */
 router.get('/', optionalAuth, async (req, res) => {
   try {
     const { period } = req.query;
@@ -231,68 +216,42 @@ router.get('/', optionalAuth, async (req, res) => {
     const queryCid  = (req.query.communeId || '').trim();
     const communeId = headerCid || queryCid || '';
 
-    const userRole = req.user?.role || null;
-    const userId   = (req.user?.id || '').trim();
+    const role = req.user?.role || null;
+    const isPanel = role === 'admin' || role === 'superadmin';
 
-    // 1) Base via util : local/custom/global selon la commune ciblée
-    const baseFilter = buildVisibilityQuery({ communeId, userRole }) || {};
+    // Base via util: inclure anciens documents aussi
+    const filter = buildVisibilityQuery({
+      communeId,
+      userRole: role,
+      includeLegacy: true,
+      // includeTimeWindow: false -> on gère ci-dessous (public seulement)
+    }) || {};
 
-    // 2) Compatibilité anciennes données (pas de visibility)
-    const legacyOr = [
-      { visibility: { $exists: false } },
-      { visibility: '' },
-    ];
-
-    // On combine prudemment les filtres
-    let filter = {};
-
-    if (baseFilter.$or) {
-      filter.$or = [...baseFilter.$or, ...legacyOr];
-      // Recopie des autres conditions éventuelles
-      Object.keys(baseFilter).forEach((k) => {
-        if (k !== '$or') filter[k] = baseFilter[k];
-      });
-    } else if (Object.keys(baseFilter).length > 0) {
-      filter.$and = [ baseFilter, { $or: legacyOr } ];
-    } else {
-      filter.$or = legacyOr;
+    // Fenêtre d'affichage : uniquement pour le public (pas admin/superadmin)
+    if (!isPanel) {
+      const now = new Date();
+      const timeClauses = [
+        { $or: [{ startAt: { $exists: false } }, { startAt: null }, { startAt: { $lte: now } }] },
+        { $or: [{ endAt:   { $exists: false } }, { endAt:   null }, { endAt:   { $gte: now } }] },
+      ];
+      if (filter.$and) filter.$and.push(...timeClauses);
+      else filter.$and = timeClauses;
     }
 
-    // 3) Filtre période
+    // Période
     if (period === '7' || period === '30') {
       const days = parseInt(period, 10);
       const fromDate = new Date();
       fromDate.setDate(fromDate.getDate() - days);
-      const createdCond = { createdAt: { $gte: fromDate } };
-      if (filter.$and) filter.$and.push(createdCond);
-      else filter.$and = [createdCond];
+      filter.createdAt = Object.assign(filter.createdAt || {}, { $gte: fromDate });
     }
 
-    // 4) Fenêtre d’affichage active
-    const now = new Date();
-    const activeWindowAnd = [
-      { $or: [{ startAt: null }, { startAt: { $exists: false } }, { startAt: { $lte: now } }] },
-      { $or: [{ endAt: null },   { endAt:   { $exists: false } }, { endAt:   { $gte: now } }] },
-    ];
-    if (filter.$and) filter.$and.push(...activeWindowAnd);
-    else filter.$and = activeWindowAnd;
-
-    // 5) Admin simple → ne voit que SES notifications (crées par lui)
-    if (userRole === 'admin') {
-      const who = [];
-      if (userId) who.push({ authorId: userId });
-      if (req.user?.email) who.push({ authorEmail: req.user.email });
-
-      if (who.length) {
-        if (filter.$and) filter.$and.push({ $or: who });
-        else filter.$and = [{ $or: who }];
-      }
+    // Admin simple : ne voir QUE ses propres notifications
+    if (role === 'admin' && req.user?.id) {
+      filter.authorId = String(req.user.id);
     }
 
-    // 6) Récup
     const docs = await Notification.find(filter)
-      // NB: "priority" est une string; l’ordre alphabétique n’est pas idéal
-      // mais on garde tel quel (urgent > pinned > normal si vous changez en valeur numérique).
       .sort({ priority: -1, createdAt: -1 })
       .lean();
 
@@ -303,9 +262,7 @@ router.get('/', optionalAuth, async (req, res) => {
   }
 });
 
-/* =========================================================================
- *                                 SEED
- * ========================================================================= */
+/* ------------------------- SEED -------------------------- */
 router.post('/seed', async (_req, res) => {
   try {
     const n = await Notification.create({
