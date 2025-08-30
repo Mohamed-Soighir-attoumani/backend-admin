@@ -1,43 +1,58 @@
 // backend/utils/visibility.js
-function nowWindowFilter() {
+function buildVisibilityQuery({ communeId, userRole, ignoreTimeWindow = false }) {
   const now = new Date();
-  return {
-    $and: [
-      { $or: [{ startAt: null }, { startAt: { $lte: now } }, { startAt: { $exists: false } }] },
-      { $or: [{ endAt: null }, { endAt: { $gte: now } }, { endAt: { $exists: false } }] },
-    ],
-  };
-}
 
-/**
- * Construit un filtre Mongo pour la visibilité.
- * - superadmin sans commune => tout voir
- * - si communeId => global OR local(communeId) OR custom(audienceCommunes contient communeId)
- * - sinon (public / pas de commune) => global uniquement
- */
-function buildVisibilityQuery({ communeId, userRole }) {
-  const timeFence = nowWindowFilter();
-
-  if (userRole === 'superadmin' && !communeId) {
-    return timeFence;
-  }
+  // Quelles “portées” inclure
+  const orParts = [];
 
   if (!communeId) {
-    return { $and: [timeFence, { visibility: 'global' }] };
+    // Sans filtre de commune :
+    // - public: global + anciens (back-compat)
+    // - panel (admin/superadmin): TOUT
+    orParts.push({ visibility: 'global' });
+    orParts.push({ visibility: { $exists: false } }); // back-compat (anciens docs)
+    orParts.push({ communeId: { $exists: false } }); // back-compat
+    orParts.push({ communeId: '' });                 // back-compat
+
+    if (userRole === 'admin' || userRole === 'superadmin') {
+      orParts.push({ visibility: 'local' });
+      orParts.push({ visibility: 'custom' });
+    }
+  } else {
+    // Avec filtre de commune :
+    orParts.push({ visibility: 'global' });
+    orParts.push({ visibility: 'local', communeId });
+    orParts.push({ visibility: 'custom', audienceCommunes: communeId });
+
+    // back-compat (anciens docs)
+    orParts.push({ visibility: { $exists: false } });
+    orParts.push({ communeId: { $exists: false } });
+    orParts.push({ communeId: '' });
   }
 
-  return {
-    $and: [
-      timeFence,
+  const filter = { $or: orParts };
+
+  // Fenêtre d’affichage (uniquement pour public/mobile)
+  if (!ignoreTimeWindow) {
+    filter.$and = [
       {
         $or: [
-          { visibility: 'global' },
-          { visibility: 'local', communeId },
-          { visibility: 'custom', audienceCommunes: communeId },
+          { startAt: { $exists: false } },
+          { startAt: null },
+          { startAt: { $lte: now } },
         ],
       },
-    ],
-  };
+      {
+        $or: [
+          { endAt: { $exists: false } },
+          { endAt: null },
+          { endAt: { $gte: now } },
+        ],
+      },
+    ];
+  }
+
+  return filter;
 }
 
 module.exports = { buildVisibilityQuery };
