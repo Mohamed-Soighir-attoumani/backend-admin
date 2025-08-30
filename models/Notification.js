@@ -7,18 +7,28 @@ const notificationSchema = new mongoose.Schema(
     message: { type: String, required: true, trim: true },
     isRead: { type: Boolean, default: false },
 
-    // Portée multi-commune (ajout)
-    visibility: { type: String, enum: ['local', 'global', 'custom'], default: 'local', index: true },
-    communeId: { type: String, default: '', index: true },            // si local
-    audienceCommunes: { type: [String], default: [], index: true },   // si custom
+    // Portée multi-commune
+    visibility: {
+      type: String,
+      enum: ['local', 'global', 'custom'],
+      default: 'local',
+      index: true,
+    },
+    communeId: { type: String, default: '', index: true },           // si local
+    audienceCommunes: { type: [String], default: [], index: true },  // si custom
 
     // Options d’affichage (facultatif)
-    priority: { type: String, enum: ['normal', 'pinned', 'urgent'], default: 'normal', index: true },
+    priority: {
+      type: String,
+      enum: ['normal', 'pinned', 'urgent'],
+      default: 'normal',
+      index: true,
+    },
     startAt: { type: Date, default: null, index: true },
-    endAt: { type: Date, default: null, index: true },
+    endAt:   { type: Date, default: null, index: true },
 
     // Traçabilité
-    authorId: { type: String, default: '' },
+    authorId:    { type: String, default: '' },
     authorEmail: { type: String, default: '' },
   },
   { timestamps: true }
@@ -29,4 +39,7 @@ notificationSchema.index({ visibility: 1, communeId: 1 });
 notificationSchema.index({ visibility: 1, audienceCommunes: 1 });
 notificationSchema.index({ createdAt: -1 });
 
+// ⚠️ Important : compatibilité anciennes données
+// Si le doc n'a PAS de visibility (anciens enregistrements), on laisse tel quel.
+// Le routeur GET ajoutera un fallback pour les inclure.
 module.exports = mongoose.model('Notification', notificationSchema);
