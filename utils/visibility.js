@@ -1,30 +1,43 @@
 // backend/utils/visibility.js
-function buildVisibilityQuery({ communeId, userRole, ignoreTimeWindow = false }) {
-  const now = new Date();
 
-  // Quelles “portées” inclure
+/**
+ * Construit un filtre MongoDB pour la visibilité multi-communes.
+ *
+ * @param {Object} params
+ * @param {string}  [params.communeId]           - Commune ciblée (vide = pas de filtre de commune)
+ * @param {string}  [params.userRole]            - 'admin' | 'superadmin' | 'user' | null
+ * @param {boolean} [params.includeTimeWindow]   - Ajoute la fenêtre d'affichage (startAt/endAt). Par défaut: false
+ * @param {boolean} [params.includeLegacy]       - Inclut les anciens documents (sans visibility/communeId). Par défaut: false
+ *
+ * @returns {Object} filtre MongoDB
+ */
+function buildVisibilityQuery({
+  communeId,
+  userRole,
+  includeTimeWindow = false,
+  includeLegacy = false,
+}) {
   const orParts = [];
 
   if (!communeId) {
-    // Sans filtre de commune :
-    // - public: global + anciens (back-compat)
-    // - panel (admin/superadmin): TOUT
+    // Sans commune ciblée :
+    // - toujours visibles: global
     orParts.push({ visibility: 'global' });
-    orParts.push({ visibility: { $exists: false } }); // back-compat (anciens docs)
-    orParts.push({ communeId: { $exists: false } }); // back-compat
-    orParts.push({ communeId: '' });                 // back-compat
 
+    // Panel (admin/superadmin) : on autorise aussi local/custom
     if (userRole === 'admin' || userRole === 'superadmin') {
       orParts.push({ visibility: 'local' });
       orParts.push({ visibility: 'custom' });
     }
   } else {
-    // Avec filtre de commune :
+    // Avec commune ciblée :
     orParts.push({ visibility: 'global' });
     orParts.push({ visibility: 'local', communeId });
     orParts.push({ visibility: 'custom', audienceCommunes: communeId });
+  }
 
-    // back-compat (anciens docs)
+  // Back-compat (anciens documents) : activable au besoin
+  if (includeLegacy) {
     orParts.push({ visibility: { $exists: false } });
     orParts.push({ communeId: { $exists: false } });
     orParts.push({ communeId: '' });
@@ -32,8 +45,9 @@ function buildVisibilityQuery({ communeId, userRole, ignoreTimeWindow = false })
 
   const filter = { $or: orParts };
 
-  // Fenêtre d’affichage (uniquement pour public/mobile)
-  if (!ignoreTimeWindow) {
+  // Fenêtre d'affichage (facultatif, utile côté public/mobile)
+  if (includeTimeWindow) {
+    const now = new Date();
     filter.$and = [
       {
         $or: [
