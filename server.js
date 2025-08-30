@@ -91,6 +91,7 @@ const changePasswordRoute = require('./routes/changePassword');
 
 const incidentRoutes = require('./routes/incidents');
 const articleRoutes = require('./routes/articles');
+const infoRoutes        = require('./routes/infos');
 const notificationRoutes = require('./routes/notifications');
 const projectRoutes = require('./routes/projects');
 const deviceRoutes = require('./routes/devices');
@@ -122,6 +123,7 @@ app.use(
 
 app.use('/api/incidents', incidentRoutes);
 app.use('/api/articles', articleRoutes);
+app.use('/api/infos', infoRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/api/projects', projectRoutes);
 app.use('/api/devices', deviceRoutes);
