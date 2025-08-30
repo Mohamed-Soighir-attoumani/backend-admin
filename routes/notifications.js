@@ -8,7 +8,7 @@ const auth = require('../middleware/authMiddleware');
 const requireRole = require('../middleware/requireRole');
 const { buildVisibilityQuery } = require('../utils/visibility');
 
-/** Optional auth: si Authorization présent, on essaye d’extraire le rôle */
+/** Auth optionnelle: si Authorization présent, on essaie d’extraire quelques infos */
 function optionalAuth(req, _res, next) {
   const authz = req.header('authorization') || '';
   if (authz.startsWith('Bearer ')) {
@@ -21,37 +21,76 @@ function optionalAuth(req, _res, next) {
         email: payload.email || '',
         id: payload.id ? String(payload.id) : '',
       };
-    } catch (_) {/* ignore */}
+    } catch (_) { /* ignore */ }
   }
   next();
 }
 
-// --------- CREATE (panel) ----------
+/* --------------------- CREATE (panel) --------------------- */
 router.post('/', auth, requireRole('admin'), async (req, res) => {
   try {
-    const { title, message, visibility, communeId, audienceCommunes, priority, startAt, endAt } = req.body;
-    if (!title || !message) return res.status(400).json({ message: 'Titre et message requis' });
+    let {
+      title,
+      message,
+      visibility,
+      communeId,
+      audienceCommunes,
+      priority,
+      startAt,
+      endAt,
+    } = req.body || {};
 
-    let doc = {
-      title, message,
+    if (!title || !message) {
+      return res.status(400).json({ message: 'Titre et message requis' });
+    }
+
+    // Normalisation basique
+    title = String(title).trim();
+    message = String(message).trim();
+    priority = ['normal','pinned','urgent'].includes(priority) ? priority : 'normal';
+
+    // Conversion dates si strings
+    const toDateOrNull = (v) =>
+      v ? new Date(v) : null;
+
+    const base = {
+      title,
+      message,
       visibility: 'local',
       communeId: req.user.communeId || '',
       audienceCommunes: [],
-      priority: priority || 'normal',
-      startAt: startAt || null,
-      endAt: endAt || null,
+      priority,
+      startAt: toDateOrNull(startAt),
+      endAt: toDateOrNull(endAt),
       authorId: req.user.id,
       authorEmail: req.user.email,
     };
 
     if (req.user.role === 'superadmin') {
-      if (visibility) doc.visibility = visibility;
-      if (visibility === 'local') doc.communeId = (communeId || '').trim();
-      if (visibility === 'custom') doc.audienceCommunes = Array.isArray(audienceCommunes) ? audienceCommunes : [];
-      if (visibility === 'global') { doc.communeId = ''; doc.audienceCommunes = []; }
+      if (visibility && ['local','global','custom'].includes(visibility)) {
+        base.visibility = visibility;
+      }
+      if (base.visibility === 'local') {
+        base.communeId = String(communeId || '').trim();
+        // Sécurité: exiger une commune pour "local"
+        if (!base.communeId) {
+          return res.status(400).json({ message: 'communeId requis pour visibility=local' });
+        }
+      } else if (base.visibility === 'custom') {
+        base.audienceCommunes = Array.isArray(audienceCommunes) ? audienceCommunes : [];
+        base.communeId = '';
+      } else if (base.visibility === 'global') {
+        base.communeId = '';
+        base.audienceCommunes = [];
+      }
+    } else {
+      // Admin: forcé en local sur sa commune
+      if (!base.communeId) {
+        return res.status(403).json({ message: 'Votre compte n’est pas rattaché à une commune' });
+      }
     }
 
-    const created = await Notification.create(doc);
+    const created = await Notification.create(base);
     res.status(201).json(created);
   } catch (err) {
     console.error('❌ POST /notifications', err);
@@ -59,7 +98,7 @@ router.post('/', auth, requireRole('admin'), async (req, res) => {
   }
 });
 
-// --------- MARK ALL READ ----------
+/* ----------------- MARK ALL READ (public) ----------------- */
 router.patch('/mark-all-read', async (_req, res) => {
   try {
     await Notification.updateMany({}, { isRead: true });
@@ -70,16 +109,18 @@ router.patch('/mark-all-read', async (_req, res) => {
   }
 });
 
-// --------- UPDATE ----------
+/* ------------------------ UPDATE ------------------------- */
 router.patch('/:id', auth, requireRole('admin'), async (req, res) => {
   const { id } = req.params;
-  if (!mongoose.Types.ObjectId.isValid(id)) return res.status(400).json({ message: 'ID invalide' });
+  if (!mongoose.Types.ObjectId.isValid(id)) {
+    return res.status(400).json({ message: 'ID invalide' });
+  }
 
   try {
     const current = await Notification.findById(id);
     if (!current) return res.status(404).json({ message: 'Notification non trouvée' });
 
-    // Admin ne peut modifier que LOCAL de sa commune
+    // Admin: ne peut modifier que LOCAL de sa commune
     if (req.user.role === 'admin') {
       if (current.visibility !== 'local' || current.communeId !== (req.user.communeId || '')) {
         return res.status(403).json({ message: 'Interdit pour votre commune' });
@@ -87,16 +128,40 @@ router.patch('/:id', auth, requireRole('admin'), async (req, res) => {
     }
 
     const payload = {};
-    ['title','message','isRead','priority','startAt','endAt'].forEach(k => {
-      if (req.body[k] !== undefined) payload[k] = req.body[k];
-    });
+    const assignIf = (k, val) => { if (val !== undefined) payload[k] = val; };
 
+    // Champs simples
+    assignIf('title',   typeof req.body.title   === 'string' ? req.body.title.trim()   : undefined);
+    assignIf('message', typeof req.body.message === 'string' ? req.body.message.trim() : undefined);
+    if (req.body.priority && ['normal','pinned','urgent'].includes(req.body.priority)) {
+      payload.priority = req.body.priority;
+    }
+    if (req.body.isRead !== undefined) payload.isRead = !!req.body.isRead;
+
+    // Dates
+    const toDateOrNull = (v) => (v ? new Date(v) : null);
+    if ('startAt' in req.body) payload.startAt = toDateOrNull(req.body.startAt);
+    if ('endAt'   in req.body) payload.endAt   = toDateOrNull(req.body.endAt);
+
+    // Superadmin peut changer la portée
     if (req.user.role === 'superadmin') {
-      const { visibility, communeId, audienceCommunes } = req.body;
-      if (visibility) payload.visibility = visibility;
-      if (visibility === 'local') payload.communeId = (communeId || '').trim();
-      if (visibility === 'custom') payload.audienceCommunes = Array.isArray(audienceCommunes) ? audienceCommunes : [];
-      if (visibility === 'global') { payload.communeId = ''; payload.audienceCommunes = []; }
+      const { visibility, communeId, audienceCommunes } = req.body || {};
+      if (visibility && ['local','global','custom'].includes(visibility)) {
+        payload.visibility = visibility;
+        if (visibility === 'local') {
+          payload.communeId = String(communeId || '').trim();
+          payload.audienceCommunes = [];
+          if (!payload.communeId) {
+            return res.status(400).json({ message: 'communeId requis pour visibility=local' });
+          }
+        } else if (visibility === 'custom') {
+          payload.communeId = '';
+          payload.audienceCommunes = Array.isArray(audienceCommunes) ? audienceCommunes : [];
+        } else if (visibility === 'global') {
+          payload.communeId = '';
+          payload.audienceCommunes = [];
+        }
+      }
     }
 
     const updated = await Notification.findByIdAndUpdate(id, { $set: payload }, { new: true });
@@ -107,10 +172,12 @@ router.patch('/:id', auth, requireRole('admin'), async (req, res) => {
   }
 });
 
-// --------- DELETE ----------
+/* ------------------------ DELETE ------------------------- */
 router.delete('/:id', auth, requireRole('admin'), async (req, res) => {
   const { id } = req.params;
-  if (!mongoose.Types.ObjectId.isValid(id)) return res.status(400).json({ message: 'ID invalide' });
+  if (!mongoose.Types.ObjectId.isValid(id)) {
+    return res.status(400).json({ message: 'ID invalide' });
+  }
 
   try {
     const current = await Notification.findById(id);
@@ -130,41 +197,91 @@ router.delete('/:id', auth, requireRole('admin'), async (req, res) => {
   }
 });
 
-// --------- LIST (publique + panel) ----------
+/* ------------------------- LIST -------------------------- */
+/**
+ * - Public + panel (auth optionnelle)
+ * - Filtrage période (?period=7|30)
+ * - multi-commune: header x-commune-id ou ?communeId=
+ * - Inclut AUSSI les anciennes notifications sans visibility/communeId
+ * - Respecte la fenêtre d’affichage startAt/endAt si renseignée
+ */
 router.get('/', optionalAuth, async (req, res) => {
-  const { period } = req.query;
-
-  const headerCid = (req.header('x-commune-id') || '').trim();
-  const queryCid = (req.query.communeId || '').trim();
-  const communeId = headerCid || queryCid || '';
-
-  const userRole = req.user?.role || null;
-
-  const filter = buildVisibilityQuery({ communeId, userRole });
-
-  // Période optionnelle
-  if (period === '7' || period === '30') {
-    const days = parseInt(period, 10);
-    const fromDate = new Date();
-    fromDate.setDate(fromDate.getDate() - days);
-    filter.createdAt = Object.assign(filter.createdAt || {}, { $gte: fromDate });
-  }
-
   try {
-    const notifs = await Notification.find(filter)
+    const { period } = req.query;
+
+    const headerCid = (req.header('x-commune-id') || '').trim();
+    const queryCid  = (req.query.communeId || '').trim();
+    const communeId = headerCid || queryCid || '';
+
+    const userRole = req.user?.role || null;
+
+    // Base via util (local/custom/global)
+    const baseFilter = buildVisibilityQuery({ communeId, userRole }) || {};
+
+    // ✅ Inclure aussi les anciennes notifications (sans visibility défini)
+    //    et celles avec visibility vide (si jamais).
+    const legacyOr = [
+      { visibility: { $exists: false } },
+      { visibility: '' },
+    ];
+
+    let filter = {};
+    if (baseFilter.$or) {
+      filter.$or = [...baseFilter.$or, ...legacyOr];
+      // copy any other base conditions (except $or) to filter
+      Object.keys(baseFilter).forEach(k => {
+        if (k !== '$or') filter[k] = baseFilter[k];
+      });
+    } else {
+      // si baseFilter n'utilise pas $or, on combine de manière sûre
+      filter = {
+        $and: [
+          baseFilter,
+          { $or: legacyOr }
+        ]
+      };
+    }
+
+    // Période
+    if (period === '7' || period === '30') {
+      const days = parseInt(period, 10);
+      const fromDate = new Date();
+      fromDate.setDate(fromDate.getDate() - days);
+      filter.createdAt = Object.assign(filter.createdAt || {}, { $gte: fromDate });
+    }
+
+    // Fenêtre d'affichage (si renseignée)
+    const now = new Date();
+    const activeWindowAnd = [
+      { $or: [{ startAt: null }, { startAt: { $exists: false } }, { startAt: { $lte: now } }] },
+      { $or: [{ endAt: null },   { endAt:   { $exists: false } }, { endAt:   { $gte: now } }] },
+    ];
+    if (filter.$and) {
+      filter.$and.push(...activeWindowAnd);
+    } else {
+      filter.$and = activeWindowAnd;
+    }
+
+    // Tri de priorité: urgent > pinned > normal (via champ text)
+    // Pour forcer l'ordre, on peut projeter un score; plus simple: tri par priorité puis createdAt
+    const docs = await Notification.find(filter)
       .sort({ priority: -1, createdAt: -1 })
       .lean();
-    res.json(notifs);
+
+    res.json(docs);
   } catch (err) {
     console.error('❌ GET /notifications', err);
     res.status(500).json({ message: 'Erreur serveur' });
   }
 });
 
-// --------- SEED (optionnel) ----------
+/* ------------------------- SEED -------------------------- */
 router.post('/seed', async (_req, res) => {
   try {
-    const n = await Notification.create({ title: 'Notification de test', message: '🔔 Ceci est une notification de test.' });
+    const n = await Notification.create({
+      title: 'Notification de test',
+      message: '🔔 Ceci est une notification de test.',
+    });
     res.status(201).json(n);
   } catch (err) {
     console.error('❌ POST /notifications/seed', err);
