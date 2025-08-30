@@ -3,27 +3,33 @@ const mongoose = require('mongoose');
 
 const projectSchema = new mongoose.Schema(
   {
-    name: { type: String, required: true, trim: true },
+    name:        { type: String, required: true, trim: true },
     description: { type: String, required: true, trim: true },
-    imageUrl: { type: String, default: '' },
+    imageUrl:    { type: String, default: null },
 
     // Portée multi-commune
-    visibility: { type: String, enum: ['local', 'global', 'custom'], default: 'local', index: true },
-    communeId: { type: String, default: '', index: true },
+    visibility: {
+      type: String,
+      enum: ['local', 'global', 'custom'],
+      default: 'local',
+      index: true,
+    },
+    communeId:        { type: String, default: '', index: true },
     audienceCommunes: { type: [String], default: [], index: true },
 
-    // Options d’affichage
+    // Options d’affichage (facultatif)
     priority: { type: String, enum: ['normal', 'pinned', 'urgent'], default: 'normal', index: true },
-    startAt: { type: Date, default: null, index: true },
-    endAt: { type: Date, default: null, index: true },
+    startAt:  { type: Date, default: null, index: true },
+    endAt:    { type: Date, default: null, index: true },
 
     // Traçabilité
-    authorId: { type: String, default: '' },
+    authorId:    { type: String, default: '' },
     authorEmail: { type: String, default: '' },
   },
   { timestamps: true }
 );
 
+// Index utiles
 projectSchema.index({ visibility: 1, communeId: 1 });
 projectSchema.index({ visibility: 1, audienceCommunes: 1 });
 projectSchema.index({ createdAt: -1 });
