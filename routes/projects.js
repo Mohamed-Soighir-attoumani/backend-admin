@@ -1,89 +1,149 @@
+// backend/routes/projects.js
 const express = require('express');
 const router = express.Router();
+const jwt = require('jsonwebtoken');
 const multer = require('multer');
 const Project = require('../models/Project');
-
-// ✅ Import du storage Cloudinary
+const auth = require('../middleware/authMiddleware');
+const requireRole = require('../middleware/requireRole');
 const { storage } = require('../utils/cloudinary');
-const upload = multer({ storage }); // utilise multer-storage-cloudinary
+const { buildVisibilityQuery } = require('../utils/visibility');
 
-// 📝 POST - Créer un projet
-router.post('/', upload.single('image'), async (req, res) => {
+const upload = multer({ storage });
+
+// optional auth
+function optionalAuth(req, _res, next) {
+  const authz = req.header('authorization') || '';
+  if (authz.startsWith('Bearer ')) {
+    const token = authz.slice(7).trim();
+    try {
+      const payload = jwt.verify(token, process.env.JWT_SECRET);
+      req.user = {
+        role: payload.role,
+        communeId: payload.communeId || '',
+        email: payload.email || '',
+        id: payload.id ? String(payload.id) : '',
+      };
+    } catch (_) {}
+  }
+  next();
+}
+
+// CREATE
+router.post('/', auth, requireRole('admin'), upload.single('image'), async (req, res) => {
   try {
-    const { name, description } = req.body;
-    const imageUrl = req.file ? req.file.path : null; // 🔗 URL Cloudinary
+    const { name, description, visibility, communeId, audienceCommunes, priority, startAt, endAt } = req.body;
+    if (!name || !description) return res.status(400).json({ message: 'Nom et description requis' });
 
-    const newProject = new Project({
-      name,
-      description,
-      imageUrl,
-    });
+    const imageUrl = req.file ? req.file.path : '';
 
-    const saved = await newProject.save();
+    let doc = {
+      name, description, imageUrl,
+      visibility: 'local',
+      communeId: req.user.communeId || '',
+      audienceCommunes: [],
+      priority: priority || 'normal',
+      startAt: startAt || null,
+      endAt: endAt || null,
+      authorId: req.user.id,
+      authorEmail: req.user.email,
+    };
+
+    if (req.user.role === 'superadmin') {
+      if (visibility) doc.visibility = visibility;
+      if (visibility === 'local') doc.communeId = (communeId || '').trim();
+      if (visibility === 'custom') doc.audienceCommunes = Array.isArray(audienceCommunes) ? audienceCommunes : [];
+      if (visibility === 'global') { doc.communeId = ''; doc.audienceCommunes = []; }
+    }
+
+    const saved = await Project.create(doc);
     res.status(201).json(saved);
   } catch (err) {
-    console.error("❌ Erreur POST projet:", err);
-    res.status(500).json({ message: "Erreur serveur" });
+    console.error('❌ POST /projects', err);
+    res.status(500).json({ message: 'Erreur serveur' });
   }
 });
 
-// 📥 GET - Liste des projets
-router.get('/', async (_req, res) => {
+// LIST (publique + panel)
+router.get('/', optionalAuth, async (req, res) => {
   try {
-    const projects = await Project.find().sort({ createdAt: -1 });
+    const userRole = req.user?.role || null;
+    const headerCid = (req.header('x-commune-id') || '').trim();
+    const queryCid = (req.query.communeId || '').trim();
+    const communeId = headerCid || queryCid || '';
+
+    const filter = buildVisibilityQuery({ communeId, userRole });
+    const projects = await Project.find(filter).sort({ priority: -1, createdAt: -1 }).lean();
     res.json(projects);
   } catch (err) {
-    console.error("❌ Erreur GET projets:", err);
-    res.status(500).json({ message: "Erreur serveur" });
+    console.error('❌ GET /projects', err);
+    res.status(500).json({ message: 'Erreur serveur' });
   }
 });
 
-// 📄 GET - Détail d'un projet par ID
+// DETAIL
 router.get('/:id', async (req, res) => {
   try {
-    const project = await Project.findById(req.params.id);
-    if (!project) {
-      return res.status(404).json({ message: 'Projet introuvable' });
-    }
-    res.json(project);
+    const p = await Project.findById(req.params.id);
+    if (!p) return res.status(404).json({ message: 'Projet introuvable' });
+    res.json(p);
   } catch (err) {
-    console.error("❌ Erreur GET projet par ID :", err);
-    res.status(500).json({ message: "Erreur serveur" });
+    console.error('❌ GET /projects/:id', err);
+    res.status(500).json({ message: 'Erreur serveur' });
   }
 });
 
-// ✏️ PUT - Modifier un projet
-router.put('/:id', upload.single('image'), async (req, res) => {
+// UPDATE
+router.put('/:id', auth, requireRole('admin'), upload.single('image'), async (req, res) => {
   try {
-    const project = await Project.findById(req.params.id);
-    if (!project) return res.status(404).json({ message: "Projet introuvable" });
+    const current = await Project.findById(req.params.id);
+    if (!current) return res.status(404).json({ message: 'Projet introuvable' });
 
-    project.name = req.body.name || project.name;
-    project.description = req.body.description || project.description;
-
-    if (req.file) {
-      project.imageUrl = req.file.path; // 🔗 Nouvelle image Cloudinary
+    if (req.user.role === 'admin') {
+      if (current.visibility !== 'local' || current.communeId !== (req.user.communeId || '')) {
+        return res.status(403).json({ message: 'Interdit pour votre commune' });
+      }
     }
 
-    await project.save();
-    res.json(project);
+    const payload = {};
+    ['name','description','priority','startAt','endAt'].forEach(k => {
+      if (req.body[k] !== undefined) payload[k] = req.body[k];
+    });
+    if (req.file) payload.imageUrl = req.file.path;
+
+    if (req.user.role === 'superadmin') {
+      const { visibility, communeId, audienceCommunes } = req.body;
+      if (visibility) payload.visibility = visibility;
+      if (visibility === 'local') payload.communeId = (communeId || '').trim();
+      if (visibility === 'custom') payload.audienceCommunes = Array.isArray(audienceCommunes) ? audienceCommunes : [];
+      if (visibility === 'global') { payload.communeId = ''; payload.audienceCommunes = []; }
+    }
+
+    const updated = await Project.findByIdAndUpdate(req.params.id, { $set: payload }, { new: true });
+    res.json(updated);
   } catch (err) {
-    console.error("❌ Erreur PUT /api/projects/:id :", err);
-    res.status(500).json({ message: "Erreur modification projet" });
+    console.error('❌ PUT /projects/:id', err);
+    res.status(500).json({ message: 'Erreur modification projet' });
   }
 });
 
-// 🗑️ DELETE - Supprimer un projet
-router.delete('/:id', async (req, res) => {
+// DELETE
+router.delete('/:id', auth, requireRole('admin'), async (req, res) => {
   try {
-    const project = await Project.findByIdAndDelete(req.params.id);
-    if (!project) {
-      return res.status(404).json({ message: 'Projet introuvable' });
+    const current = await Project.findById(req.params.id);
+    if (!current) return res.status(404).json({ message: 'Projet introuvable' });
+
+    if (req.user.role === 'admin') {
+      if (current.visibility !== 'local' || current.communeId !== (req.user.communeId || '')) {
+        return res.status(403).json({ message: 'Interdit pour votre commune' });
+      }
     }
+
+    await Project.deleteOne({ _id: req.params.id });
     res.json({ message: '✅ Projet supprimé' });
   } catch (err) {
-    console.error("❌ Erreur DELETE /api/projects/:id :", err);
-    res.status(500).json({ message: "Erreur suppression projet" });
+    console.error('❌ DELETE /projects/:id', err);
+    res.status(500).json({ message: 'Erreur suppression projet' });
   }
 });
 
