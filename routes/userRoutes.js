@@ -11,44 +11,58 @@ const User = require('../models/User');
 /* Utils */
 const isValidId = (id) => mongoose.Types.ObjectId.isValid(String(id || ''));
 const norm = (v) => String(v || '').trim().toLowerCase();
-const decode = (v) => { try { return decodeURIComponent(String(v)); } catch { return String(v); } };
+
+function cleanCandidate(v) {
+  if (v == null) return '';
+  let s = String(v).trim();
+  // enlève guillemets éventuellement passés
+  s = s.replace(/^"+|"+$/g, '').replace(/^'+|'+$/g, '');
+  try { s = decodeURIComponent(s); } catch {}
+  return s;
+}
 
 /**
  * 🔍 Résout un utilisateur à partir de :
- * - req.params.id (ObjectId, $oid, ObjectId("..."), email, userId)
- * - req.body.id / req.body.userId / req.body.email
+ *  - id Mongo (ObjectId),
+ *  - _idString,
+ *  - id/userId,
+ *  - email
+ *  Les formats encodés / mélangés sont supportés (extraction 24-hexa dans une string).
  */
 async function findUserByAnyId(primary, body = {}) {
-  const candidates = [
-    decode(primary),
-    decode(body.id),
-    decode(body.userId),
-    norm(body.email || ''),
-  ].filter(Boolean);
+  const candidatesRaw = [
+    primary,
+    body.id,
+    body.userId,
+    body._id,
+    body._idString,
+    body.email,
+    body.queryId,
+  ];
 
-  for (const raw of candidates) {
-    const s = String(raw).trim();
-    if (!s) continue;
+  if (primary && typeof primary === 'object') {
+    candidatesRaw.push(primary.id, primary._id, primary._idString, primary.email);
+  }
 
+  const candidates = candidatesRaw.map(cleanCandidate).filter(Boolean);
+
+  for (const s of candidates) {
     // 1) ObjectId direct
     if (isValidId(s)) {
       const byId = await User.findById(s);
       if (byId) return byId;
     }
-
-    // 2) ObjectId caché dans un string
+    // 2) ObjectId caché dans une chaîne (ObjectId("..."), {"$oid":"..."} ou texte)
     const m = s.match(/[a-f0-9]{24}/i);
     if (m && isValidId(m[0])) {
       const byHex = await User.findById(m[0]);
       if (byHex) return byHex;
     }
-
     // 3) email
     if (s.includes('@')) {
       const byEmail = await User.findOne({ email: norm(s) });
       if (byEmail) return byEmail;
     }
-
     // 4) userId custom éventuel
     const byUserId = await User.findOne({ userId: s });
     if (byUserId) return byUserId;
@@ -99,7 +113,7 @@ router.get('/admins', auth, requireRole('superadmin'), async (req, res) => {
       .limit(ps)
       .lean();
 
-    // ✅ standardise un champ _idString pour le front
+    // standardise _idString
     items = items.map(u => ({ ...u, _idString: String(u._id) }));
     const total = await User.countDocuments(find);
 
@@ -110,7 +124,7 @@ router.get('/admins', auth, requireRole('superadmin'), async (req, res) => {
   }
 });
 
-/* ===================== LISTE /api/users (fallback) ===================== */
+/* ===================== LISTE /api/users (fallback/générique) ===================== */
 router.get('/users', auth, requireRole('superadmin'), async (req, res) => {
   try {
     const {
@@ -167,12 +181,11 @@ router.get('/users', auth, requireRole('superadmin'), async (req, res) => {
 /* ===================== CRÉATION ADMIN ===================== */
 router.post('/users', auth, requireRole('superadmin'), async (req, res) => {
   try {
-    let { email, password, name, communeId, communeName, role, createdBy } = req.body || {};
+    let { email, password, name, communeId, communeName, createdBy } = req.body || {};
     email = norm(email);
     if (!email || !password) {
       return res.status(400).json({ message: 'Email et mot de passe requis' });
     }
-    role = 'admin';
 
     const exists = await User.findOne({ email });
     if (exists) return res.status(409).json({ message: 'Email déjà utilisé' });
@@ -181,9 +194,9 @@ router.post('/users', auth, requireRole('superadmin'), async (req, res) => {
 
     const doc = await User.create({
       email,
-      password: passwordHash, // ✅ correspond au schéma
+      password: passwordHash,   // correspond au schéma User (password: String, select:false)
       name: name || '',
-      role,
+      role: 'admin',
       communeId: communeId || '',
       communeName: communeName || '',
       createdBy: createdBy ? String(createdBy) : '',
@@ -242,7 +255,7 @@ router.post('/users/:id/toggle-active', auth, requireRole('superadmin'), async (
 
     res.json({ ok: true, user: { ...user.toObject(), _idString: String(user._id) } });
   } catch (err) {
-    console.error('❌ POST /api/users/:id/toggle-active', err);
+    console.error('❌ POST /users/:id/toggle-active', err);
     res.status(500).json({ message: 'Erreur serveur' });
   }
 });
@@ -266,6 +279,46 @@ router.get('/users/:id/invoices', auth, requireRole('superadmin'), async (req, r
     res.json({ invoices: inv });
   } catch (err) {
     console.error('❌ GET /api/users/:id/invoices', err);
+    res.status(500).json({ message: 'Erreur serveur' });
+  }
+});
+
+/* ===================== ENDPOINTS POUR LA PAGE MON ABONNEMENT ===================== */
+// Statut de l’abonnement de l’utilisateur courant (admin connecté)
+router.get('/my-subscription', auth, async (req, res) => {
+  try {
+    const me = await User.findById(req.user.id).lean();
+    if (!me) return res.status(404).json({ message: 'Utilisateur introuvable' });
+
+    return res.json({
+      status: me.subscriptionStatus || 'none',
+      endAt: me.subscriptionEndAt || null,
+    });
+  } catch (e) {
+    console.error('❌ GET /api/my-subscription', e);
+    res.status(500).json({ message: 'Erreur serveur' });
+  }
+});
+
+// Factures de l’utilisateur courant (admin connecté)
+router.get('/my-invoices', auth, async (req, res) => {
+  try {
+    const me = await User.findById(req.user.id).lean();
+    if (!me) return res.status(404).json({ message: 'Utilisateur introuvable' });
+
+    const invoices = [{
+      id: `INV-${String(me._id).slice(-6)}`,
+      number: `INV-${new Date().getFullYear()}-${String(me._id).slice(-4)}`,
+      amount: me.subscriptionStatus === 'active' ? 19.90 : 0.00,
+      currency: 'EUR',
+      status: me.subscriptionStatus === 'active' ? 'paid' : 'unpaid',
+      date: new Date(),
+      url: 'https://example.com/invoice.pdf',
+    }];
+
+    res.json({ invoices });
+  } catch (e) {
+    console.error('❌ GET /api/my-invoices', e);
     res.status(500).json({ message: 'Erreur serveur' });
   }
 });
