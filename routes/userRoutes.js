@@ -7,18 +7,13 @@ const bcrypt = require('bcryptjs');
 const auth = require('../middleware/authMiddleware');
 const requireRole = require('../middleware/requireRole');
 const User = require('../models/User');
+let Admin = null; try { Admin = require('../models/Admin'); } catch (_) {}
 
-/* Utils */
 const isValidId = (id) => mongoose.Types.ObjectId.isValid(String(id || ''));
 const norm = (v) => String(v || '').trim().toLowerCase();
 
-/**
- * Résout un utilisateur à partir de:
- * - id (ObjectId, $oid, string 24-hex)
- * - email (si param ressemble à un email)
- * - userId (fallback éventuel)
- */
-async function findUserByAnyId(primary, body = {}) {
+/** Cherche dans User puis (si dispo) Admin, par id/$oid/24hex/email/userId */
+async function findAccount(primary, body = {}) {
   const candidates = [
     String(primary || '').trim(),
     String(body.id || '').trim(),
@@ -30,26 +25,42 @@ async function findUserByAnyId(primary, body = {}) {
 
     // 1) ObjectId direct
     if (isValidId(raw)) {
-      const hit = await User.findById(raw);
-      if (hit) return hit;
+      const hitU = await User.findById(raw);
+      if (hitU) return { doc: hitU, model: 'User' };
+      if (Admin) {
+        const hitA = await Admin.findById(raw);
+        if (hitA) return { doc: hitA, model: 'Admin' };
+      }
     }
 
-    // 2) extrait un 24-hex (format $oid ou .toString())
+    // 2) $oid / 24-hex parse
     const m = raw.match(/[a-f0-9]{24}/i);
     if (m && isValidId(m[0])) {
-      const byHex = await User.findById(m[0]);
-      if (byHex) return byHex;
+      const hitU = await User.findById(m[0]);
+      if (hitU) return { doc: hitU, model: 'User' };
+      if (Admin) {
+        const hitA = await Admin.findById(m[0]);
+        if (hitA) return { doc: hitA, model: 'Admin' };
+      }
     }
 
     // 3) email
     if (raw.includes('@')) {
-      const byEmail = await User.findOne({ email: norm(raw) });
-      if (byEmail) return byEmail;
+      const byEmailU = await User.findOne({ email: norm(raw) });
+      if (byEmailU) return { doc: byEmailU, model: 'User' };
+      if (Admin) {
+        const byEmailA = await Admin.findOne({ email: norm(raw) });
+        if (byEmailA) return { doc: byEmailA, model: 'Admin' };
+      }
     }
 
-    // 4) userId personnalisé (si jamais tu l’utilises)
-    const byUserId = await User.findOne({ userId: raw });
-    if (byUserId) return byUserId;
+    // 4) userId
+    const byUidU = await User.findOne({ userId: raw });
+    if (byUidU) return { doc: byUidU, model: 'User' };
+    if (Admin) {
+      const byUidA = await Admin.findOne({ userId: raw });
+      if (byUidA) return { doc: byUidA, model: 'Admin' };
+    }
   }
 
   return null;
@@ -97,8 +108,7 @@ router.get('/admins', auth, requireRole('superadmin'), async (req, res) => {
       .limit(ps)
       .lean();
 
-    // Standardise l'ID pour le front
-    items = items.map((u) => ({ ...u, _idString: String(u._id) }));
+    items = items.map(u => ({ ...u, _idString: String(u._id) }));
 
     const total = await User.countDocuments(find);
     res.json({ items, total });
@@ -152,7 +162,7 @@ router.get('/users', auth, requireRole('superadmin'), async (req, res) => {
       .limit(ps)
       .lean();
 
-    items = items.map((u) => ({ ...u, _idString: String(u._id) }));
+    items = items.map(u => ({ ...u, _idString: String(u._id) }));
 
     const total = await User.countDocuments(find);
     res.json({ items, total });
@@ -165,12 +175,11 @@ router.get('/users', auth, requireRole('superadmin'), async (req, res) => {
 /* ===================== CRÉATION ADMIN ===================== */
 router.post('/users', auth, requireRole('superadmin'), async (req, res) => {
   try {
-    let { email, password, name, communeId, communeName, role } = req.body || {};
+    let { email, password, name, communeId, communeName } = req.body || {};
     email = norm(email);
     if (!email || !password) {
       return res.status(400).json({ message: 'Email et mot de passe requis' });
     }
-    role = 'admin';
 
     const exists = await User.findOne({ email });
     if (exists) return res.status(409).json({ message: 'Email déjà utilisé' });
@@ -179,13 +188,14 @@ router.post('/users', auth, requireRole('superadmin'), async (req, res) => {
 
     const doc = await User.create({
       email,
-      passwordHash, // ✅ stocké dans le bon champ
+      passwordHash, // on stocke dans passwordHash (compat conservée avec "password")
       name: name || '',
-      role,
+      role: 'admin',
       communeId: communeId || '',
       communeName: communeName || '',
       isActive: true,
       subscriptionStatus: 'none',
+      subscriptionEndAt: null,
       createdBy: req.user?.id || '',
     });
 
@@ -199,26 +209,27 @@ router.post('/users', auth, requireRole('superadmin'), async (req, res) => {
 /* ===================== MISE À JOUR ADMIN ===================== */
 router.put('/users/:id', auth, requireRole('superadmin'), async (req, res) => {
   try {
-    const user = await findUserByAnyId(req.params.id, req.body);
-    if (!user) return res.status(404).json({ message: 'Utilisateur introuvable' });
-    if (user.role !== 'admin') {
+    const found = await findAccount(req.params.id, req.body);
+    if (!found) return res.status(404).json({ message: 'Utilisateur introuvable' });
+    if (found.doc.role !== 'admin') {
       return res.status(400).json({ message: 'Seuls les admins sont éditables ici' });
     }
 
     const payload = {};
     if (typeof req.body.email === 'string') payload.email = norm(req.body.email);
-    if (typeof req.body.name === 'string') payload.name = req.body.name;
-    if (typeof req.body.communeId === 'string') payload.communeId = req.body.communeId;
+    if (typeof req.body.name === 'string')  payload.name = req.body.name;
+    if (typeof req.body.communeId === 'string')   payload.communeId = req.body.communeId;
     if (typeof req.body.communeName === 'string') payload.communeName = req.body.communeName;
-    if (typeof req.body.isActive === 'boolean') payload.isActive = req.body.isActive;
+    if (typeof req.body.isActive === 'boolean')   payload.isActive = req.body.isActive;
 
-    // Sécurité : pas de changement de rôle par cette route
     if (req.body.role && req.body.role !== 'admin') {
       return res.status(400).json({ message: 'Changement de rôle interdit ici' });
     }
 
-    const updated = await User.findByIdAndUpdate(user._id, { $set: payload }, { new: true });
-    res.json(updated.toJSON());
+    // On met à jour dans le modèle d’origine (User ou Admin)
+    const Model = found.model === 'Admin' ? Admin : User;
+    const updated = await Model.findByIdAndUpdate(found.doc._id, { $set: payload }, { new: true });
+    res.json(updated.toJSON ? updated.toJSON() : updated);
   } catch (err) {
     console.error('❌ PUT /api/users/:id', err);
     res.status(500).json({ message: 'Erreur serveur' });
@@ -228,14 +239,15 @@ router.put('/users/:id', auth, requireRole('superadmin'), async (req, res) => {
 /* ===================== TOGGLE ACTIVE ===================== */
 router.post('/users/:id/toggle-active', auth, requireRole('superadmin'), async (req, res) => {
   try {
-    const user = await findUserByAnyId(req.params.id, req.body);
-    if (!user) return res.status(404).json({ message: 'Utilisateur introuvable' });
+    const found = await findAccount(req.params.id, req.body);
+    if (!found) return res.status(404).json({ message: 'Utilisateur introuvable' });
 
     const next = !!req.body.active;
-    user.isActive = next;
-    await user.save();
+    found.doc.isActive = next;
+    await found.doc.save();
 
-    res.json({ ok: true, user: user.toJSON() });
+    const plain = found.doc.toJSON ? found.doc.toJSON() : found.doc;
+    res.json({ ok: true, user: plain });
   } catch (err) {
     console.error('❌ POST /api/users/:id/toggle-active', err);
     res.status(500).json({ message: 'Erreur serveur' });
@@ -245,15 +257,16 @@ router.post('/users/:id/toggle-active', auth, requireRole('superadmin'), async (
 /* ===================== FACTURES (stub) ===================== */
 router.get('/users/:id/invoices', auth, requireRole('superadmin'), async (req, res) => {
   try {
-    const user = await findUserByAnyId(req.params.id, req.query);
-    if (!user) return res.status(404).json({ message: 'Utilisateur introuvable' });
+    const found = await findAccount(req.params.id, req.query);
+    if (!found) return res.status(404).json({ message: 'Utilisateur introuvable' });
 
+    const u = found.doc;
     const inv = [{
-      id: `INV-${String(user._id).slice(-6)}`,
-      number: `INV-${new Date().getFullYear()}-${String(user._id).slice(-4)}`,
-      amount: user.subscriptionStatus === 'active' ? 19.90 : 0.00,
+      id: `INV-${String(u._id).slice(-6)}`,
+      number: `INV-${new Date().getFullYear()}-${String(u._id).slice(-4)}`,
+      amount: u.subscriptionStatus === 'active' ? 19.90 : 0.00,
       currency: 'EUR',
-      status: user.subscriptionStatus === 'active' ? 'paid' : 'unpaid',
+      status: u.subscriptionStatus === 'active' ? 'paid' : 'unpaid',
       date: new Date(),
       url: 'https://example.com/invoice.pdf'
     }];
