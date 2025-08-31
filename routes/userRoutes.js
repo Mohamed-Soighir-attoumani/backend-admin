@@ -7,13 +7,15 @@ const bcrypt = require('bcryptjs');
 const auth = require('../middleware/authMiddleware');
 const requireRole = require('../middleware/requireRole');
 const User = require('../models/User');
-let Admin = null; try { Admin = require('../models/Admin'); } catch (_) {}
 
+/* Utils */
 const isValidId = (id) => mongoose.Types.ObjectId.isValid(String(id || ''));
 const norm = (v) => String(v || '').trim().toLowerCase();
 
-/** Cherche dans User puis (si dispo) Admin, par id/$oid/24hex/email/userId */
-async function findAccount(primary, body = {}) {
+/**
+ * Résout un utilisateur à partir de: id/email/userId
+ */
+async function findUserByAnyId(primary, body = {}) {
   const candidates = [
     String(primary || '').trim(),
     String(body.id || '').trim(),
@@ -23,44 +25,24 @@ async function findAccount(primary, body = {}) {
   for (const raw of candidates) {
     if (!raw) continue;
 
-    // 1) ObjectId direct
     if (isValidId(raw)) {
-      const hitU = await User.findById(raw);
-      if (hitU) return { doc: hitU, model: 'User' };
-      if (Admin) {
-        const hitA = await Admin.findById(raw);
-        if (hitA) return { doc: hitA, model: 'Admin' };
-      }
+      const hit = await User.findById(raw);
+      if (hit) return hit;
     }
 
-    // 2) $oid / 24-hex parse
     const m = raw.match(/[a-f0-9]{24}/i);
     if (m && isValidId(m[0])) {
-      const hitU = await User.findById(m[0]);
-      if (hitU) return { doc: hitU, model: 'User' };
-      if (Admin) {
-        const hitA = await Admin.findById(m[0]);
-        if (hitA) return { doc: hitA, model: 'Admin' };
-      }
+      const byHex = await User.findById(m[0]);
+      if (byHex) return byHex;
     }
 
-    // 3) email
     if (raw.includes('@')) {
-      const byEmailU = await User.findOne({ email: norm(raw) });
-      if (byEmailU) return { doc: byEmailU, model: 'User' };
-      if (Admin) {
-        const byEmailA = await Admin.findOne({ email: norm(raw) });
-        if (byEmailA) return { doc: byEmailA, model: 'Admin' };
-      }
+      const byEmail = await User.findOne({ email: norm(raw) });
+      if (byEmail) return byEmail;
     }
 
-    // 4) userId
-    const byUidU = await User.findOne({ userId: raw });
-    if (byUidU) return { doc: byUidU, model: 'User' };
-    if (Admin) {
-      const byUidA = await Admin.findOne({ userId: raw });
-      if (byUidA) return { doc: byUidA, model: 'Admin' };
-    }
+    const byUserId = await User.findOne({ userId: raw });
+    if (byUserId) return byUserId;
   }
 
   return null;
@@ -69,14 +51,7 @@ async function findAccount(primary, body = {}) {
 /* ===================== LISTE ADMINS ===================== */
 router.get('/admins', auth, requireRole('superadmin'), async (req, res) => {
   try {
-    const {
-      q = '',
-      communeId = '',
-      status = '',
-      sub = '',
-      page = 1,
-      pageSize = 15,
-    } = req.query;
+    const { q = '', communeId = '', status = '', sub = '', page = 1, pageSize = 15 } = req.query;
 
     const find = { role: 'admin' };
 
@@ -109,8 +84,8 @@ router.get('/admins', auth, requireRole('superadmin'), async (req, res) => {
       .lean();
 
     items = items.map(u => ({ ...u, _idString: String(u._id) }));
-
     const total = await User.countDocuments(find);
+
     res.json({ items, total });
   } catch (err) {
     console.error('❌ GET /api/admins', err);
@@ -121,15 +96,7 @@ router.get('/admins', auth, requireRole('superadmin'), async (req, res) => {
 /* ===================== LISTE /api/users (fallback) ===================== */
 router.get('/users', auth, requireRole('superadmin'), async (req, res) => {
   try {
-    const {
-      q = '',
-      communeId = '',
-      role = '',
-      status = '',
-      sub = '',
-      page = 1,
-      pageSize = 15,
-    } = req.query;
+    const { q = '', communeId = '', role = '', status = '', sub = '', page = 1, pageSize = 15 } = req.query;
 
     const find = {};
     if (role) find.role = role;
@@ -163,8 +130,8 @@ router.get('/users', auth, requireRole('superadmin'), async (req, res) => {
       .lean();
 
     items = items.map(u => ({ ...u, _idString: String(u._id) }));
-
     const total = await User.countDocuments(find);
+
     res.json({ items, total });
   } catch (err) {
     console.error('❌ GET /api/users', err);
@@ -175,11 +142,12 @@ router.get('/users', auth, requireRole('superadmin'), async (req, res) => {
 /* ===================== CRÉATION ADMIN ===================== */
 router.post('/users', auth, requireRole('superadmin'), async (req, res) => {
   try {
-    let { email, password, name, communeId, communeName } = req.body || {};
+    let { email, password, name, communeId, communeName, role } = req.body || {};
     email = norm(email);
     if (!email || !password) {
       return res.status(400).json({ message: 'Email et mot de passe requis' });
     }
+    role = 'admin';
 
     const exists = await User.findOne({ email });
     if (exists) return res.status(409).json({ message: 'Email déjà utilisé' });
@@ -188,9 +156,9 @@ router.post('/users', auth, requireRole('superadmin'), async (req, res) => {
 
     const doc = await User.create({
       email,
-      passwordHash, // on stocke dans passwordHash (compat conservée avec "password")
+      passwordHash,
       name: name || '',
-      role: 'admin',
+      role,
       communeId: communeId || '',
       communeName: communeName || '',
       isActive: true,
@@ -209,9 +177,9 @@ router.post('/users', auth, requireRole('superadmin'), async (req, res) => {
 /* ===================== MISE À JOUR ADMIN ===================== */
 router.put('/users/:id', auth, requireRole('superadmin'), async (req, res) => {
   try {
-    const found = await findAccount(req.params.id, req.body);
-    if (!found) return res.status(404).json({ message: 'Utilisateur introuvable' });
-    if (found.doc.role !== 'admin') {
+    const user = await findUserByAnyId(req.params.id, req.body);
+    if (!user) return res.status(404).json({ message: 'Utilisateur introuvable' });
+    if (user.role !== 'admin') {
       return res.status(400).json({ message: 'Seuls les admins sont éditables ici' });
     }
 
@@ -226,10 +194,8 @@ router.put('/users/:id', auth, requireRole('superadmin'), async (req, res) => {
       return res.status(400).json({ message: 'Changement de rôle interdit ici' });
     }
 
-    // On met à jour dans le modèle d’origine (User ou Admin)
-    const Model = found.model === 'Admin' ? Admin : User;
-    const updated = await Model.findByIdAndUpdate(found.doc._id, { $set: payload }, { new: true });
-    res.json(updated.toJSON ? updated.toJSON() : updated);
+    const updated = await User.findByIdAndUpdate(user._id, { $set: payload }, { new: true });
+    res.json(updated.toJSON());
   } catch (err) {
     console.error('❌ PUT /api/users/:id', err);
     res.status(500).json({ message: 'Erreur serveur' });
@@ -239,34 +205,41 @@ router.put('/users/:id', auth, requireRole('superadmin'), async (req, res) => {
 /* ===================== TOGGLE ACTIVE ===================== */
 router.post('/users/:id/toggle-active', auth, requireRole('superadmin'), async (req, res) => {
   try {
-    const found = await findAccount(req.params.id, req.body);
-    if (!found) return res.status(404).json({ message: 'Utilisateur introuvable' });
+    const user = await findUserByAnyId(req.params.id, req.body);
+    if (!user) return res.status(404).json({ message: 'Utilisateur introuvable' });
 
     const next = !!req.body.active;
-    found.doc.isActive = next;
-    await found.doc.save();
+    user.isActive = next;
+    await user.save();
 
-    const plain = found.doc.toJSON ? found.doc.toJSON() : found.doc;
-    res.json({ ok: true, user: plain });
+    res.json({ ok: true, user: user.toJSON() });
   } catch (err) {
     console.error('❌ POST /api/users/:id/toggle-active', err);
     res.status(500).json({ message: 'Erreur serveur' });
   }
 });
 
-/* ===================== FACTURES (stub) ===================== */
-router.get('/users/:id/invoices', auth, requireRole('superadmin'), async (req, res) => {
+/* ===================== FACTURES (self + superadmin) ===================== */
+// 👉 superadmin peut voir toutes les factures,
+// 👉 un admin peut voir les siennes si :id === req.user.id
+router.get('/users/:id/invoices', auth, async (req, res) => {
   try {
-    const found = await findAccount(req.params.id, req.query);
-    if (!found) return res.status(404).json({ message: 'Utilisateur introuvable' });
+    const { id } = req.params;
+    const isSelf = String(id) === String(req.user.id);
+    const isSuper = req.user.role === 'superadmin';
+    if (!isSelf && !isSuper) {
+      return res.status(403).json({ message: 'Accès interdit' });
+    }
 
-    const u = found.doc;
+    const user = await findUserByAnyId(id, req.query);
+    if (!user) return res.status(404).json({ message: 'Utilisateur introuvable' });
+
     const inv = [{
-      id: `INV-${String(u._id).slice(-6)}`,
-      number: `INV-${new Date().getFullYear()}-${String(u._id).slice(-4)}`,
-      amount: u.subscriptionStatus === 'active' ? 19.90 : 0.00,
+      id: `INV-${String(user._id).slice(-6)}`,
+      number: `INV-${new Date().getFullYear()}-${String(user._id).slice(-4)}`,
+      amount: user.subscriptionStatus === 'active' ? 19.90 : 0.00,
       currency: 'EUR',
-      status: u.subscriptionStatus === 'active' ? 'paid' : 'unpaid',
+      status: user.subscriptionStatus === 'active' ? 'paid' : 'unpaid',
       date: new Date(),
       url: 'https://example.com/invoice.pdf'
     }];
@@ -274,6 +247,45 @@ router.get('/users/:id/invoices', auth, requireRole('superadmin'), async (req, r
     res.json({ invoices: inv });
   } catch (err) {
     console.error('❌ GET /api/users/:id/invoices', err);
+    res.status(500).json({ message: 'Erreur serveur' });
+  }
+});
+
+/* ===================== SELF-SERVICE: abonnement & factures ===================== */
+// ✅ statut d’abonnement de l’utilisateur connecté
+router.get('/me/subscription', auth, async (req, res) => {
+  try {
+    const user = await User.findById(req.user.id).lean();
+    if (!user) return res.status(404).json({ message: 'Utilisateur introuvable' });
+    res.json({
+      status: user.subscriptionStatus || 'none',
+      endAt: user.subscriptionEndAt || null,
+    });
+  } catch (err) {
+    console.error('❌ GET /api/me/subscription', err);
+    res.status(500).json({ message: 'Erreur serveur' });
+  }
+});
+
+// ✅ factures de l’utilisateur connecté
+router.get('/me/invoices', auth, async (req, res) => {
+  try {
+    const user = await User.findById(req.user.id);
+    if (!user) return res.status(404).json({ message: 'Utilisateur introuvable' });
+
+    const inv = [{
+      id: `INV-${String(user._id).slice(-6)}`,
+      number: `INV-${new Date().getFullYear()}-${String(user._id).slice(-4)}`,
+      amount: user.subscriptionStatus === 'active' ? 19.90 : 0.00,
+      currency: 'EUR',
+      status: user.subscriptionStatus === 'active' ? 'paid' : 'unpaid',
+      date: new Date(),
+      url: 'https://example.com/invoice.pdf'
+    }];
+
+    res.json({ invoices: inv });
+  } catch (err) {
+    console.error('❌ GET /api/me/invoices', err);
     res.status(500).json({ message: 'Erreur serveur' });
   }
 });
