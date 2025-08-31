@@ -10,18 +10,29 @@ const isValidId = (id) => mongoose.Types.ObjectId.isValid(id);
 
 async function findUserByAnyId(id) {
   if (!id) return null;
+
+  // 1) ObjectId direct
   if (isValidId(id)) {
     const byId = await User.findById(id);
     if (byId) return byId;
   }
+  // 2) 24-hex extrait
+  const m = String(id).match(/[a-f0-9]{24}/i);
+  if (m && isValidId(m[0])) {
+    const byHex = await User.findById(m[0]);
+    if (byHex) return byHex;
+  }
+  // 3) email
   const byEmail = await User.findOne({ email: String(id).trim().toLowerCase() });
   if (byEmail) return byEmail;
+  // 4) userId
   const byUserId = await User.findOne({ userId: id });
   if (byUserId) return byUserId;
+
   return null;
 }
 
-// (optionnel) liste de plans
+/* Plans (optionnel) */
 router.get('/subscriptions/plans', auth, requireRole('superadmin'), (_req, res) => {
   res.json({
     plans: [
@@ -32,7 +43,7 @@ router.get('/subscriptions/plans', auth, requireRole('superadmin'), (_req, res) 
   });
 });
 
-// Démarrer un abonnement
+/* Start */
 router.post('/subscriptions/:id/start', auth, requireRole('superadmin'), async (req, res) => {
   try {
     const { id } = req.params;
@@ -48,14 +59,14 @@ router.post('/subscriptions/:id/start', auth, requireRole('superadmin'), async (
     user.subscriptionEndAt = end;
     await user.save();
 
-    res.json({ ok: true, user, planId, periodMonths: months });
+    res.json({ ok: true, user: user.toJSON(), planId, periodMonths: months });
   } catch (err) {
     console.error('❌ POST /subscriptions/:id/start', err);
     res.status(500).json({ message: 'Erreur serveur' });
   }
 });
 
-// Renouveler
+/* Renew */
 router.post('/subscriptions/:id/renew', auth, requireRole('superadmin'), async (req, res) => {
   try {
     const { id } = req.params;
@@ -63,9 +74,10 @@ router.post('/subscriptions/:id/renew', auth, requireRole('superadmin'), async (
     const user = await findUserByAnyId(id);
     if (!user) return res.status(404).json({ message: 'Utilisateur introuvable' });
 
-    const base = user.subscriptionEndAt && user.subscriptionEndAt > new Date()
-      ? new Date(user.subscriptionEndAt)
-      : new Date();
+    const base =
+      user.subscriptionEndAt && user.subscriptionEndAt > new Date()
+        ? new Date(user.subscriptionEndAt)
+        : new Date();
     const months = Math.max(1, parseInt(periodMonths, 10) || 1);
     base.setMonth(base.getMonth() + months);
 
@@ -73,14 +85,14 @@ router.post('/subscriptions/:id/renew', auth, requireRole('superadmin'), async (
     user.subscriptionEndAt = base;
     await user.save();
 
-    res.json({ ok: true, user, planId, periodMonths: months });
+    res.json({ ok: true, user: user.toJSON(), planId, periodMonths: months });
   } catch (err) {
     console.error('❌ POST /subscriptions/:id/renew', err);
     res.status(500).json({ message: 'Erreur serveur' });
   }
 });
 
-// Annuler
+/* Cancel */
 router.post('/subscriptions/:id/cancel', auth, requireRole('superadmin'), async (req, res) => {
   try {
     const { id } = req.params;
@@ -91,7 +103,7 @@ router.post('/subscriptions/:id/cancel', auth, requireRole('superadmin'), async 
     user.subscriptionEndAt = null;
     await user.save();
 
-    res.json({ ok: true, user });
+    res.json({ ok: true, user: user.toJSON() });
   } catch (err) {
     console.error('❌ POST /subscriptions/:id/cancel', err);
     res.status(500).json({ message: 'Erreur serveur' });
