@@ -1,3 +1,4 @@
+// backend/server.js
 require('dotenv').config();
 
 const express = require('express');
@@ -13,24 +14,20 @@ const runBackup = require('./scripts/backup');
 
 const app = express();
 
-/* ===================== ENV ===================== */
 const PORT = process.env.PORT || 4000;
 const HOST = process.env.HOST || '0.0.0.0';
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/backend_admin';
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN || null;
-const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || '*';
+const FRONTEND_ORIGIN = process.env.FRONEND_ORIGIN || process.env.FRONTEND_ORIGIN || '*';
 
-/* (conseillé sur Render/Heroku derrière proxy) */
 app.set('trust proxy', 1);
 
-/* ===================== CORS ===================== */
-/** IMPORTANT : on autorise aussi le header multi-commune `x-commune-id` */
 const ALLOWED_HEADERS = [
   'Content-Type',
   'Authorization',
   'Cache-Control',
   'X-Requested-With',
-  'x-commune-id',   // 👈👈 AJOUT pour filtrage par commune côté panel
+  'x-commune-id',
   'x-app-key',
   'X-App-Key',
 ];
@@ -44,32 +41,24 @@ app.use(
   })
 );
 
-/* Réponse aux préflights */
 app.options('*', (req, res) => {
-  // on renvoie l'origine appelante si fournie, sinon FRONTEND_ORIGIN (évite '*' + credentials)
   const origin = req.headers.origin || (FRONTEND_ORIGIN !== '*' ? FRONTEND_ORIGIN : '*');
   res.header('Access-Control-Allow-Origin', origin);
   res.header('Access-Control-Allow-Credentials', 'true');
   res.header('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
-
-  // On reflète les headers demandés par le navigateur, sinon notre liste par défaut
   res.header(
     'Access-Control-Allow-Headers',
     req.headers['access-control-request-headers'] || ALLOWED_HEADERS.join(', ')
   );
-
   return res.sendStatus(204);
 });
 
-/* ===================== Body & Static ===================== */
-app.use(express.json({ limit: '10mb' })); // sûreté (ne casse rien)
+app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
-/* ===================== Logs HTTP ===================== */
 app.use(morgan('combined', { stream: { write: (msg) => logger.info(msg.trim()) } }));
 
-/* ===================== Prometheus ===================== */
 app.use(
   promBundle({
     metricsPath: '/metrics',
@@ -79,27 +68,24 @@ app.use(
   })
 );
 
-/* ===================== Health ===================== */
 app.get('/api/health', (_, res) => res.json({ status: 'ok', timestamp: Date.now() }));
 
-/* ===================== Import des routes ===================== */
-const setupAdminRoute = require('./routes/setup-admin');
-const authRoutes = require('./routes/auth');
-const meRoute = require('./routes/me');
-const adminsRoutes = require('./routes/admins');
+/* Routes */
+const setupAdminRoute   = require('./routes/setup-admin');
+const authRoutes        = require('./routes/auth');
+const meRoute           = require('./routes/me');
+const adminsRoutes      = require('./routes/admins'); // ta route existante
 const changePasswordRoute = require('./routes/changePassword');
 
-const incidentRoutes = require('./routes/incidents');
-const articleRoutes = require('./routes/articles');
+const incidentRoutes    = require('./routes/incidents');
+const articleRoutes     = require('./routes/articles');
 const infoRoutes        = require('./routes/infos');
 const notificationRoutes = require('./routes/notifications');
-const projectRoutes = require('./routes/projects');
-const deviceRoutes = require('./routes/devices');
-const userRoutes = require('./routes/userRoutes');
-const subscriptionRoutes = require('./routes/subscriptions');
-const debugRoutes = require('./routes/debug');
+const projectRoutes     = require('./routes/projects');
+const deviceRoutes      = require('./routes/devices');
+const userRoutes        = require('./routes/userRoutes');      // ✅ inclut /api/admins (fallback), /api/users
+const subscriptionRoutes = require('./routes/subscriptions');  // ✅ inclut /api/subscriptions
 
-/* ===================== Montage des routes ===================== */
 app.use('/api', setupAdminRoute);
 app.use('/api', authRoutes);
 app.use('/api', meRoute);
@@ -128,14 +114,12 @@ app.use('/api/infos', infoRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/api/projects', projectRoutes);
 app.use('/api/devices', deviceRoutes);
-app.use('/api', userRoutes);
-app.use('/api', subscriptionRoutes);
-app.use('/api', debugRoutes);
+app.use('/api', userRoutes);          // ✅ /api/admins (version de ce fichier) & /api/users
+app.use('/api', subscriptionRoutes);  // ✅ /api/subscriptions
+app.use('/api', require('./routes/debug'));
 
-/* ===================== Accueil ===================== */
 app.get('/', (_, res) => res.send('API SecuriDem opérationnelle ✅'));
 
-/* ===================== CRON backup ===================== */
 cron.schedule('0 3 * * *', async () => {
   logger.info('Lancement sauvegarde quotidienne');
   try {
@@ -146,20 +130,17 @@ cron.schedule('0 3 * * *', async () => {
   }
 });
 
-/* ===================== Handler d’erreurs ===================== */
 app.use((err, req, res, _next) => {
   logger.error('Erreur serveur 🧨', { error: err.stack });
   res.status(500).json({ message: 'Erreur interne du serveur' });
 });
 
-/* ===================== 404 API ===================== */
 app.use('/api/*', (req, res) => {
   res
     .status(404)
     .json({ message: `Route API introuvable ❌ (${req.method} ${req.originalUrl})` });
 });
 
-/* ===================== DB + serveur ===================== */
 mongoose
   .connect(MONGODB_URI, { useNewUrlParser: true, useUnifiedTopology: true })
   .then(() => {
