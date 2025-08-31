@@ -11,13 +11,11 @@ module.exports = async function auth(req, res, next) {
 
     const payload = jwt.verify(token, process.env.JWT_SECRET);
 
-    // Supporter à la fois payload.tv et payload.tokenVersion
     const tokenTv =
       typeof payload.tv === 'number' ? payload.tv
       : typeof payload.tokenVersion === 'number' ? payload.tokenVersion
       : undefined;
 
-    // Chercher le compte dans User puis Admin (par id, puis fallback email)
     let account = null;
 
     if (payload.id) {
@@ -45,7 +43,6 @@ module.exports = async function auth(req, res, next) {
       return res.status(401).json({ message: 'Session expirée (déconnexion forcée)' });
     }
 
-    // Infos fiables issues de la DB (pas du token)
     req.user = {
       id: String(account._id),
       email: account.email,
@@ -53,7 +50,6 @@ module.exports = async function auth(req, res, next) {
       communeId: account.communeId || '',
       communeName: account.communeName || '',
       tv: currentTv,
-      // flags d’impersonation conservés si présents
       impersonated: !!payload.impersonated,
       origUserId: payload.origUserId ? String(payload.origUserId) : undefined,
     };
