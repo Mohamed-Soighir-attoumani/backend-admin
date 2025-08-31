@@ -8,22 +8,19 @@ const auth = require('../middleware/authMiddleware');
 const requireRole = require('../middleware/requireRole');
 const User = require('../models/User');
 
-// Modèle Admin optionnel (si pas présent, on ignore)
-let Admin = null; try { Admin = require('../models/Admin'); } catch (_) {}
-
 /* Utils */
 const isValidId = (id) => mongoose.Types.ObjectId.isValid(String(id || ''));
 const norm = (v) => String(v || '').trim().toLowerCase();
 const decode = (v) => { try { return decodeURIComponent(String(v)); } catch { return String(v); } };
 
 /**
- * 🔍 Résout un compte à partir d’un maximum d’indices (ID/Email/UserId…)
- * Cherche d’abord dans User, puis dans Admin (si existant).
+ * 🔍 Résout un utilisateur à partir de :
+ * - req.params.id (ObjectId, $oid, ObjectId("..."), email, userId)
+ * - req.body.id / req.body.userId / req.body.email
  */
-async function findAccountByAnyId(primary, body = {}) {
+async function findUserByAnyId(primary, body = {}) {
   const candidates = [
     decode(primary),
-    decode(body._id),
     decode(body.id),
     decode(body.userId),
     norm(body.email || ''),
@@ -35,41 +32,32 @@ async function findAccountByAnyId(primary, body = {}) {
 
     // 1) ObjectId direct
     if (isValidId(s)) {
-      let hit = await User.findById(s);
-      if (!hit && Admin) hit = await Admin.findById(s);
-      if (hit) return hit;
+      const byId = await User.findById(s);
+      if (byId) return byId;
     }
 
-    // 2) ObjectId caché dans un string (ObjectId("...") | {"$oid":"..."} | texte quelconque)
+    // 2) ObjectId caché dans un string
     const m = s.match(/[a-f0-9]{24}/i);
     if (m && isValidId(m[0])) {
-      let hit = await User.findById(m[0]);
-      if (!hit && Admin) hit = await Admin.findById(m[0]);
-      if (hit) return hit;
+      const byHex = await User.findById(m[0]);
+      if (byHex) return byHex;
     }
 
     // 3) email
     if (s.includes('@')) {
-      let hit = await User.findOne({ email: norm(s) });
-      if (!hit && Admin) hit = await Admin.findOne({ email: norm(s) });
-      if (hit) return hit;
+      const byEmail = await User.findOne({ email: norm(s) });
+      if (byEmail) return byEmail;
     }
 
-    // 4) userId custom
-    let hit = await User.findOne({ userId: s });
-    if (!hit && Admin) hit = await Admin.findOne({ userId: s });
-    if (hit) return hit;
+    // 4) userId custom éventuel
+    const byUserId = await User.findOne({ userId: s });
+    if (byUserId) return byUserId;
   }
 
   return null;
 }
 
 /* ===================== LISTE ADMINS ===================== */
-/**
- * GET /api/admins
- * Filtre dans la collection User (rôle admin).
- * (Si tu veux fusionner User + Admin dans la liste, dis-moi et je te pousse une agrégation)
- */
 router.get('/admins', auth, requireRole('superadmin'), async (req, res) => {
   try {
     const {
@@ -193,7 +181,7 @@ router.post('/users', auth, requireRole('superadmin'), async (req, res) => {
 
     const doc = await User.create({
       email,
-      password: passwordHash, // ✅ correspond au schéma User
+      password: passwordHash, // ✅ correspond au schéma
       name: name || '',
       role,
       communeId: communeId || '',
@@ -217,15 +205,15 @@ router.post('/users', auth, requireRole('superadmin'), async (req, res) => {
 /* ===================== MISE À JOUR ADMIN ===================== */
 router.put('/users/:id', auth, requireRole('superadmin'), async (req, res) => {
   try {
-    const account = await findAccountByAnyId(req.params.id, req.body);
-    if (!account) return res.status(404).json({ message: 'Utilisateur introuvable' });
-    if (account.role !== 'admin') {
+    const user = await findUserByAnyId(req.params.id, req.body);
+    if (!user) return res.status(404).json({ message: 'Utilisateur introuvable' });
+    if (user.role !== 'admin') {
       return res.status(400).json({ message: 'Seuls les admins sont éditables ici' });
     }
 
     const payload = {};
-    if (typeof req.body.email === 'string')       payload.email = norm(req.body.email);
-    if (typeof req.body.name === 'string')        payload.name = req.body.name;
+    if (typeof req.body.email === 'string') payload.email = norm(req.body.email);
+    if (typeof req.body.name === 'string')  payload.name = req.body.name;
     if (typeof req.body.communeId === 'string')   payload.communeId = req.body.communeId;
     if (typeof req.body.communeName === 'string') payload.communeName = req.body.communeName;
     if (typeof req.body.isActive === 'boolean')   payload.isActive = req.body.isActive;
@@ -234,11 +222,8 @@ router.put('/users/:id', auth, requireRole('superadmin'), async (req, res) => {
       return res.status(400).json({ message: 'Changement de rôle interdit ici' });
     }
 
-    // ✅ fonctionne quel que soit le modèle (User ou Admin)
-    Object.assign(account, payload);
-    const saved = await account.save();
-
-    res.json({ ...saved.toObject(), _idString: String(saved._id) });
+    const updated = await User.findByIdAndUpdate(user._id, { $set: payload }, { new: true });
+    res.json({ ...updated.toObject(), _idString: String(updated._id) });
   } catch (err) {
     console.error('❌ PUT /api/users/:id', err);
     res.status(500).json({ message: 'Erreur serveur' });
@@ -248,14 +233,14 @@ router.put('/users/:id', auth, requireRole('superadmin'), async (req, res) => {
 /* ===================== TOGGLE ACTIVE ===================== */
 router.post('/users/:id/toggle-active', auth, requireRole('superadmin'), async (req, res) => {
   try {
-    const account = await findAccountByAnyId(req.params.id, req.body);
-    if (!account) return res.status(404).json({ message: 'Utilisateur introuvable' });
+    const user = await findUserByAnyId(req.params.id, req.body);
+    if (!user) return res.status(404).json({ message: 'Utilisateur introuvable' });
 
     const next = !!req.body.active;
-    account.isActive = next;
-    const saved = await account.save();
+    user.isActive = next;
+    await user.save();
 
-    res.json({ ok: true, user: { ...saved.toObject(), _idString: String(saved._id) } });
+    res.json({ ok: true, user: { ...user.toObject(), _idString: String(user._id) } });
   } catch (err) {
     console.error('❌ POST /api/users/:id/toggle-active', err);
     res.status(500).json({ message: 'Erreur serveur' });
@@ -265,16 +250,15 @@ router.post('/users/:id/toggle-active', auth, requireRole('superadmin'), async (
 /* ===================== FACTURES (exemple compatible) ===================== */
 router.get('/users/:id/invoices', auth, requireRole('superadmin'), async (req, res) => {
   try {
-    const account = await findAccountByAnyId(req.params.id, req.query);
-    if (!account) return res.status(404).json({ message: 'Utilisateur introuvable' });
+    const user = await findUserByAnyId(req.params.id, req.query);
+    if (!user) return res.status(404).json({ message: 'Utilisateur introuvable' });
 
-    // Exemple minimal ; remplace-le par ta vraie logique si besoin
     const inv = [{
-      id: `INV-${String(account._id).slice(-6)}`,
-      number: `INV-${new Date().getFullYear()}-${String(account._id).slice(-4)}`,
-      amount: account.subscriptionStatus === 'active' ? 19.90 : 0.00,
+      id: `INV-${String(user._id).slice(-6)}`,
+      number: `INV-${new Date().getFullYear()}-${String(user._id).slice(-4)}`,
+      amount: user.subscriptionStatus === 'active' ? 19.90 : 0.00,
       currency: 'EUR',
-      status: account.subscriptionStatus === 'active' ? 'paid' : 'unpaid',
+      status: user.subscriptionStatus === 'active' ? 'paid' : 'unpaid',
       date: new Date(),
       url: 'https://example.com/invoice.pdf'
     }];
