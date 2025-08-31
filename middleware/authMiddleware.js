@@ -1,4 +1,3 @@
-// backend/middleware/authMiddleware.js
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
 let Admin = null; try { Admin = require('../models/Admin'); } catch (_) {}
