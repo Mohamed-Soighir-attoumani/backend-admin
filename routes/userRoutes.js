@@ -13,7 +13,10 @@ const isValidId = (id) => mongoose.Types.ObjectId.isValid(String(id || ''));
 const norm = (v) => String(v || '').trim().toLowerCase();
 
 /**
- * Résout un utilisateur à partir de: id/email/userId
+ * Résout un utilisateur à partir de:
+ * - req.params.id (ObjectId, $oid, email, userId)
+ * - req.body.id
+ * - req.body.email
  */
 async function findUserByAnyId(primary, body = {}) {
   const candidates = [
@@ -25,33 +28,43 @@ async function findUserByAnyId(primary, body = {}) {
   for (const raw of candidates) {
     if (!raw) continue;
 
+    // 1) ObjectId direct
     if (isValidId(raw)) {
       const hit = await User.findById(raw);
       if (hit) return hit;
     }
 
+    // 2) extrait un 24-hex (format $oid ou autre)
     const m = raw.match(/[a-f0-9]{24}/i);
     if (m && isValidId(m[0])) {
       const byHex = await User.findById(m[0]);
       if (byHex) return byHex;
     }
 
+    // 3) email
     if (raw.includes('@')) {
       const byEmail = await User.findOne({ email: norm(raw) });
       if (byEmail) return byEmail;
     }
 
+    // 4) userId personnalisé
     const byUserId = await User.findOne({ userId: raw });
     if (byUserId) return byUserId;
   }
-
   return null;
 }
 
 /* ===================== LISTE ADMINS ===================== */
 router.get('/admins', auth, requireRole('superadmin'), async (req, res) => {
   try {
-    const { q = '', communeId = '', status = '', sub = '', page = 1, pageSize = 15 } = req.query;
+    const {
+      q = '',
+      communeId = '',
+      status = '',
+      sub = '',
+      page = 1,
+      pageSize = 15,
+    } = req.query;
 
     const find = { role: 'admin' };
 
@@ -96,7 +109,15 @@ router.get('/admins', auth, requireRole('superadmin'), async (req, res) => {
 /* ===================== LISTE /api/users (fallback) ===================== */
 router.get('/users', auth, requireRole('superadmin'), async (req, res) => {
   try {
-    const { q = '', communeId = '', role = '', status = '', sub = '', page = 1, pageSize = 15 } = req.query;
+    const {
+      q = '',
+      communeId = '',
+      role = '',
+      status = '',
+      sub = '',
+      page = 1,
+      pageSize = 15,
+    } = req.query;
 
     const find = {};
     if (role) find.role = role;
@@ -152,22 +173,24 @@ router.post('/users', auth, requireRole('superadmin'), async (req, res) => {
     const exists = await User.findOne({ email });
     if (exists) return res.status(409).json({ message: 'Email déjà utilisé' });
 
-    const passwordHash = await bcrypt.hash(String(password), 10);
+    // ✅ IMPORTANT : on enregistre dans le champ "password" du schéma
+    const hashed = await bcrypt.hash(String(password), 10);
 
     const doc = await User.create({
       email,
-      passwordHash,
+      password: hashed,
       name: name || '',
       role,
       communeId: communeId || '',
       communeName: communeName || '',
       isActive: true,
       subscriptionStatus: 'none',
-      subscriptionEndAt: null,
-      createdBy: req.user?.id || '',
     });
 
-    res.status(201).json(doc.toJSON());
+    const plain = doc.toObject();
+    plain._idString = String(doc._id);
+
+    res.status(201).json(plain);
   } catch (err) {
     console.error('❌ POST /api/users', err);
     res.status(500).json({ message: 'Erreur serveur' });
@@ -195,7 +218,7 @@ router.put('/users/:id', auth, requireRole('superadmin'), async (req, res) => {
     }
 
     const updated = await User.findByIdAndUpdate(user._id, { $set: payload }, { new: true });
-    res.json(updated.toJSON());
+    res.json({ ...updated.toObject(), _idString: String(updated._id) });
   } catch (err) {
     console.error('❌ PUT /api/users/:id', err);
     res.status(500).json({ message: 'Erreur serveur' });
@@ -212,26 +235,17 @@ router.post('/users/:id/toggle-active', auth, requireRole('superadmin'), async (
     user.isActive = next;
     await user.save();
 
-    res.json({ ok: true, user: user.toJSON() });
+    res.json({ ok: true, user: { ...user.toObject(), _idString: String(user._id) } });
   } catch (err) {
     console.error('❌ POST /api/users/:id/toggle-active', err);
     res.status(500).json({ message: 'Erreur serveur' });
   }
 });
 
-/* ===================== FACTURES (self + superadmin) ===================== */
-// 👉 superadmin peut voir toutes les factures,
-// 👉 un admin peut voir les siennes si :id === req.user.id
-router.get('/users/:id/invoices', auth, async (req, res) => {
+/* ===================== FACTURES (stub compatible) ===================== */
+router.get('/users/:id/invoices', auth, requireRole('superadmin'), async (req, res) => {
   try {
-    const { id } = req.params;
-    const isSelf = String(id) === String(req.user.id);
-    const isSuper = req.user.role === 'superadmin';
-    if (!isSelf && !isSuper) {
-      return res.status(403).json({ message: 'Accès interdit' });
-    }
-
-    const user = await findUserByAnyId(id, req.query);
+    const user = await findUserByAnyId(req.params.id, req.query);
     if (!user) return res.status(404).json({ message: 'Utilisateur introuvable' });
 
     const inv = [{
@@ -247,45 +261,6 @@ router.get('/users/:id/invoices', auth, async (req, res) => {
     res.json({ invoices: inv });
   } catch (err) {
     console.error('❌ GET /api/users/:id/invoices', err);
-    res.status(500).json({ message: 'Erreur serveur' });
-  }
-});
-
-/* ===================== SELF-SERVICE: abonnement & factures ===================== */
-// ✅ statut d’abonnement de l’utilisateur connecté
-router.get('/me/subscription', auth, async (req, res) => {
-  try {
-    const user = await User.findById(req.user.id).lean();
-    if (!user) return res.status(404).json({ message: 'Utilisateur introuvable' });
-    res.json({
-      status: user.subscriptionStatus || 'none',
-      endAt: user.subscriptionEndAt || null,
-    });
-  } catch (err) {
-    console.error('❌ GET /api/me/subscription', err);
-    res.status(500).json({ message: 'Erreur serveur' });
-  }
-});
-
-// ✅ factures de l’utilisateur connecté
-router.get('/me/invoices', auth, async (req, res) => {
-  try {
-    const user = await User.findById(req.user.id);
-    if (!user) return res.status(404).json({ message: 'Utilisateur introuvable' });
-
-    const inv = [{
-      id: `INV-${String(user._id).slice(-6)}`,
-      number: `INV-${new Date().getFullYear()}-${String(user._id).slice(-4)}`,
-      amount: user.subscriptionStatus === 'active' ? 19.90 : 0.00,
-      currency: 'EUR',
-      status: user.subscriptionStatus === 'active' ? 'paid' : 'unpaid',
-      date: new Date(),
-      url: 'https://example.com/invoice.pdf'
-    }];
-
-    res.json({ invoices: inv });
-  } catch (err) {
-    console.error('❌ GET /api/me/invoices', err);
     res.status(500).json({ message: 'Erreur serveur' });
   }
 });
