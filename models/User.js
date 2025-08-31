@@ -14,11 +14,9 @@ const userSchema = new mongoose.Schema(
       trim: true,
     },
 
-    /* Auth */
-    // On stocke le hash ici (compat login). Ne jamais renvoyer au client.
-    passwordHash: { type: String, select: false },
-    // Ancien champ éventuel : on le garde optionnel pour compat, jamais renvoyé
-    password: { type: String, select: false },
+    /* Auth (compat) */
+    passwordHash: { type: String, select: false }, // nouveau champ conseillé
+    password: { type: String, select: false },     // ancien champ, laissé pour compat
 
     /* Rôle */
     role: {
@@ -39,7 +37,7 @@ const userSchema = new mongoose.Schema(
     isActive: { type: Boolean, default: true, index: true },
     tokenVersion: { type: Number, default: 0 },
 
-    /* Abonnement (utilisé par /subscriptions et /invoices) */
+    /* Abonnement */
     subscriptionStatus: {
       type: String,
       enum: ['none', 'active', 'expired'],
@@ -48,21 +46,18 @@ const userSchema = new mongoose.Schema(
     },
     subscriptionEndAt: { type: Date, default: null, index: true },
 
-    /* Traçabilité (facultatif) */
+    /* Traçabilité */
     createdBy: { type: String, default: '' },
   },
   { timestamps: true }
 );
 
-/* JSON safe */
 userSchema.set('toJSON', {
   virtuals: true,
   versionKey: false,
   transform: (_doc, ret) => {
-    // ne jamais exposer ces champs
     delete ret.password;
     delete ret.passwordHash;
-    // Ajout d’un identifiant standardisé (utile au front)
     ret._idString = String(ret._id);
     return ret;
   },
