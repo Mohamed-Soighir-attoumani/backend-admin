@@ -7,21 +7,34 @@ const requireRole = require('../middleware/requireRole');
 const User = require('../models/User');
 
 const isValidId = (id) => mongoose.Types.ObjectId.isValid(String(id || ''));
-const decode = (v) => { try { return decodeURIComponent(String(v)); } catch { return String(v); } };
 const norm = (v) => String(v || '').trim().toLowerCase();
 
-async function findUserByAnyId(id, body = {}) {
-  const candidates = [
-    decode(id),
-    decode(body.id),
-    decode(body.userId),
-    norm(body.email || ''),
-  ].filter(Boolean);
+function cleanCandidate(v) {
+  if (v == null) return '';
+  let s = String(v).trim();
+  s = s.replace(/^"+|"+$/g, '').replace(/^'+|'+$/g, '');
+  try { s = decodeURIComponent(s); } catch {}
+  return s;
+}
 
-  for (const raw of candidates) {
-    const s = String(raw).trim();
-    if (!s) continue;
+async function findUserByAnyId(primary, body = {}) {
+  const candidatesRaw = [
+    primary,
+    body.id,
+    body.userId,
+    body._id,
+    body._idString,
+    body.email,
+    body.queryId,
+  ];
 
+  if (primary && typeof primary === 'object') {
+    candidatesRaw.push(primary.id, primary._id, primary._idString, primary.email);
+  }
+
+  const candidates = candidatesRaw.map(cleanCandidate).filter(Boolean);
+
+  for (const s of candidates) {
     if (isValidId(s)) {
       const byId = await User.findById(s);
       if (byId) return byId;
@@ -67,7 +80,7 @@ router.post('/subscriptions/:id/start', auth, requireRole('superadmin'), async (
     user.subscriptionEndAt = end;
     await user.save();
 
-    res.json({ ok: true, user: user.toObject() });
+    res.json({ ok: true, user: { ...user.toObject(), _idString: String(user._id) } });
   } catch (err) {
     console.error('❌ POST /subscriptions/:id/start', err);
     res.status(500).json({ message: 'Erreur serveur' });
@@ -92,7 +105,7 @@ router.post('/subscriptions/:id/renew', auth, requireRole('superadmin'), async (
     user.subscriptionEndAt = base;
     await user.save();
 
-    res.json({ ok: true, user: user.toObject() });
+    res.json({ ok: true, user: { ...user.toObject(), _idString: String(user._id) } });
   } catch (err) {
     console.error('❌ POST /subscriptions/:id/renew', err);
     res.status(500).json({ message: 'Erreur serveur' });
@@ -109,7 +122,7 @@ router.post('/subscriptions/:id/cancel', auth, requireRole('superadmin'), async 
     user.subscriptionEndAt = null;
     await user.save();
 
-    res.json({ ok: true, user: user.toObject() });
+    res.json({ ok: true, user: { ...user.toObject(), _idString: String(user._id) } });
   } catch (err) {
     console.error('❌ POST /subscriptions/:id/cancel', err);
     res.status(500).json({ message: 'Erreur serveur' });
