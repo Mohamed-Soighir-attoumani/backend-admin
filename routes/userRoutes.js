@@ -14,12 +14,11 @@ const norm = (v) => String(v || '').trim().toLowerCase();
 
 /**
  * Résout un utilisateur à partir de:
- * - req.params.id (ObjectId, $oid, email, userId)
- * - req.body.id
- * - req.body.email
+ * - id (ObjectId, $oid, string 24-hex)
+ * - email (si param ressemble à un email)
+ * - userId (fallback éventuel)
  */
 async function findUserByAnyId(primary, body = {}) {
-  // ordre de recherche
   const candidates = [
     String(primary || '').trim(),
     String(body.id || '').trim(),
@@ -35,7 +34,7 @@ async function findUserByAnyId(primary, body = {}) {
       if (hit) return hit;
     }
 
-    // 2) extrait un 24-hex (format $oid ou autre)
+    // 2) extrait un 24-hex (format $oid ou .toString())
     const m = raw.match(/[a-f0-9]{24}/i);
     if (m && isValidId(m[0])) {
       const byHex = await User.findById(m[0]);
@@ -48,7 +47,7 @@ async function findUserByAnyId(primary, body = {}) {
       if (byEmail) return byEmail;
     }
 
-    // 4) userId personnalisé
+    // 4) userId personnalisé (si jamais tu l’utilises)
     const byUserId = await User.findOne({ userId: raw });
     if (byUserId) return byUserId;
   }
@@ -98,14 +97,10 @@ router.get('/admins', auth, requireRole('superadmin'), async (req, res) => {
       .limit(ps)
       .lean();
 
-    // ✅ standardise l'ID pour le front
-    items = items.map(u => ({
-      ...u,
-      _idString: String(u._id),
-    }));
+    // Standardise l'ID pour le front
+    items = items.map((u) => ({ ...u, _idString: String(u._id) }));
 
     const total = await User.countDocuments(find);
-
     res.json({ items, total });
   } catch (err) {
     console.error('❌ GET /api/admins', err);
@@ -157,13 +152,9 @@ router.get('/users', auth, requireRole('superadmin'), async (req, res) => {
       .limit(ps)
       .lean();
 
-    items = items.map(u => ({
-      ...u,
-      _idString: String(u._id),
-    }));
+    items = items.map((u) => ({ ...u, _idString: String(u._id) }));
 
     const total = await User.countDocuments(find);
-
     res.json({ items, total });
   } catch (err) {
     console.error('❌ GET /api/users', err);
@@ -188,19 +179,17 @@ router.post('/users', auth, requireRole('superadmin'), async (req, res) => {
 
     const doc = await User.create({
       email,
-      passwordHash,
+      passwordHash, // ✅ stocké dans le bon champ
       name: name || '',
       role,
       communeId: communeId || '',
       communeName: communeName || '',
       isActive: true,
       subscriptionStatus: 'none',
+      createdBy: req.user?.id || '',
     });
 
-    const plain = doc.toObject();
-    plain._idString = String(doc._id);
-
-    res.status(201).json(plain);
+    res.status(201).json(doc.toJSON());
   } catch (err) {
     console.error('❌ POST /api/users', err);
     res.status(500).json({ message: 'Erreur serveur' });
@@ -218,17 +207,18 @@ router.put('/users/:id', auth, requireRole('superadmin'), async (req, res) => {
 
     const payload = {};
     if (typeof req.body.email === 'string') payload.email = norm(req.body.email);
-    if (typeof req.body.name === 'string')  payload.name = req.body.name;
-    if (typeof req.body.communeId === 'string')   payload.communeId = req.body.communeId;
+    if (typeof req.body.name === 'string') payload.name = req.body.name;
+    if (typeof req.body.communeId === 'string') payload.communeId = req.body.communeId;
     if (typeof req.body.communeName === 'string') payload.communeName = req.body.communeName;
-    if (typeof req.body.isActive === 'boolean')   payload.isActive = req.body.isActive;
+    if (typeof req.body.isActive === 'boolean') payload.isActive = req.body.isActive;
 
+    // Sécurité : pas de changement de rôle par cette route
     if (req.body.role && req.body.role !== 'admin') {
       return res.status(400).json({ message: 'Changement de rôle interdit ici' });
     }
 
     const updated = await User.findByIdAndUpdate(user._id, { $set: payload }, { new: true });
-    res.json({ ...updated.toObject(), _idString: String(updated._id) });
+    res.json(updated.toJSON());
   } catch (err) {
     console.error('❌ PUT /api/users/:id', err);
     res.status(500).json({ message: 'Erreur serveur' });
@@ -245,14 +235,14 @@ router.post('/users/:id/toggle-active', auth, requireRole('superadmin'), async (
     user.isActive = next;
     await user.save();
 
-    res.json({ ok: true, user: { ...user.toObject(), _idString: String(user._id) } });
+    res.json({ ok: true, user: user.toJSON() });
   } catch (err) {
     console.error('❌ POST /api/users/:id/toggle-active', err);
     res.status(500).json({ message: 'Erreur serveur' });
   }
 });
 
-/* ===================== FACTURES (stub compatible) ===================== */
+/* ===================== FACTURES (stub) ===================== */
 router.get('/users/:id/invoices', auth, requireRole('superadmin'), async (req, res) => {
   try {
     const user = await findUserByAnyId(req.params.id, req.query);
