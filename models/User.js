@@ -3,50 +3,34 @@ const mongoose = require('mongoose');
 
 const userSchema = new mongoose.Schema(
   {
-    /* Identité */
     name: { type: String, default: '' },
     email: {
-      type: String,
-      required: true,
-      unique: true,
-      index: true,
-      lowercase: true,
-      trim: true,
+      type: String, required: true, unique: true, index: true, lowercase: true, trim: true,
     },
 
-    /* Auth (compat) */
-    passwordHash: { type: String, select: false }, // nouveau champ conseillé
-    password: { type: String, select: false },     // ancien champ, laissé pour compat
+    // Auth
+    passwordHash: { type: String, select: false },
+    password: { type: String, select: false }, // compat
 
-    /* Rôle */
-    role: {
-      type: String,
-      enum: ['user', 'admin', 'superadmin'],
-      default: 'user',
-      index: true,
-    },
+    // Rôle
+    role: { type: String, enum: ['user', 'admin', 'superadmin'], default: 'user', index: true },
 
-    /* Multi-communes */
+    // Multi-communes
     communeId: { type: String, default: '', index: true },
     communeName: { type: String, default: '' },
 
-    /* UI */
+    // UI
     photo: { type: String, default: '' },
 
-    /* Statut compte */
+    // Statut
     isActive: { type: Boolean, default: true, index: true },
     tokenVersion: { type: Number, default: 0 },
 
-    /* Abonnement */
-    subscriptionStatus: {
-      type: String,
-      enum: ['none', 'active', 'expired'],
-      default: 'none',
-      index: true,
-    },
+    // Abonnement
+    subscriptionStatus: { type: String, enum: ['none', 'active', 'expired'], default: 'none', index: true },
     subscriptionEndAt: { type: Date, default: null, index: true },
 
-    /* Traçabilité */
+    // Traçabilité
     createdBy: { type: String, default: '' },
   },
   { timestamps: true }
