@@ -13,47 +13,50 @@ const isValidId = (id) => mongoose.Types.ObjectId.isValid(String(id || ''));
 const norm = (v) => String(v || '').trim().toLowerCase();
 
 /**
- * Résout un utilisateur à partir de plusieurs formes d'ID possibles :
- * - ObjectId (string 24 hex) → findById
- * - email (string) → findOne({ email })
- * - userId personnalisé → findOne({ userId })
+ * Résout un utilisateur à partir de:
+ * - req.params.id (ObjectId, $oid, email, userId)
+ * - req.body.id
+ * - req.body.email
  */
-async function findUserByAnyId(idLike) {
-  const raw = String(idLike || '').trim();
+async function findUserByAnyId(primary, body = {}) {
+  // ordre de recherche
+  const candidates = [
+    String(primary || '').trim(),
+    String(body.id || '').trim(),
+    norm(body.email || ''),
+  ].filter(Boolean);
 
-  // Essai direct ObjectId
-  if (isValidId(raw)) {
-    const byId = await User.findById(raw);
-    if (byId) return byId;
+  for (const raw of candidates) {
+    if (!raw) continue;
+
+    // 1) ObjectId direct
+    if (isValidId(raw)) {
+      const hit = await User.findById(raw);
+      if (hit) return hit;
+    }
+
+    // 2) extrait un 24-hex (format $oid ou autre)
+    const m = raw.match(/[a-f0-9]{24}/i);
+    if (m && isValidId(m[0])) {
+      const byHex = await User.findById(m[0]);
+      if (byHex) return byHex;
+    }
+
+    // 3) email
+    if (raw.includes('@')) {
+      const byEmail = await User.findOne({ email: norm(raw) });
+      if (byEmail) return byEmail;
+    }
+
+    // 4) userId personnalisé
+    const byUserId = await User.findOne({ userId: raw });
+    if (byUserId) return byUserId;
   }
-
-  // Essai d’un $oid encapsulé (au cas où)
-  const m = raw.match(/[a-f0-9]{24}/i);
-  if (m && isValidId(m[0])) {
-    const byHex = await User.findById(m[0]);
-    if (byHex) return byHex;
-  }
-
-  // Essai email
-  const maybeEmail = norm(raw);
-  if (maybeEmail.includes('@')) {
-    const byEmail = await User.findOne({ email: maybeEmail });
-    if (byEmail) return byEmail;
-  }
-
-  // Essai userId personnalisé
-  const byUserId = await User.findOne({ userId: raw });
-  if (byUserId) return byUserId;
 
   return null;
 }
 
 /* ===================== LISTE ADMINS ===================== */
-/**
- * GET /api/admins
- * Query: q, communeId, status (active|inactive), sub (active|expired|none), page, pageSize
- * Retour: { items: [], total }
- */
 router.get('/admins', auth, requireRole('superadmin'), async (req, res) => {
   try {
     const {
@@ -73,11 +76,9 @@ router.get('/admins', auth, requireRole('superadmin'), async (req, res) => {
     }
     if (communeId) find.communeId = communeId;
 
-    // statut actif/inactif
     if (status === 'active')   find.isActive = { $ne: false };
     if (status === 'inactive') find.isActive = false;
 
-    // abonnement (si champs présents)
     if (sub === 'none') {
       find.$or = [
         ...(find.$or || []),
@@ -91,14 +92,19 @@ router.get('/admins', auth, requireRole('superadmin'), async (req, res) => {
     const p = Math.max(1, parseInt(page, 10) || 1);
     const ps = Math.max(1, Math.min(200, parseInt(pageSize, 10) || 15));
 
-    const [items, total] = await Promise.all([
-      User.find(find)
-        .sort({ createdAt: -1 })
-        .skip((p - 1) * ps)
-        .limit(ps)
-        .lean(),
-      User.countDocuments(find),
-    ]);
+    let items = await User.find(find)
+      .sort({ createdAt: -1 })
+      .skip((p - 1) * ps)
+      .limit(ps)
+      .lean();
+
+    // ✅ standardise l'ID pour le front
+    items = items.map(u => ({
+      ...u,
+      _idString: String(u._id),
+    }));
+
+    const total = await User.countDocuments(find);
 
     res.json({ items, total });
   } catch (err) {
@@ -145,14 +151,18 @@ router.get('/users', auth, requireRole('superadmin'), async (req, res) => {
     const p = Math.max(1, parseInt(page, 10) || 1);
     const ps = Math.max(1, Math.min(200, parseInt(pageSize, 10) || 15));
 
-    const [items, total] = await Promise.all([
-      User.find(find)
-        .sort({ createdAt: -1 })
-        .skip((p - 1) * ps)
-        .limit(ps)
-        .lean(),
-      User.countDocuments(find),
-    ]);
+    let items = await User.find(find)
+      .sort({ createdAt: -1 })
+      .skip((p - 1) * ps)
+      .limit(ps)
+      .lean();
+
+    items = items.map(u => ({
+      ...u,
+      _idString: String(u._id),
+    }));
+
+    const total = await User.countDocuments(find);
 
     res.json({ items, total });
   } catch (err) {
@@ -169,7 +179,6 @@ router.post('/users', auth, requireRole('superadmin'), async (req, res) => {
     if (!email || !password) {
       return res.status(400).json({ message: 'Email et mot de passe requis' });
     }
-    // rôle forcé "admin"
     role = 'admin';
 
     const exists = await User.findOne({ email });
@@ -188,7 +197,10 @@ router.post('/users', auth, requireRole('superadmin'), async (req, res) => {
       subscriptionStatus: 'none',
     });
 
-    res.status(201).json(doc);
+    const plain = doc.toObject();
+    plain._idString = String(doc._id);
+
+    res.status(201).json(plain);
   } catch (err) {
     console.error('❌ POST /api/users', err);
     res.status(500).json({ message: 'Erreur serveur' });
@@ -198,7 +210,7 @@ router.post('/users', auth, requireRole('superadmin'), async (req, res) => {
 /* ===================== MISE À JOUR ADMIN ===================== */
 router.put('/users/:id', auth, requireRole('superadmin'), async (req, res) => {
   try {
-    const user = await findUserByAnyId(req.params.id);
+    const user = await findUserByAnyId(req.params.id, req.body);
     if (!user) return res.status(404).json({ message: 'Utilisateur introuvable' });
     if (user.role !== 'admin') {
       return res.status(400).json({ message: 'Seuls les admins sont éditables ici' });
@@ -209,16 +221,14 @@ router.put('/users/:id', auth, requireRole('superadmin'), async (req, res) => {
     if (typeof req.body.name === 'string')  payload.name = req.body.name;
     if (typeof req.body.communeId === 'string')   payload.communeId = req.body.communeId;
     if (typeof req.body.communeName === 'string') payload.communeName = req.body.communeName;
+    if (typeof req.body.isActive === 'boolean')   payload.isActive = req.body.isActive;
 
-    // ne pas changer le rôle par cette route
     if (req.body.role && req.body.role !== 'admin') {
       return res.status(400).json({ message: 'Changement de rôle interdit ici' });
     }
 
-    if (typeof req.body.isActive === 'boolean') payload.isActive = req.body.isActive;
-
     const updated = await User.findByIdAndUpdate(user._id, { $set: payload }, { new: true });
-    res.json(updated);
+    res.json({ ...updated.toObject(), _idString: String(updated._id) });
   } catch (err) {
     console.error('❌ PUT /api/users/:id', err);
     res.status(500).json({ message: 'Erreur serveur' });
@@ -228,14 +238,14 @@ router.put('/users/:id', auth, requireRole('superadmin'), async (req, res) => {
 /* ===================== TOGGLE ACTIVE ===================== */
 router.post('/users/:id/toggle-active', auth, requireRole('superadmin'), async (req, res) => {
   try {
-    const user = await findUserByAnyId(req.params.id);
+    const user = await findUserByAnyId(req.params.id, req.body);
     if (!user) return res.status(404).json({ message: 'Utilisateur introuvable' });
 
     const next = !!req.body.active;
     user.isActive = next;
     await user.save();
 
-    res.json({ ok: true, user });
+    res.json({ ok: true, user: { ...user.toObject(), _idString: String(user._id) } });
   } catch (err) {
     console.error('❌ POST /api/users/:id/toggle-active', err);
     res.status(500).json({ message: 'Erreur serveur' });
@@ -245,10 +255,9 @@ router.post('/users/:id/toggle-active', auth, requireRole('superadmin'), async (
 /* ===================== FACTURES (stub compatible) ===================== */
 router.get('/users/:id/invoices', auth, requireRole('superadmin'), async (req, res) => {
   try {
-    const user = await findUserByAnyId(req.params.id);
+    const user = await findUserByAnyId(req.params.id, req.query);
     if (!user) return res.status(404).json({ message: 'Utilisateur introuvable' });
 
-    // Exemple simple pour que l’UI affiche quelque chose
     const inv = [{
       id: `INV-${String(user._id).slice(-6)}`,
       number: `INV-${new Date().getFullYear()}-${String(user._id).slice(-4)}`,
