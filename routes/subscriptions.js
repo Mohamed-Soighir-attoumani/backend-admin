@@ -2,7 +2,6 @@
 const express = require('express');
 const router = express.Router();
 const mongoose = require('mongoose');
-
 const auth = require('../middleware/authMiddleware');
 const requireRole = require('../middleware/requireRole');
 const User = require('../models/User');
@@ -10,21 +9,19 @@ const User = require('../models/User');
 const isValidId = (id) => mongoose.Types.ObjectId.isValid(id);
 
 async function findUserByAnyId(id) {
-  let u = null;
+  if (!id) return null;
   if (isValidId(id)) {
-    u = await User.findById(id);
-    if (u) return u;
+    const byId = await User.findById(id);
+    if (byId) return byId;
   }
-  // fallback: parfois le front envoie email / id / userId
-  u = await User.findOne({ email: id });
-  if (u) return u;
-  u = await User.findOne({ id });
-  if (u) return u;
-  u = await User.findOne({ userId: id });
-  return u;
+  const byEmail = await User.findOne({ email: String(id).trim().toLowerCase() });
+  if (byEmail) return byEmail;
+  const byUserId = await User.findOne({ userId: id });
+  if (byUserId) return byUserId;
+  return null;
 }
 
-// Plans disponibles
+// (optionnel) liste de plans
 router.get('/subscriptions/plans', auth, requireRole('superadmin'), (_req, res) => {
   res.json({
     plans: [
@@ -35,66 +32,66 @@ router.get('/subscriptions/plans', auth, requireRole('superadmin'), (_req, res) 
   });
 });
 
-// Helpers abonnement
-function computeEndDate(periodMonths = 1) {
-  const d = new Date();
-  const months = Math.max(1, parseInt(periodMonths, 10) || 1);
-  d.setMonth(d.getMonth() + months);
-  return d;
-}
-
 // Démarrer un abonnement
 router.post('/subscriptions/:id/start', auth, requireRole('superadmin'), async (req, res) => {
   try {
-    const u = await findUserByAnyId(req.params.id);
-    if (!u) return res.status(404).json({ message: 'Utilisateur introuvable' });
+    const { id } = req.params;
+    const { planId = 'basic', periodMonths = 1 } = req.body || {};
+    const user = await findUserByAnyId(id);
+    if (!user) return res.status(404).json({ message: 'Utilisateur introuvable' });
 
-    const endAt = computeEndDate(req.body?.periodMonths);
-    u.subscriptionStatus = 'active';
-    u.subscriptionEndAt = endAt;
-    await u.save();
+    const months = Math.max(1, parseInt(periodMonths, 10) || 1);
+    const end = new Date();
+    end.setMonth(end.getMonth() + months);
 
-    res.json({ ok: true, user: u });
+    user.subscriptionStatus = 'active';
+    user.subscriptionEndAt = end;
+    await user.save();
+
+    res.json({ ok: true, user, planId, periodMonths: months });
   } catch (err) {
     console.error('❌ POST /subscriptions/:id/start', err);
     res.status(500).json({ message: 'Erreur serveur' });
   }
 });
 
-// Renouveler un abonnement
+// Renouveler
 router.post('/subscriptions/:id/renew', auth, requireRole('superadmin'), async (req, res) => {
   try {
-    const u = await findUserByAnyId(req.params.id);
-    if (!u) return res.status(404).json({ message: 'Utilisateur introuvable' });
+    const { id } = req.params;
+    const { planId = 'basic', periodMonths = 1 } = req.body || {};
+    const user = await findUserByAnyId(id);
+    if (!user) return res.status(404).json({ message: 'Utilisateur introuvable' });
 
-    const base = u.subscriptionEndAt && new Date(u.subscriptionEndAt) > new Date()
-      ? new Date(u.subscriptionEndAt)
+    const base = user.subscriptionEndAt && user.subscriptionEndAt > new Date()
+      ? new Date(user.subscriptionEndAt)
       : new Date();
-    const months = Math.max(1, parseInt(req.body?.periodMonths, 10) || 1);
+    const months = Math.max(1, parseInt(periodMonths, 10) || 1);
     base.setMonth(base.getMonth() + months);
 
-    u.subscriptionStatus = 'active';
-    u.subscriptionEndAt = base;
-    await u.save();
+    user.subscriptionStatus = 'active';
+    user.subscriptionEndAt = base;
+    await user.save();
 
-    res.json({ ok: true, user: u });
+    res.json({ ok: true, user, planId, periodMonths: months });
   } catch (err) {
     console.error('❌ POST /subscriptions/:id/renew', err);
     res.status(500).json({ message: 'Erreur serveur' });
   }
 });
 
-// Annuler un abonnement
+// Annuler
 router.post('/subscriptions/:id/cancel', auth, requireRole('superadmin'), async (req, res) => {
   try {
-    const u = await findUserByAnyId(req.params.id);
-    if (!u) return res.status(404).json({ message: 'Utilisateur introuvable' });
+    const { id } = req.params;
+    const user = await findUserByAnyId(id);
+    if (!user) return res.status(404).json({ message: 'Utilisateur introuvable' });
 
-    u.subscriptionStatus = 'none';
-    u.subscriptionEndAt = null;
-    await u.save();
+    user.subscriptionStatus = 'none';
+    user.subscriptionEndAt = null;
+    await user.save();
 
-    res.json({ ok: true, user: u });
+    res.json({ ok: true, user });
   } catch (err) {
     console.error('❌ POST /subscriptions/:id/cancel', err);
     res.status(500).json({ message: 'Erreur serveur' });
