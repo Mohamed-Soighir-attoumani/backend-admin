@@ -1,4 +1,3 @@
-// backend/server.js
 require('dotenv').config();
 
 const express = require('express');
@@ -18,7 +17,8 @@ const PORT = process.env.PORT || 4000;
 const HOST = process.env.HOST || '0.0.0.0';
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/backend_admin';
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN || null;
-const FRONTEND_ORIGIN = process.env.FRONEND_ORIGIN || process.env.FRONTEND_ORIGIN || '*';
+// typo résolue : accepte FRONEND_ORIGIN si mal orthographié
+const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || process.env.FRONEND_ORIGIN || '*';
 
 app.set('trust proxy', 1);
 
@@ -71,51 +71,19 @@ app.use(
 app.get('/api/health', (_, res) => res.json({ status: 'ok', timestamp: Date.now() }));
 
 /* Routes */
-const setupAdminRoute   = require('./routes/setup-admin');
-const authRoutes        = require('./routes/auth');
-const meRoute           = require('./routes/me');
-const adminsRoutes      = require('./routes/admins'); // ta route existante
-const changePasswordRoute = require('./routes/changePassword');
-
-const incidentRoutes    = require('./routes/incidents');
-const articleRoutes     = require('./routes/articles');
-const infoRoutes        = require('./routes/infos');
-const notificationRoutes = require('./routes/notifications');
-const projectRoutes     = require('./routes/projects');
-const deviceRoutes      = require('./routes/devices');
-const userRoutes        = require('./routes/userRoutes');      // ✅ inclut /api/admins (fallback), /api/users
-const subscriptionRoutes = require('./routes/subscriptions');  // ✅ inclut /api/subscriptions
-
-app.use('/api', setupAdminRoute);
-app.use('/api', authRoutes);
-app.use('/api', meRoute);
-
-app.use(
-  '/api/admins',
-  (req, _res, next) => {
-    console.log('[HIT] /api/admins', req.method, req.originalUrl);
-    next();
-  },
-  adminsRoutes
-);
-
-app.use(
-  '/api/change-password',
-  (req, _res, next) => {
-    console.log('[HIT] /api/change-password', req.method, req.path || '/');
-    next();
-  },
-  changePasswordRoute
-);
-
-app.use('/api/incidents', incidentRoutes);
-app.use('/api/articles', articleRoutes);
-app.use('/api/infos', infoRoutes);
-app.use('/api/notifications', notificationRoutes);
-app.use('/api/projects', projectRoutes);
-app.use('/api/devices', deviceRoutes);
-app.use('/api', userRoutes);          // ✅ /api/admins (version de ce fichier) & /api/users
-app.use('/api', subscriptionRoutes);  // ✅ /api/subscriptions
+app.use('/api', require('./routes/setup-admin'));
+app.use('/api', require('./routes/auth'));
+app.use('/api', require('./routes/me'));
+app.use('/api/admins', (req, _res, next) => { console.log('[HIT] /api/admins', req.method, req.originalUrl); next(); }, require('./routes/admins'));
+app.use('/api/change-password', (req, _res, next) => { console.log('[HIT] /api/change-password', req.method, req.path || '/'); next(); }, require('./routes/changePassword'));
+app.use('/api/incidents', require('./routes/incidents'));
+app.use('/api/articles', require('./routes/articles'));
+app.use('/api/infos', require('./routes/infos'));
+app.use('/api/notifications', require('./routes/notifications'));
+app.use('/api/projects', require('./routes/projects'));
+app.use('/api/devices', require('./routes/devices'));
+app.use('/api', require('./routes/userRoutes'));        // /api/admins (fallback) + /api/users + invoices + toggles
+app.use('/api', require('./routes/subscriptions'));     // /api/subscriptions/* start/renew/cancel
 app.use('/api', require('./routes/debug'));
 
 app.get('/', (_, res) => res.send('API SecuriDem opérationnelle ✅'));
