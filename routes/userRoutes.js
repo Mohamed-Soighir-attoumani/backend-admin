@@ -14,6 +14,24 @@ const User = require('../models/User');
 const isValidId = (id) => mongoose.Types.ObjectId.isValid(id);
 const norm = (v) => String(v || '').trim().toLowerCase();
 
+/* Ajout: recherche tolérante (ObjectId, email, id, userId) */
+async function findUserByAnyId(id) {
+  if (!id) return null;
+  let u = null;
+  if (isValidId(id)) {
+    u = await User.findById(id);
+    if (u) return u;
+  }
+  // fallback: email
+  u = await User.findOne({ email: norm(id) });
+  if (u) return u;
+  // autres champs courants
+  u = await User.findOne({ id });
+  if (u) return u;
+  u = await User.findOne({ userId: id });
+  return u;
+}
+
 /* ===================== LISTE ADMINS (préférée par le front) ===================== */
 /**
  * GET /api/admins
@@ -176,23 +194,24 @@ router.post('/users', auth, requireRole('superadmin'), async (req, res) => {
  * PUT /api/users/:id
  * Front l’appelle lors de l’édition.
  * 🔐 superadmin uniquement
+ *
+ * ✅ Correction: au lieu d’exiger un ObjectId strict, on utilise findUserByAnyId
  */
 router.put('/users/:id', auth, requireRole('superadmin'), async (req, res) => {
   const { id } = req.params;
-  if (!isValidId(id)) return res.status(400).json({ message: 'ID invalide' });
 
   try {
-    const user = await User.findById(id);
+    const user = await findUserByAnyId(id);
     if (!user) return res.status(404).json({ message: 'Utilisateur introuvable' });
     if (user.role !== 'admin') {
       return res.status(400).json({ message: 'Seuls les admins sont éditables ici' });
     }
 
     const payload = {};
-    if (typeof req.body.email === 'string') payload.email = norm(req.body.email);
-    if (typeof req.body.name === 'string')  payload.name = req.body.name;
-    if (typeof req.body.communeId === 'string')   payload.communeId = req.body.communeId;
-    if (typeof req.body.communeName === 'string') payload.communeName = req.body.communeName;
+    if (typeof req.body.email === 'string')        payload.email = norm(req.body.email);
+    if (typeof req.body.name === 'string')         payload.name = req.body.name;
+    if (typeof req.body.communeId === 'string')    payload.communeId = req.body.communeId;
+    if (typeof req.body.communeName === 'string')  payload.communeName = req.body.communeName;
 
     // sécurité : ne pas permettre de changer le rôle par cette route
     if (req.body.role && req.body.role !== 'admin') {
@@ -202,7 +221,7 @@ router.put('/users/:id', auth, requireRole('superadmin'), async (req, res) => {
     // (optionnel) permettre isActive
     if (typeof req.body.isActive === 'boolean') payload.isActive = req.body.isActive;
 
-    const updated = await User.findByIdAndUpdate(id, { $set: payload }, { new: true });
+    const updated = await User.findByIdAndUpdate(user._id, { $set: payload }, { new: true });
     res.json(updated);
   } catch (err) {
     console.error('❌ PUT /api/users/:id', err);
@@ -214,16 +233,21 @@ router.put('/users/:id', auth, requireRole('superadmin'), async (req, res) => {
 /**
  * POST /api/users/:id/toggle-active  { active: boolean }
  * 🔐 superadmin uniquement
+ *
+ * ✅ Correction: accepte id/email/userId
  */
 router.post('/users/:id/toggle-active', auth, requireRole('superadmin'), async (req, res) => {
   const { id } = req.params;
-  if (!isValidId(id)) return res.status(400).json({ message: 'ID invalide' });
 
   try {
+    const user = await findUserByAnyId(id);
+    if (!user) return res.status(404).json({ message: 'Utilisateur introuvable' });
+
     const next = !!req.body.active;
-    const updated = await User.findByIdAndUpdate(id, { $set: { isActive: next } }, { new: true });
-    if (!updated) return res.status(404).json({ message: 'Utilisateur introuvable' });
-    res.json({ ok: true, user: updated });
+    user.isActive = next;
+    await user.save();
+
+    res.json({ ok: true, user });
   } catch (err) {
     console.error('❌ POST /api/users/:id/toggle-active', err);
     res.status(500).json({ message: 'Erreur serveur' });
@@ -234,11 +258,19 @@ router.post('/users/:id/toggle-active', auth, requireRole('superadmin'), async (
 /**
  * GET /api/users/:id/invoices
  * (stub de compatibilité – renvoie une liste vide)
+ *
+ * ✅ Correction: accepte id/email/userId
  */
 router.get('/users/:id/invoices', auth, requireRole('superadmin'), async (req, res) => {
   const { id } = req.params;
-  if (!isValidId(id)) return res.status(400).json({ message: 'ID invalide' });
-  res.json({ invoices: [] });
+  try {
+    const user = await findUserByAnyId(id);
+    if (!user) return res.status(404).json({ message: 'Utilisateur introuvable' });
+    res.json({ invoices: [] });
+  } catch (err) {
+    console.error('❌ GET /api/users/:id/invoices', err);
+    res.status(500).json({ message: 'Erreur serveur' });
+  }
 });
 
 module.exports = router;
