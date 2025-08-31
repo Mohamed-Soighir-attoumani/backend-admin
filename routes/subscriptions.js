@@ -5,59 +5,30 @@ const mongoose = require('mongoose');
 const auth = require('../middleware/authMiddleware');
 const requireRole = require('../middleware/requireRole');
 const User = require('../models/User');
-let Admin = null; try { Admin = require('../models/Admin'); } catch (_) {}
 
-const isValidId = (id) => mongoose.Types.ObjectId.isValid(String(id || ''));
+const isValidId = (id) => mongoose.Types.ObjectId.isValid(id);
 
-/** Trouve un compte dans User ou Admin, par id/$oid/24hex/email/userId */
-async function findAccount(id) {
+async function findUserByAnyId(id) {
   if (!id) return null;
-
   const raw = String(id).trim();
 
-  // 1) ObjectId direct
   if (isValidId(raw)) {
-    const u = await User.findById(raw);
-    if (u) return { doc: u, model: 'User' };
-    if (Admin) {
-      const a = await Admin.findById(raw);
-      if (a) return { doc: a, model: 'Admin' };
-    }
+    const byId = await User.findById(raw);
+    if (byId) return byId;
   }
-
-  // 2) 24-hex dans chaîne
   const m = raw.match(/[a-f0-9]{24}/i);
   if (m && isValidId(m[0])) {
-    const u2 = await User.findById(m[0]);
-    if (u2) return { doc: u2, model: 'User' };
-    if (Admin) {
-      const a2 = await Admin.findById(m[0]);
-      if (a2) return { doc: a2, model: 'Admin' };
-    }
+    const byHex = await User.findById(m[0]);
+    if (byHex) return byHex;
   }
-
-  // 3) email
-  if (raw.includes('@')) {
-    const um = await User.findOne({ email: raw.toLowerCase() });
-    if (um) return { doc: um, model: 'User' };
-    if (Admin) {
-      const am = await Admin.findOne({ email: raw.toLowerCase() });
-      if (am) return { doc: am, model: 'Admin' };
-    }
-  }
-
-  // 4) userId
-  const uu = await User.findOne({ userId: raw });
-  if (uu) return { doc: uu, model: 'User' };
-  if (Admin) {
-    const aa = await Admin.findOne({ userId: raw });
-    if (aa) return { doc: aa, model: 'Admin' };
-  }
-
+  const byEmail = await User.findOne({ email: raw.toLowerCase() });
+  if (byEmail) return byEmail;
+  const byUserId = await User.findOne({ userId: raw });
+  if (byUserId) return byUserId;
   return null;
 }
 
-/* Plans */
+/* ======== Plans (superadmin) ======== */
 router.get('/subscriptions/plans', auth, requireRole('superadmin'), (_req, res) => {
   res.json({
     plans: [
@@ -68,73 +39,105 @@ router.get('/subscriptions/plans', auth, requireRole('superadmin'), (_req, res) 
   });
 });
 
-/* Start */
+/* ======== Opérations d’abonnement (superadmin) ======== */
 router.post('/subscriptions/:id/start', auth, requireRole('superadmin'), async (req, res) => {
   try {
     const { id } = req.params;
     const { planId = 'basic', periodMonths = 1 } = req.body || {};
-    const found = await findAccount(id);
-    if (!found) return res.status(404).json({ message: 'Utilisateur introuvable' });
+    const user = await findUserByAnyId(id);
+    if (!user) return res.status(404).json({ message: 'Utilisateur introuvable' });
 
     const months = Math.max(1, parseInt(periodMonths, 10) || 1);
     const end = new Date();
     end.setMonth(end.getMonth() + months);
 
-    // On met ces champs même si modèle Admin ne les définit pas (ne bloque pas la réponse)
-    found.doc.subscriptionStatus = 'active';
-    found.doc.subscriptionEndAt = end;
-    await found.doc.save();
+    user.subscriptionStatus = 'active';
+    user.subscriptionEndAt = end;
+    await user.save();
 
-    const plain = found.doc.toJSON ? found.doc.toJSON() : found.doc;
-    res.json({ ok: true, user: plain, planId, periodMonths: months });
+    res.json({ ok: true, user, planId, periodMonths: months });
   } catch (err) {
     console.error('❌ POST /subscriptions/:id/start', err);
     res.status(500).json({ message: 'Erreur serveur' });
   }
 });
 
-/* Renew */
 router.post('/subscriptions/:id/renew', auth, requireRole('superadmin'), async (req, res) => {
   try {
     const { id } = req.params;
     const { planId = 'basic', periodMonths = 1 } = req.body || {};
-    const found = await findAccount(id);
-    if (!found) return res.status(404).json({ message: 'Utilisateur introuvable' });
+    const user = await findUserByAnyId(id);
+    if (!user) return res.status(404).json({ message: 'Utilisateur introuvable' });
 
-    const base =
-      found.doc.subscriptionEndAt && found.doc.subscriptionEndAt > new Date()
-        ? new Date(found.doc.subscriptionEndAt)
-        : new Date();
+    const base = user.subscriptionEndAt && user.subscriptionEndAt > new Date()
+      ? new Date(user.subscriptionEndAt)
+      : new Date();
     const months = Math.max(1, parseInt(periodMonths, 10) || 1);
     base.setMonth(base.getMonth() + months);
 
-    found.doc.subscriptionStatus = 'active';
-    found.doc.subscriptionEndAt = base;
-    await found.doc.save();
+    user.subscriptionStatus = 'active';
+    user.subscriptionEndAt = base;
+    await user.save();
 
-    const plain = found.doc.toJSON ? found.doc.toJSON() : found.doc;
-    res.json({ ok: true, user: plain, planId, periodMonths: months });
+    res.json({ ok: true, user, planId, periodMonths: months });
   } catch (err) {
     console.error('❌ POST /subscriptions/:id/renew', err);
     res.status(500).json({ message: 'Erreur serveur' });
   }
 });
 
-/* Cancel */
 router.post('/subscriptions/:id/cancel', auth, requireRole('superadmin'), async (req, res) => {
   try {
     const { id } = req.params;
-    const found = await findAccount(id);
-    if (!found) return res.status(404).json({ message: 'Utilisateur introuvable' });
+    const user = await findUserByAnyId(id);
+    if (!user) return res.status(404).json({ message: 'Utilisateur introuvable' });
 
-    found.doc.subscriptionStatus = 'none';
-    found.doc.subscriptionEndAt = null;
-    await found.doc.save();
+    user.subscriptionStatus = 'none';
+    user.subscriptionEndAt = null;
+    await user.save();
 
-    const plain = found.doc.toJSON ? found.doc.toJSON() : found.doc;
-    res.json({ ok: true, user: plain });
+    res.json({ ok: true, user });
   } catch (err) {
     console.error('❌ POST /subscriptions/:id/cancel', err);
+    res.status(500).json({ message: 'Erreur serveur' });
+  }
+});
+
+/* ======== Endpoints self-service (admin & superadmin) ======== */
+// Abonnement courant de l’utilisateur connecté
+router.get('/my-subscription', auth, async (req, res) => {
+  try {
+    const me = await User.findById(req.user.id).lean();
+    if (!me) return res.status(404).json({ message: 'Utilisateur introuvable' });
+    res.json({
+      status: me.subscriptionStatus || 'none',
+      endAt: me.subscriptionEndAt || null,
+    });
+  } catch (err) {
+    console.error('❌ GET /my-subscription', err);
+    res.status(500).json({ message: 'Erreur serveur' });
+  }
+});
+
+// Factures de l’utilisateur connecté (stub)
+router.get('/my-invoices', auth, async (req, res) => {
+  try {
+    const me = await User.findById(req.user.id).lean();
+    if (!me) return res.status(404).json({ message: 'Utilisateur introuvable' });
+
+    const invoices = [{
+      id: `INV-${String(me._id).slice(-6)}`,
+      number: `INV-${new Date().getFullYear()}-${String(me._id).slice(-4)}`,
+      amount: me.subscriptionStatus === 'active' ? 19.90 : 0.00,
+      currency: 'EUR',
+      status: me.subscriptionStatus === 'active' ? 'paid' : 'unpaid',
+      date: new Date(),
+      url: 'https://example.com/invoice.pdf',
+    }];
+
+    res.json({ invoices });
+  } catch (err) {
+    console.error('❌ GET /my-invoices', err);
     res.status(500).json({ message: 'Erreur serveur' });
   }
 });
