@@ -12,9 +12,7 @@ const userSchema = new mongoose.Schema(
       lowercase: true,
       trim: true,
     },
-    // Le mot de passe chiffré est stocké ici
-    password: { type: String, required: true, select: false },
-
+    password: { type: String, required: true, select: false }, // hash
     role: {
       type: String,
       enum: ['user', 'admin', 'superadmin'],
@@ -29,11 +27,7 @@ const userSchema = new mongoose.Schema(
     // UI
     photo: { type: String, default: '' },
 
-    // Super-pouvoirs
-    isActive: { type: Boolean, default: true, index: true },
-    tokenVersion: { type: Number, default: 0 },
-
-    // 🔔 Abonnement
+    // Abonnement
     subscriptionStatus: {
       type: String,
       enum: ['none', 'active', 'expired'],
@@ -42,13 +36,17 @@ const userSchema = new mongoose.Schema(
     },
     subscriptionEndAt: { type: Date, default: null },
 
-    // Traçabilité (facultatif)
+    // Audit
     createdBy: { type: String, default: '' },
+
+    // Super-pouvoirs
+    isActive: { type: Boolean, default: true, index: true },
+    tokenVersion: { type: Number, default: 0 },
   },
   { timestamps: true }
 );
 
-// (sécu) ne jamais exposer 'password'
+// ne jamais renvoyer le hash
 userSchema.set('toJSON', {
   transform: (_doc, ret) => {
     delete ret.password;
