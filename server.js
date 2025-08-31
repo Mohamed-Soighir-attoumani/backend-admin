@@ -96,6 +96,7 @@ const notificationRoutes = require('./routes/notifications');
 const projectRoutes = require('./routes/projects');
 const deviceRoutes = require('./routes/devices');
 const userRoutes = require('./routes/userRoutes');
+const subscriptionRoutes = require('./routes/subscriptions');
 const debugRoutes = require('./routes/debug');
 
 /* ===================== Montage des routes ===================== */
@@ -128,6 +129,7 @@ app.use('/api/notifications', notificationRoutes);
 app.use('/api/projects', projectRoutes);
 app.use('/api/devices', deviceRoutes);
 app.use('/api', userRoutes);
+app.use('/api', subscriptionRoutes);
 app.use('/api', debugRoutes);
 
 /* ===================== Accueil ===================== */
