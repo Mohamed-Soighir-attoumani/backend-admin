@@ -11,46 +11,51 @@ const User = require('../models/User');
 /* Utils */
 const isValidId = (id) => mongoose.Types.ObjectId.isValid(String(id || ''));
 const norm = (v) => String(v || '').trim().toLowerCase();
+const decode = (v) => {
+  try { return decodeURIComponent(String(v)); } catch { return String(v); }
+};
 
 /**
- * Résout un utilisateur à partir de:
- * - req.params.id (ObjectId, $oid, email, userId)
- * - req.body.id
- * - req.body.email
+ * 🔍 Résout un utilisateur à partir de :
+ * - req.params.id (ObjectId, $oid, ObjectId("..."), email, userId)
+ * - req.body.id / req.body.userId / req.body.email
  */
 async function findUserByAnyId(primary, body = {}) {
   const candidates = [
-    String(primary || '').trim(),
-    String(body.id || '').trim(),
+    decode(primary),
+    decode(body.id),
+    decode(body.userId),
     norm(body.email || ''),
   ].filter(Boolean);
 
   for (const raw of candidates) {
-    if (!raw) continue;
+    const s = String(raw).trim();
+    if (!s) continue;
 
     // 1) ObjectId direct
-    if (isValidId(raw)) {
-      const hit = await User.findById(raw);
-      if (hit) return hit;
+    if (isValidId(s)) {
+      const byId = await User.findById(s);
+      if (byId) return byId;
     }
 
-    // 2) extrait un 24-hex (format $oid ou autre)
-    const m = raw.match(/[a-f0-9]{24}/i);
+    // 2) ObjectId caché dans un string (ObjectId("...") | {"$oid":"..."} | texte)
+    const m = s.match(/[a-f0-9]{24}/i);
     if (m && isValidId(m[0])) {
       const byHex = await User.findById(m[0]);
       if (byHex) return byHex;
     }
 
     // 3) email
-    if (raw.includes('@')) {
-      const byEmail = await User.findOne({ email: norm(raw) });
+    if (s.includes('@')) {
+      const byEmail = await User.findOne({ email: norm(s) });
       if (byEmail) return byEmail;
     }
 
-    // 4) userId personnalisé
-    const byUserId = await User.findOne({ userId: raw });
+    // 4) userId custom éventuel
+    const byUserId = await User.findOne({ userId: s });
     if (byUserId) return byUserId;
   }
+
   return null;
 }
 
@@ -96,6 +101,7 @@ router.get('/admins', auth, requireRole('superadmin'), async (req, res) => {
       .limit(ps)
       .lean();
 
+    // ✅ standardise un champ _idString pour le front
     items = items.map(u => ({ ...u, _idString: String(u._id) }));
     const total = await User.countDocuments(find);
 
@@ -163,7 +169,7 @@ router.get('/users', auth, requireRole('superadmin'), async (req, res) => {
 /* ===================== CRÉATION ADMIN ===================== */
 router.post('/users', auth, requireRole('superadmin'), async (req, res) => {
   try {
-    let { email, password, name, communeId, communeName, role } = req.body || {};
+    let { email, password, name, communeId, communeName, role, createdBy } = req.body || {};
     email = norm(email);
     if (!email || !password) {
       return res.status(400).json({ message: 'Email et mot de passe requis' });
@@ -173,18 +179,19 @@ router.post('/users', auth, requireRole('superadmin'), async (req, res) => {
     const exists = await User.findOne({ email });
     if (exists) return res.status(409).json({ message: 'Email déjà utilisé' });
 
-    // ✅ IMPORTANT : on enregistre dans le champ "password" du schéma
-    const hashed = await bcrypt.hash(String(password), 10);
+    const passwordHash = await bcrypt.hash(String(password), 10);
 
     const doc = await User.create({
       email,
-      password: hashed,
+      password: passwordHash, // ✅ correspond au schéma
       name: name || '',
       role,
       communeId: communeId || '',
       communeName: communeName || '',
+      createdBy: createdBy ? String(createdBy) : '',
       isActive: true,
       subscriptionStatus: 'none',
+      subscriptionEndAt: null,
     });
 
     const plain = doc.toObject();
@@ -242,12 +249,13 @@ router.post('/users/:id/toggle-active', auth, requireRole('superadmin'), async (
   }
 });
 
-/* ===================== FACTURES (stub compatible) ===================== */
+/* ===================== FACTURES (exemple compatible) ===================== */
 router.get('/users/:id/invoices', auth, requireRole('superadmin'), async (req, res) => {
   try {
     const user = await findUserByAnyId(req.params.id, req.query);
     if (!user) return res.status(404).json({ message: 'Utilisateur introuvable' });
 
+    // exemple minimal (à remplacer par ta vraie logique facture)
     const inv = [{
       id: `INV-${String(user._id).slice(-6)}`,
       number: `INV-${new Date().getFullYear()}-${String(user._id).slice(-4)}`,
