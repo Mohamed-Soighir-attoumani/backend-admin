@@ -4,6 +4,7 @@ const router = express.Router();
 const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const PDFDocument = require('pdfkit');
 
 const auth = require('../middleware/authMiddleware');
 const requireRole = require('../middleware/requireRole');
@@ -34,6 +35,13 @@ const pickHexFromAny = (v) => {
 function formatDateFR(d) {
   try { return new Date(d).toLocaleDateString('fr-FR'); } catch { return ''; }
 }
+function invoiceNumberFor(user) {
+  const now = new Date();
+  const y = now.getFullYear();
+  const m = String(now.getMonth() + 1).padStart(2, '0');
+  const d = String(now.getDate()).padStart(2, '0');
+  return `INV-${y}${m}${d}-${String(user._id).slice(-4)}`;
+}
 
 function buildInvoiceForUser(user) {
   const now = new Date();
@@ -42,11 +50,8 @@ function buildInvoiceForUser(user) {
   const status = user.subscriptionStatus === 'active' ? 'paid' : 'unpaid';
 
   return {
-    // Identifiants/numérotation
     id: `INV-${String(user._id).slice(-6)}`,
-    number: `INV-${now.getFullYear()}-${String(user._id).slice(-4)}`,
-
-    // Personnalisation demandée
+    number: invoiceNumberFor(user),
     title: 'Licence Securidem',
     issuer: {
       name: 'Association Bellevue Dembeni',
@@ -60,14 +65,11 @@ function buildInvoiceForUser(user) {
       communeName: user.communeName || '',
     },
     invoiceDate: now,
-    invoiceDateFormatted: formatDateFR(now), // jj/mm/aaaa
-
-    // Montant & statut
+    invoiceDateFormatted: formatDateFR(now),
     amount,
     currency,
     status,
-
-    // éventuellement un lien PDF plus tard
+    method: user.subscriptionMethod || '',
     url: null,
   };
 }
@@ -309,14 +311,13 @@ router.post('/users/:id/toggle-active', auth, requireRole('superadmin'), async (
   }
 });
 
-/* ===================== FACTURES (personnalisées) ===================== */
+/* ===================== FACTURES (JSON) ===================== */
 router.get('/users/:id/invoices', auth, requireRole('superadmin'), async (req, res) => {
   try {
     const user = await findUserByAnyId(req.params.id, req.query, req.query);
     if (!user) return res.status(404).json({ message: 'Utilisateur introuvable' });
 
     const invoices = [];
-    // on génère une facture “mock” si abonnement actif (exemple)
     if (user.subscriptionStatus === 'active') {
       invoices.push(buildInvoiceForUser(user));
     }
@@ -324,6 +325,77 @@ router.get('/users/:id/invoices', auth, requireRole('superadmin'), async (req, r
     res.json({ invoices });
   } catch (err) {
     console.error('❌ GET /api/users/:id/invoices', err);
+    res.status(500).json({ message: 'Erreur serveur' });
+  }
+});
+
+/* ===================== FACTURE PDF (superadmin) ===================== */
+router.get('/users/:id/invoices/:num/pdf', auth, requireRole('superadmin'), async (req, res) => {
+  try {
+    const user = await findUserByAnyId(req.params.id, req.query, req.query);
+    if (!user) return res.status(404).json({ message: 'Utilisateur introuvable' });
+    const inv = buildInvoiceForUser(user); // on ignore :num côté serveur, on régénère “à la volée”
+
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `inline; filename="${inv.number}.pdf"`);
+    res.setHeader('Cache-Control', 'no-store');
+
+    const doc = new PDFDocument({ size: 'A4', margin: 50 });
+    doc.pipe(res);
+
+    // --- En-tête ---
+    doc.fontSize(20).text(inv.title, { align: 'center' });
+    doc.moveDown(0.5);
+
+    doc.fontSize(10);
+    doc.text(`Émetteur : ${inv.issuer.name}`);
+    doc.text(`SIRET : ${inv.issuer.siret}`);
+    doc.text(`Adresse : ${inv.issuer.address}`);
+
+    doc.moveUp(3);
+    doc.text(`Date : ${inv.invoiceDateFormatted}`, 350);
+    doc.text(`N° : ${inv.number}`, 350);
+
+    doc.moveDown(1);
+    doc.moveTo(50, doc.y).lineTo(545, doc.y).stroke();
+
+    // --- Client ---
+    doc.moveDown(1);
+    doc.fontSize(12).text('Client', { underline: true });
+    doc.fontSize(10);
+    doc.text(`Nom : ${inv.customer.name}`);
+    doc.text(`Email : ${inv.customer.email}`);
+    if (inv.customer.communeName || inv.customer.communeId) {
+      doc.text(`Commune : ${inv.customer.communeName || inv.customer.communeId}`);
+    }
+
+    // --- Détails ---
+    doc.moveDown(1);
+    doc.fontSize(12).text('Détails', { underline: true });
+    doc.fontSize(10);
+    const statusLabel = inv.status === 'paid' ? 'Payée' : 'À payer';
+    const methodLabel = inv.method ? ` (${inv.method})` : '';
+    doc.text(`Produit : Licence Securidem`);
+    doc.text(`Montant : ${inv.amount.toFixed(2)} ${inv.currency} – ${statusLabel}${methodLabel}`);
+    if (user.subscriptionEndAt) {
+      doc.text(`Valable jusqu’au : ${formatDateFR(user.subscriptionEndAt)}`);
+    }
+
+    // --- Totaux (simple) ---
+    doc.moveDown(1);
+    doc.moveTo(50, doc.y).lineTo(545, doc.y).stroke();
+    doc.moveDown(0.5);
+    doc.fontSize(12).text(`Total TTC : ${inv.amount.toFixed(2)} ${inv.currency}`, { align: 'right' });
+
+    // --- Pied de page ---
+    doc.moveDown(2);
+    doc.fontSize(8).fillColor('#666')
+      .text('Association Bellevue Dembeni – Licence Securidem', { align: 'center' })
+      .text('Document généré automatiquement, sans signature manuscrite.', { align: 'center' });
+
+    doc.end();
+  } catch (err) {
+    console.error('❌ GET /api/users/:id/invoices/:num/pdf', err);
     res.status(500).json({ message: 'Erreur serveur' });
   }
 });
@@ -407,6 +479,7 @@ router.post('/admins',                     auth, requireRole('superadmin'), (req
 router.put('/admins/:id',                  auth, requireRole('superadmin'), (req,res,next)=>router.handle({ ...req, url:`/users/${req.params.id}` }, res, next));
 router.post('/admins/:id/toggle-active',   auth, requireRole('superadmin'), (req,res,next)=>router.handle({ ...req, url:`/users/${req.params.id}/toggle-active` }, res, next));
 router.get('/admins/:id/invoices',         auth, requireRole('superadmin'), (req,res,next)=>router.handle({ ...req, url:`/users/${req.params.id}/invoices` }, res, next));
+router.get('/admins/:id/invoices/:num/pdf',auth, requireRole('superadmin'), (req,res,next)=>router.handle({ ...req, url:`/users/${req.params.id}/invoices/${req.params.num}/pdf` }, res, next));
 router.post('/admins/:id/impersonate',     auth, requireRole('superadmin'), (req,res,next)=>router.handle({ ...req, url:`/users/${req.params.id}/impersonate` }, res, next));
 router.post('/admins/:id/reset-password',  auth, requireRole('superadmin'), (req,res,next)=>router.handle({ ...req, url:`/users/${req.params.id}/reset-password` }, res, next));
 router.delete('/admins/:id',               auth, requireRole('superadmin'), (req,res,next)=>router.handle({ ...req, url:`/users/${req.params.id}` }, res, next));
