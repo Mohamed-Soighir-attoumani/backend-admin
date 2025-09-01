@@ -4,17 +4,12 @@ const router = express.Router();
 const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
-const PDFDocument = require('pdfkit');
 
 const auth = require('../middleware/authMiddleware');
 const requireRole = require('../middleware/requireRole');
 const User = require('../models/User');
+const JWT_SECRET = require('../config/jwt');
 
-/* Config JWT (même secret que routes/auth.js) */
-const JWT_SECRET = process.env.JWT_SECRET || 'dev-secret';
-const TOKEN_EXPIRES_IN = '7d';
-
-/* Utils */
 const isValidHex24 = (s) => typeof s === 'string' && /^[a-f0-9]{24}$/i.test(s);
 const norm = (v) => String(v || '').trim().toLowerCase();
 const decode = (v) => { try { return decodeURIComponent(String(v)); } catch { return String(v || ''); } };
@@ -42,7 +37,6 @@ function invoiceNumberFor(user) {
   const d = String(now.getDate()).padStart(2, '0');
   return `INV-${y}${m}${d}-${String(user._id).slice(-4)}`;
 }
-
 function buildInvoiceForUser(user) {
   const now = new Date();
   const amount = typeof user.subscriptionPrice === 'number' ? user.subscriptionPrice : 0;
@@ -74,7 +68,6 @@ function buildInvoiceForUser(user) {
   };
 }
 
-/** Résout un utilisateur */
 async function findUserByAnyId(primary, body = {}, query = {}) {
   const candidatesRaw = [
     primary,
@@ -226,15 +219,13 @@ router.get('/users', auth, requireRole('superadmin'), async (req, res) => {
 });
 
 /* ===================== CRÉATION ADMIN ===================== */
-router.post('/users', auth, requireRole('superadmin'), async (req, res) => {
+async function createAdminHandler(req, res) {
   try {
-    let { email, password, name, communeId, communeName, role, createdBy } = req.body || {};
+    let { email, password, name, communeId, communeName, createdBy } = req.body || {};
     email = norm(email);
     if (!email || !password) {
       return res.status(400).json({ message: 'Email et mot de passe requis' });
     }
-    role = 'admin';
-
     const exists = await User.findOne({ email });
     if (exists) return res.status(409).json({ message: 'Email déjà utilisé' });
 
@@ -244,10 +235,10 @@ router.post('/users', auth, requireRole('superadmin'), async (req, res) => {
       email,
       password: passwordHash,
       name: name || '',
-      role,
+      role: 'admin',
       communeId: communeId || '',
       communeName: communeName || '',
-      createdBy: createdBy ? String(createdBy) : '',
+      createdBy: createdBy ? String(createdBy) : String(req.user.id || ''),
       isActive: true,
       subscriptionStatus: 'none',
       subscriptionEndAt: null,
@@ -258,13 +249,14 @@ router.post('/users', auth, requireRole('superadmin'), async (req, res) => {
 
     const plain = doc.toObject();
     plain._idString = String(doc._id);
-
     res.status(201).json(plain);
   } catch (err) {
-    console.error('❌ POST /api/users', err);
+    console.error('❌ createAdminHandler', err);
     res.status(500).json({ message: 'Erreur serveur' });
   }
-});
+}
+router.post('/users',  auth, requireRole('superadmin'), createAdminHandler);
+router.post('/admins', auth, requireRole('superadmin'), createAdminHandler); // ✅ vraie route
 
 /* ===================== MISE À JOUR ADMIN ===================== */
 router.put('/users/:id', auth, requireRole('superadmin'), async (req, res) => {
@@ -293,6 +285,8 @@ router.put('/users/:id', auth, requireRole('superadmin'), async (req, res) => {
     res.status(500).json({ message: 'Erreur serveur' });
   }
 });
+router.put('/admins/:id', auth, requireRole('superadmin'), (req, res) =>
+  router.handle({ ...req, url: `/users/${req.params.id}` }, res)); // petite redirection interne OK car même req/headers
 
 /* ===================== TOGGLE ACTIVE ===================== */
 router.post('/users/:id/toggle-active', auth, requireRole('superadmin'), async (req, res) => {
@@ -310,8 +304,10 @@ router.post('/users/:id/toggle-active', auth, requireRole('superadmin'), async (
     res.status(500).json({ message: 'Erreur serveur' });
   }
 });
+router.post('/admins/:id/toggle-active', auth, requireRole('superadmin'), (req, res) =>
+  router.handle({ ...req, url: `/users/${req.params.id}/toggle-active` }, res));
 
-/* ===================== FACTURES (JSON) ===================== */
+/* ===================== FACTURES JSON + PDF ===================== */
 router.get('/users/:id/invoices', auth, requireRole('superadmin'), async (req, res) => {
   try {
     const user = await findUserByAnyId(req.params.id, req.query, req.query);
@@ -321,20 +317,21 @@ router.get('/users/:id/invoices', auth, requireRole('superadmin'), async (req, r
     if (user.subscriptionStatus === 'active') {
       invoices.push(buildInvoiceForUser(user));
     }
-
     res.json({ invoices });
   } catch (err) {
     console.error('❌ GET /api/users/:id/invoices', err);
     res.status(500).json({ message: 'Erreur serveur' });
   }
 });
+router.get('/admins/:id/invoices', auth, requireRole('superadmin'), (req, res) =>
+  router.handle({ ...req, url: `/users/${req.params.id}/invoices` }, res));
 
-/* ===================== FACTURE PDF (superadmin) ===================== */
+const PDFDocument = require('pdfkit');
 router.get('/users/:id/invoices/:num/pdf', auth, requireRole('superadmin'), async (req, res) => {
   try {
     const user = await findUserByAnyId(req.params.id, req.query, req.query);
     if (!user) return res.status(404).json({ message: 'Utilisateur introuvable' });
-    const inv = buildInvoiceForUser(user); // on ignore :num côté serveur, on régénère “à la volée”
+    const inv = buildInvoiceForUser(user);
 
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `inline; filename="${inv.number}.pdf"`);
@@ -343,23 +340,18 @@ router.get('/users/:id/invoices/:num/pdf', auth, requireRole('superadmin'), asyn
     const doc = new PDFDocument({ size: 'A4', margin: 50 });
     doc.pipe(res);
 
-    // --- En-tête ---
     doc.fontSize(20).text(inv.title, { align: 'center' });
     doc.moveDown(0.5);
-
     doc.fontSize(10);
     doc.text(`Émetteur : ${inv.issuer.name}`);
     doc.text(`SIRET : ${inv.issuer.siret}`);
     doc.text(`Adresse : ${inv.issuer.address}`);
-
     doc.moveUp(3);
     doc.text(`Date : ${inv.invoiceDateFormatted}`, 350);
     doc.text(`N° : ${inv.number}`, 350);
-
     doc.moveDown(1);
     doc.moveTo(50, doc.y).lineTo(545, doc.y).stroke();
 
-    // --- Client ---
     doc.moveDown(1);
     doc.fontSize(12).text('Client', { underline: true });
     doc.fontSize(10);
@@ -369,7 +361,6 @@ router.get('/users/:id/invoices/:num/pdf', auth, requireRole('superadmin'), asyn
       doc.text(`Commune : ${inv.customer.communeName || inv.customer.communeId}`);
     }
 
-    // --- Détails ---
     doc.moveDown(1);
     doc.fontSize(12).text('Détails', { underline: true });
     doc.fontSize(10);
@@ -377,17 +368,11 @@ router.get('/users/:id/invoices/:num/pdf', auth, requireRole('superadmin'), asyn
     const methodLabel = inv.method ? ` (${inv.method})` : '';
     doc.text(`Produit : Licence Securidem`);
     doc.text(`Montant : ${inv.amount.toFixed(2)} ${inv.currency} – ${statusLabel}${methodLabel}`);
-    if (user.subscriptionEndAt) {
-      doc.text(`Valable jusqu’au : ${formatDateFR(user.subscriptionEndAt)}`);
-    }
-
-    // --- Totaux (simple) ---
+    if (user.subscriptionEndAt) doc.text(`Valable jusqu’au : ${formatDateFR(user.subscriptionEndAt)}`);
     doc.moveDown(1);
     doc.moveTo(50, doc.y).lineTo(545, doc.y).stroke();
     doc.moveDown(0.5);
     doc.fontSize(12).text(`Total TTC : ${inv.amount.toFixed(2)} ${inv.currency}`, { align: 'right' });
-
-    // --- Pied de page ---
     doc.moveDown(2);
     doc.fontSize(8).fillColor('#666')
       .text('Association Bellevue Dembeni – Licence Securidem', { align: 'center' })
@@ -399,6 +384,8 @@ router.get('/users/:id/invoices/:num/pdf', auth, requireRole('superadmin'), asyn
     res.status(500).json({ message: 'Erreur serveur' });
   }
 });
+router.get('/admins/:id/invoices/:num/pdf', auth, requireRole('superadmin'), (req, res) =>
+  router.handle({ ...req, url: `/users/${req.params.id}/invoices/${req.params.num}/pdf` }, res));
 
 /* ===================== Impersonate / Reset PW / Delete ===================== */
 router.post('/users/:id/impersonate', auth, requireRole('superadmin'), async (req, res) => {
@@ -416,7 +403,7 @@ router.post('/users/:id/impersonate', auth, requireRole('superadmin'), async (re
       impersonated: true,
       origUserId: String(req.user.id),
     };
-    const token = jwt.sign(payload, JWT_SECRET, { expiresIn: TOKEN_EXPIRES_IN });
+    const token = jwt.sign(payload, JWT_SECRET, { expiresIn: '7d' });
 
     return res.json({
       token,
@@ -435,6 +422,8 @@ router.post('/users/:id/impersonate', auth, requireRole('superadmin'), async (re
     res.status(500).json({ message: 'Erreur serveur' });
   }
 });
+router.post('/admins/:id/impersonate', auth, requireRole('superadmin'), (req, res) =>
+  router.handle({ ...req, url: `/users/${req.params.id}/impersonate` }, res));
 
 router.post('/users/:id/reset-password', auth, requireRole('superadmin'), async (req, res) => {
   try {
@@ -459,6 +448,8 @@ router.post('/users/:id/reset-password', auth, requireRole('superadmin'), async 
     res.status(500).json({ message: 'Erreur serveur' });
   }
 });
+router.post('/admins/:id/reset-password', auth, requireRole('superadmin'), (req, res) =>
+  router.handle({ ...req, url: `/users/${req.params.id}/reset-password` }, res));
 
 router.delete('/users/:id', auth, requireRole('superadmin'), async (req, res) => {
   try {
@@ -473,15 +464,7 @@ router.delete('/users/:id', auth, requireRole('superadmin'), async (req, res) =>
     res.status(500).json({ message: 'Erreur serveur' });
   }
 });
-
-/* ===================== ALIAS "admins" ===================== */
-router.post('/admins',                     auth, requireRole('superadmin'), (req,res,next)=>router.handle({ ...req, url:'/users' }, res, next));
-router.put('/admins/:id',                  auth, requireRole('superadmin'), (req,res,next)=>router.handle({ ...req, url:`/users/${req.params.id}` }, res, next));
-router.post('/admins/:id/toggle-active',   auth, requireRole('superadmin'), (req,res,next)=>router.handle({ ...req, url:`/users/${req.params.id}/toggle-active` }, res, next));
-router.get('/admins/:id/invoices',         auth, requireRole('superadmin'), (req,res,next)=>router.handle({ ...req, url:`/users/${req.params.id}/invoices` }, res, next));
-router.get('/admins/:id/invoices/:num/pdf',auth, requireRole('superadmin'), (req,res,next)=>router.handle({ ...req, url:`/users/${req.params.id}/invoices/${req.params.num}/pdf` }, res, next));
-router.post('/admins/:id/impersonate',     auth, requireRole('superadmin'), (req,res,next)=>router.handle({ ...req, url:`/users/${req.params.id}/impersonate` }, res, next));
-router.post('/admins/:id/reset-password',  auth, requireRole('superadmin'), (req,res,next)=>router.handle({ ...req, url:`/users/${req.params.id}/reset-password` }, res, next));
-router.delete('/admins/:id',               auth, requireRole('superadmin'), (req,res,next)=>router.handle({ ...req, url:`/users/${req.params.id}` }, res, next));
+router.delete('/admins/:id', auth, requireRole('superadmin'), (req, res) =>
+  router.handle({ ...req, url: `/users/${req.params.id}` }, res));
 
 module.exports = router;
