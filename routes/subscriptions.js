@@ -1,3 +1,4 @@
+// backend/routes/subscriptions.js
 const express = require('express');
 const router = express.Router();
 const mongoose = require('mongoose');
@@ -58,7 +59,7 @@ async function findUserByAnyId(primary, body = {}, query = {}) {
   return null;
 }
 
-// Plans (exemple)
+// Plans
 router.get('/subscriptions/plans', auth, requireRole('superadmin'), (_req, res) => {
   res.json({
     plans: [
@@ -69,7 +70,7 @@ router.get('/subscriptions/plans', auth, requireRole('superadmin'), (_req, res) 
   });
 });
 
-// Démarrer un abonnement
+// Démarrer
 router.post('/subscriptions/:id/start', auth, requireRole('superadmin'), async (req, res) => {
   try {
     const user = await findUserByAnyId(req.params.id, req.body, req.query);
@@ -133,7 +134,7 @@ router.post('/subscriptions/:id/cancel', auth, requireRole('superadmin'), async 
   }
 });
 
-/* --------- endpoints "Mon abonnement" --------- */
+/* --------- Endpoints “mon compte” --------- */
 router.get('/my-subscription', auth, async (req, res) => {
   try {
     const id = req.user?.id;
