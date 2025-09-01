@@ -31,9 +31,7 @@ const pickHexFromAny = (v) => {
   return m && isValidHex24(m[0]) ? m[0] : '';
 };
 
-/**
- * 🔍 Résout un utilisateur à partir de : params / body / query (id/email/userId)
- */
+/** Résout un utilisateur */
 async function findUserByAnyId(primary, body = {}, query = {}) {
   const candidatesRaw = [
     primary,
@@ -126,7 +124,7 @@ router.get('/admins', auth, requireRole('superadmin'), async (req, res) => {
   }
 });
 
-/* ===================== LISTE /api/users (générale) ===================== */
+/* ===================== LISTE /api/users (fallback) ===================== */
 router.get('/users', auth, requireRole('superadmin'), async (req, res) => {
   try {
     const {
@@ -184,14 +182,15 @@ router.get('/users', auth, requireRole('superadmin'), async (req, res) => {
   }
 });
 
-/* ===================== Handlers communs (créa / update / toggle / invoices) ===================== */
-async function createAdminHandler(req, res) {
+/* ===================== CRÉATION ADMIN ===================== */
+router.post('/users', auth, requireRole('superadmin'), async (req, res) => {
   try {
-    let { email, password, name, communeId, communeName, createdBy } = req.body || {};
+    let { email, password, name, communeId, communeName, role, createdBy } = req.body || {};
     email = norm(email);
     if (!email || !password) {
       return res.status(400).json({ message: 'Email et mot de passe requis' });
     }
+    role = 'admin';
 
     const exists = await User.findOne({ email });
     if (exists) return res.status(409).json({ message: 'Email déjà utilisé' });
@@ -202,13 +201,16 @@ async function createAdminHandler(req, res) {
       email,
       password: passwordHash,
       name: name || '',
-      role: 'admin',                         // <-- forcé admin
+      role,
       communeId: communeId || '',
       communeName: communeName || '',
-      createdBy: createdBy ? String(createdBy) : String(req.user?.id || ''),
+      createdBy: createdBy ? String(createdBy) : '',
       isActive: true,
       subscriptionStatus: 'none',
       subscriptionEndAt: null,
+      subscriptionPrice: 0,
+      subscriptionCurrency: 'EUR',
+      subscriptionMethod: '',
     });
 
     const plain = doc.toObject();
@@ -216,12 +218,13 @@ async function createAdminHandler(req, res) {
 
     res.status(201).json(plain);
   } catch (err) {
-    console.error('❌ CREATE ADMIN', err);
+    console.error('❌ POST /api/users', err);
     res.status(500).json({ message: 'Erreur serveur' });
   }
-}
+});
 
-async function updateAdminHandler(req, res) {
+/* ===================== MISE À JOUR ADMIN ===================== */
+router.put('/users/:id', auth, requireRole('superadmin'), async (req, res) => {
   try {
     const user = await findUserByAnyId(req.params.id, req.body, req.query);
     if (!user) return res.status(404).json({ message: 'Utilisateur introuvable' });
@@ -243,12 +246,13 @@ async function updateAdminHandler(req, res) {
     const updated = await User.findByIdAndUpdate(user._id, { $set: payload }, { new: true });
     res.json({ ...updated.toObject(), _idString: String(updated._id) });
   } catch (err) {
-    console.error('❌ UPDATE ADMIN', err);
+    console.error('❌ PUT /api/users/:id', err);
     res.status(500).json({ message: 'Erreur serveur' });
   }
-}
+});
 
-async function toggleActiveHandler(req, res) {
+/* ===================== TOGGLE ACTIVE ===================== */
+router.post('/users/:id/toggle-active', auth, requireRole('superadmin'), async (req, res) => {
   try {
     const user = await findUserByAnyId(req.params.id, req.body, req.query);
     if (!user) return res.status(404).json({ message: 'Utilisateur introuvable' });
@@ -259,46 +263,44 @@ async function toggleActiveHandler(req, res) {
 
     res.json({ ok: true, user: { ...user.toObject(), _idString: String(user._id) } });
   } catch (err) {
-    console.error('❌ TOGGLE ACTIVE', err);
+    console.error('❌ POST /api/users/:id/toggle-active', err);
     res.status(500).json({ message: 'Erreur serveur' });
   }
-}
+});
 
-async function invoicesHandler(req, res) {
+/* ===================== FACTURES (utilise le montant saisi) ===================== */
+router.get('/users/:id/invoices', auth, requireRole('superadmin'), async (req, res) => {
   try {
     const user = await findUserByAnyId(req.params.id, req.query, req.query);
     if (!user) return res.status(404).json({ message: 'Utilisateur introuvable' });
 
-    const inv = [{
-      id: `INV-${String(user._id).slice(-6)}`,
-      number: `INV-${new Date().getFullYear()}-${String(user._id).slice(-4)}`,
-      amount: user.subscriptionStatus === 'active' ? 19.90 : 0.00,
-      currency: 'EUR',
-      status: user.subscriptionStatus === 'active' ? 'paid' : 'unpaid',
-      date: new Date(),
-      url: 'https://example.com/invoice.pdf'
-    }];
+    const invoices = [];
+    if (user.subscriptionStatus === 'active') {
+      invoices.push({
+        id: `INV-${String(user._id).slice(-6)}`,
+        number: `INV-${new Date().getFullYear()}-${String(user._id).slice(-4)}`,
+        amount: typeof user.subscriptionPrice === 'number' ? user.subscriptionPrice : 0,
+        currency: user.subscriptionCurrency || 'EUR',
+        status: 'paid',
+        date: new Date(),
+        url: 'https://example.com/invoice.pdf',
+      });
+    }
 
-    res.json({ invoices: inv });
+    res.json({ invoices });
   } catch (err) {
-    console.error('❌ INVOICES', err);
+    console.error('❌ GET /api/users/:id/invoices', err);
     res.status(500).json({ message: 'Erreur serveur' });
   }
-}
+});
 
-/* ===================== Impersonation (superadmin -> se connecter en tant que) ===================== */
-async function impersonateHandler(req, res) {
+/* ===================== Impersonate / Reset PW / Delete ===================== */
+router.post('/users/:id/impersonate', auth, requireRole('superadmin'), async (req, res) => {
   try {
     const target = await findUserByAnyId(req.params.id, req.body, req.query);
     if (!target) return res.status(404).json({ message: 'Utilisateur introuvable' });
-
-    // Interdictions/contraintes de sécurité
-    if (target.role === 'superadmin') {
-      return res.status(403).json({ message: 'Impersonation superadmin interdite' });
-    }
-    if (target.isActive === false) {
-      return res.status(403).json({ message: 'Compte désactivé' });
-    }
+    if (target.role === 'superadmin') return res.status(403).json({ message: 'Impersonation superadmin interdite' });
+    if (target.isActive === false)    return res.status(403).json({ message: 'Compte désactivé' });
 
     const payload = {
       id: String(target._id),
@@ -306,9 +308,8 @@ async function impersonateHandler(req, res) {
       role: target.role || 'user',
       tv: typeof target.tokenVersion === 'number' ? target.tokenVersion : 0,
       impersonated: true,
-      origUserId: String(req.user.id), // superadmin d’origine
+      origUserId: String(req.user.id),
     };
-
     const token = jwt.sign(payload, JWT_SECRET, { expiresIn: TOKEN_EXPIRES_IN });
 
     return res.json({
@@ -327,16 +328,13 @@ async function impersonateHandler(req, res) {
     console.error('❌ POST /impersonate', err);
     res.status(500).json({ message: 'Erreur serveur' });
   }
-}
+});
 
-/* ===================== Reset mot de passe (admin) ===================== */
-async function resetPasswordHandler(req, res) {
+router.post('/users/:id/reset-password', auth, requireRole('superadmin'), async (req, res) => {
   try {
     const user = await findUserByAnyId(req.params.id, req.body, req.query);
     if (!user) return res.status(404).json({ message: 'Utilisateur introuvable' });
-    if (user.role !== 'admin') {
-      return res.status(400).json({ message: 'Seuls les admins sont gérés ici' });
-    }
+    if (user.role !== 'admin') return res.status(400).json({ message: 'Seuls les admins sont gérés ici' });
 
     const newPassword = String(req.body?.newPassword || req.body?.password || '').trim();
     if (!newPassword || newPassword.length < 6) {
@@ -344,8 +342,6 @@ async function resetPasswordHandler(req, res) {
     }
 
     const hash = await bcrypt.hash(newPassword, 10);
-
-    // On invalide aussi les sessions existantes en incrémentant tokenVersion
     await User.updateOne(
       { _id: user._id },
       { $set: { password: hash }, $inc: { tokenVersion: 1 } }
@@ -356,16 +352,13 @@ async function resetPasswordHandler(req, res) {
     console.error('❌ POST reset-password', err);
     res.status(500).json({ message: 'Erreur serveur' });
   }
-}
+});
 
-/* ===================== Suppression admin ===================== */
-async function deleteAdminHandler(req, res) {
+router.delete('/users/:id', auth, requireRole('superadmin'), async (req, res) => {
   try {
     const user = await findUserByAnyId(req.params.id, req.body, req.query);
     if (!user) return res.status(404).json({ message: 'Utilisateur introuvable' });
-    if (user.role !== 'admin') {
-      return res.status(400).json({ message: 'Seuls les admins sont supprimables ici' });
-    }
+    if (user.role !== 'admin') return res.status(400).json({ message: 'Seuls les admins sont supprimables ici' });
 
     await User.deleteOne({ _id: user._id });
     return res.json({ ok: true, message: 'Compte administrateur supprimé' });
@@ -373,24 +366,15 @@ async function deleteAdminHandler(req, res) {
     console.error('❌ DELETE admin', err);
     res.status(500).json({ message: 'Erreur serveur' });
   }
-}
+});
 
-/* ===================== Routes "users" existantes + alias ===================== */
-router.post('/users',                     auth, requireRole('superadmin'), createAdminHandler);
-router.put('/users/:id',                  auth, requireRole('superadmin'), updateAdminHandler);
-router.post('/users/:id/toggle-active',   auth, requireRole('superadmin'), toggleActiveHandler);
-router.get('/users/:id/invoices',         auth, requireRole('superadmin'), invoicesHandler);
-router.post('/users/:id/impersonate',     auth, requireRole('superadmin'), impersonateHandler);
-router.post('/users/:id/reset-password',  auth, requireRole('superadmin'), resetPasswordHandler);
-router.delete('/users/:id',               auth, requireRole('superadmin'), deleteAdminHandler);
-
-/* ===================== ✅ ALIAS "admins" (inclut impersonate/reset/delete) ===================== */
-router.post('/admins',                          auth, requireRole('superadmin'), createAdminHandler);
-router.put('/admins/:id',                       auth, requireRole('superadmin'), updateAdminHandler);
-router.post('/admins/:id/toggle-active',        auth, requireRole('superadmin'), toggleActiveHandler);
-router.get('/admins/:id/invoices',              auth, requireRole('superadmin'), invoicesHandler);
-router.post('/admins/:id/impersonate',          auth, requireRole('superadmin'), impersonateHandler);
-router.post('/admins/:id/reset-password',       auth, requireRole('superadmin'), resetPasswordHandler);
-router.delete('/admins/:id',                    auth, requireRole('superadmin'), deleteAdminHandler);
+/* ===================== ALIAS "admins" ===================== */
+router.post('/admins',                     auth, requireRole('superadmin'), (req,res,next)=>router.handle({ ...req, url:'/users' }, res, next));
+router.put('/admins/:id',                  auth, requireRole('superadmin'), (req,res,next)=>router.handle({ ...req, url:`/users/${req.params.id}` }, res, next));
+router.post('/admins/:id/toggle-active',   auth, requireRole('superadmin'), (req,res,next)=>router.handle({ ...req, url:`/users/${req.params.id}/toggle-active` }, res, next));
+router.get('/admins/:id/invoices',         auth, requireRole('superadmin'), (req,res,next)=>router.handle({ ...req, url:`/users/${req.params.id}/invoices` }, res, next));
+router.post('/admins/:id/impersonate',     auth, requireRole('superadmin'), (req,res,next)=>router.handle({ ...req, url:`/users/${req.params.id}/impersonate` }, res, next));
+router.post('/admins/:id/reset-password',  auth, requireRole('superadmin'), (req,res,next)=>router.handle({ ...req, url:`/users/${req.params.id}/reset-password` }, res, next));
+router.delete('/admins/:id',               auth, requireRole('superadmin'), (req,res,next)=>router.handle({ ...req, url:`/users/${req.params.id}` }, res, next));
 
 module.exports = router;
