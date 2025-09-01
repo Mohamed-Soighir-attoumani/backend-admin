@@ -2,13 +2,16 @@ const jwt = require('jsonwebtoken');
 const User = require('../models/User');
 let Admin = null; try { Admin = require('../models/Admin'); } catch (_) {}
 
+/* IMPORTANT : même secret que dans routes/auth.js */
+const JWT_SECRET = process.env.JWT_SECRET || 'dev-secret';
+
 module.exports = async function auth(req, res, next) {
   try {
     const authz = req.headers.authorization || '';
     const token = authz.startsWith('Bearer ') ? authz.slice(7).trim() : null;
     if (!token) return res.status(401).json({ message: 'Accès non autorisé - token manquant' });
 
-    const payload = jwt.verify(token, process.env.JWT_SECRET);
+    const payload = jwt.verify(token, JWT_SECRET);
 
     const tokenTv =
       typeof payload.tv === 'number' ? payload.tv
@@ -19,7 +22,7 @@ module.exports = async function auth(req, res, next) {
 
     if (payload.id) {
       account = await User.findById(payload.id)
-        .select('isActive tokenVersion role email communeId communeName');
+        .select('isActive tokenVersion role email communeId communeName'); // _id inclus par défaut
       if (!account && Admin) {
         account = await Admin.findById(payload.id)
           .select('isActive tokenVersion role email communeId communeName');
