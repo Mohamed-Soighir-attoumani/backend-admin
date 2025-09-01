@@ -1,11 +1,17 @@
+// backend/routes/userRoutes.js
 const express = require('express');
 const router = express.Router();
 const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
 
 const auth = require('../middleware/authMiddleware');
 const requireRole = require('../middleware/requireRole');
 const User = require('../models/User');
+
+/* Config JWT (même secret que routes/auth.js) */
+const JWT_SECRET = process.env.JWT_SECRET || 'dev-secret';
+const TOKEN_EXPIRES_IN = '7d';
 
 /* Utils */
 const isValidHex24 = (s) => typeof s === 'string' && /^[a-f0-9]{24}$/i.test(s);
@@ -280,16 +286,62 @@ async function invoicesHandler(req, res) {
   }
 }
 
-/* ===================== Routes "users" existantes ===================== */
-router.post('/users',            auth, requireRole('superadmin'), createAdminHandler);
-router.put('/users/:id',         auth, requireRole('superadmin'), updateAdminHandler);
-router.post('/users/:id/toggle-active', auth, requireRole('superadmin'), toggleActiveHandler);
-router.get('/users/:id/invoices',       auth, requireRole('superadmin'), invoicesHandler);
+/* ===================== Impersonation (superadmin -> se connecter en tant que) ===================== */
+async function impersonateHandler(req, res) {
+  try {
+    const target = await findUserByAnyId(req.params.id, req.body, req.query);
+    if (!target) return res.status(404).json({ message: 'Utilisateur introuvable' });
 
-/* ===================== ✅ ALIAS "admins" (corrige ton 404) ===================== */
-router.post('/admins',                  auth, requireRole('superadmin'), createAdminHandler);
-router.put('/admins/:id',               auth, requireRole('superadmin'), updateAdminHandler);
-router.post('/admins/:id/toggle-active',auth, requireRole('superadmin'), toggleActiveHandler);
-router.get('/admins/:id/invoices',      auth, requireRole('superadmin'), invoicesHandler);
+    // Interdictions/contraintes de sécurité
+    if (target.role === 'superadmin') {
+      return res.status(403).json({ message: 'Impersonation superadmin interdite' });
+    }
+    if (target.isActive === false) {
+      return res.status(403).json({ message: 'Compte désactivé' });
+    }
+
+    const payload = {
+      id: String(target._id),
+      email: target.email,
+      role: target.role || 'user',
+      tv: typeof target.tokenVersion === 'number' ? target.tokenVersion : 0,
+      impersonated: true,
+      origUserId: String(req.user.id), // superadmin d’origine
+    };
+
+    const token = jwt.sign(payload, JWT_SECRET, { expiresIn: TOKEN_EXPIRES_IN });
+
+    return res.json({
+      token,
+      user: {
+        id: String(target._id),
+        email: target.email,
+        name: target.name || '',
+        role: target.role || 'user',
+        communeId: target.communeId || '',
+        communeName: target.communeName || '',
+        photo: target.photo || '',
+      },
+    });
+  } catch (err) {
+    console.error('❌ POST /impersonate', err);
+    res.status(500).json({ message: 'Erreur serveur' });
+  }
+}
+
+/* ===================== Routes "users" existantes ===================== */
+router.post('/users',                     auth, requireRole('superadmin'), createAdminHandler);
+router.put('/users/:id',                  auth, requireRole('superadmin'), updateAdminHandler);
+router.post('/users/:id/toggle-active',   auth, requireRole('superadmin'), toggleActiveHandler);
+router.get('/users/:id/invoices',         auth, requireRole('superadmin'), invoicesHandler);
+/* ✅ Impersonate alias côté /users */
+router.post('/users/:id/impersonate',     auth, requireRole('superadmin'), impersonateHandler);
+
+/* ===================== ✅ ALIAS "admins" (inclut impersonate) ===================== */
+router.post('/admins',                          auth, requireRole('superadmin'), createAdminHandler);
+router.put('/admins/:id',                       auth, requireRole('superadmin'), updateAdminHandler);
+router.post('/admins/:id/toggle-active',        auth, requireRole('superadmin'), toggleActiveHandler);
+router.get('/admins/:id/invoices',              auth, requireRole('superadmin'), invoicesHandler);
+router.post('/admins/:id/impersonate',          auth, requireRole('superadmin'), impersonateHandler);
 
 module.exports = router;
