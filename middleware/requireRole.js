@@ -1,4 +1,3 @@
-// backend/middleware/requireRole.js
 module.exports = function requireRole(minRole = 'admin') {
   const rank = { user: 1, admin: 2, superadmin: 3 };
   const required = rank[minRole] ?? rank.admin;
