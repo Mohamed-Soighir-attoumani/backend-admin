@@ -1,4 +1,3 @@
-// backend/routes/me.js
 const express = require('express');
 const mongoose = require('mongoose');
 const fs = require('fs');
@@ -52,15 +51,16 @@ async function deleteIfExists(filePath) {
 router.get('/me', auth, async (req, res) => {
   try {
     const { id, email } = req.user || {};
-    let doc = null;
+    const select = 'email role name communeId communeName photo subscriptionStatus subscriptionEndAt';
 
+    let doc = null;
     if (id && isValidObjectId(id)) {
-      doc = await User.findById(id).select('email role name communeId communeName photo');
-      if (!doc && Admin) doc = await Admin.findById(id).select('email role name communeId communeName photo');
+      doc = await User.findById(id).select(select);
+      if (!doc && Admin) doc = await Admin.findById(id).select(select);
     }
     if (!doc && email) {
-      doc = await User.findOne({ email }).select('email role name communeId communeName photo');
-      if (!doc && Admin) doc = await Admin.findOne({ email }).select('email role name communeId communeName photo');
+      doc = await User.findOne({ email }).select(select);
+      if (!doc && Admin) doc = await Admin.findOne({ email }).select(select);
     }
 
     if (!doc) return res.status(404).json({ message: 'Utilisateur non trouvé' });
@@ -79,15 +79,16 @@ router.patch('/me', auth, async (req, res) => {
     for (const k of updatable) if (k in req.body) updates[k] = req.body[k];
 
     const { id, email } = req.user || {};
+    const select = 'email role name communeId communeName photo subscriptionStatus subscriptionEndAt';
     let doc = null;
 
     if (id && isValidObjectId(id)) {
-      doc = await User.findByIdAndUpdate(id, updates, { new: true, select: 'email role name communeId communeName photo' });
-      if (!doc && Admin) doc = await Admin.findByIdAndUpdate(id, updates, { new: true, select: 'email role name communeId communeName photo' });
+      doc = await User.findByIdAndUpdate(id, updates, { new: true, select });
+      if (!doc && Admin) doc = await Admin.findByIdAndUpdate(id, updates, { new: true, select });
     }
     if (!doc && email) {
-      doc = await User.findOneAndUpdate({ email }, updates, { new: true, select: 'email role name communeId communeName photo' });
-      if (!doc && Admin) doc = await Admin.findOneAndUpdate({ email }, updates, { new: true, select: 'email role name communeId communeName photo' });
+      doc = await User.findOneAndUpdate({ email }, updates, { new: true, select });
+      if (!doc && Admin) doc = await Admin.findOneAndUpdate({ email }, updates, { new: true, select });
     }
 
     if (!doc) return res.status(404).json({ message: 'Utilisateur non trouvé' });
@@ -116,15 +117,16 @@ router.post('/me/photo', auth, upload.single('photo'), async (req, res) => {
 
     // Récupérer le doc actuel pour supprimer l’ancienne photo si locale
     const { id, email } = req.user || {};
+    const select = 'email role name communeId communeName photo';
     let doc = null;
 
     if (id && isValidObjectId(id)) {
-      doc = await User.findById(id).select('email role name communeId communeName photo');
-      if (!doc && Admin) doc = await Admin.findById(id).select('email role name communeId communeName photo');
+      doc = await User.findById(id).select(select);
+      if (!doc && Admin) doc = await Admin.findById(id).select(select);
     }
     if (!doc && email) {
-      doc = await User.findOne({ email }).select('email role name communeId communeName photo');
-      if (!doc && Admin) doc = await Admin.findOne({ email }).select('email role name communeId communeName photo');
+      doc = await User.findOne({ email }).select(select);
+      if (!doc && Admin) doc = await Admin.findOne({ email }).select(select);
     }
     if (!doc) return res.status(404).json({ message: 'Utilisateur non trouvé' });
 
@@ -135,9 +137,9 @@ router.post('/me/photo', auth, upload.single('photo'), async (req, res) => {
 
     // Mettre à jour la photo dans le bon modèle
     if (doc.constructor.modelName === 'User') {
-      doc = await User.findByIdAndUpdate(doc._id, { photo: url }, { new: true, select: 'email role name communeId communeName photo' });
+      doc = await User.findByIdAndUpdate(doc._id, { photo: url }, { new: true, select });
     } else {
-      doc = await Admin.findByIdAndUpdate(doc._id, { photo: url }, { new: true, select: 'email role name communeId communeName photo' });
+      doc = await Admin.findByIdAndUpdate(doc._id, { photo: url }, { new: true, select });
     }
 
     return res.json({ message: 'Photo mise à jour', url, user: doc });
