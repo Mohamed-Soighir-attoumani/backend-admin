@@ -1,4 +1,3 @@
-// backend/routes/subscriptions.js
 const express = require('express');
 const router = express.Router();
 const mongoose = require('mongoose');
@@ -131,6 +130,58 @@ router.post('/subscriptions/:id/cancel', auth, requireRole('superadmin'), async 
   } catch (err) {
     console.error('❌ POST /subscriptions/:id/cancel', err);
     res.status(500).json({ message: 'Erreur serveur' });
+  }
+});
+
+/* --------- NOUVEAUX ENDPOINTS pour la page MonAbonnement --------- */
+
+// GET /api/my-subscription -> l’admin voit en direct ce que le superadmin a fait
+router.get('/my-subscription', auth, async (req, res) => {
+  try {
+    const id = req.user?.id;
+    if (!id || !mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(401).json({ message: 'Non connecté' });
+    }
+    const user = await User.findById(id).select('subscriptionStatus subscriptionEndAt');
+    if (!user) return res.status(404).json({ message: 'Utilisateur introuvable' });
+
+    return res.json({
+      status: user.subscriptionStatus || 'none',
+      endAt: user.subscriptionEndAt || null,
+    });
+  } catch (e) {
+    console.error('GET /my-subscription:', e);
+    return res.status(500).json({ message: 'Erreur serveur' });
+  }
+});
+
+// GET /api/my-invoices -> factures "mock" alignées avec le statut
+router.get('/my-invoices', auth, async (req, res) => {
+  try {
+    const id = req.user?.id;
+    if (!id || !mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(401).json({ message: 'Non connecté' });
+    }
+    const user = await User.findById(id).select('subscriptionStatus subscriptionEndAt');
+    if (!user) return res.status(404).json({ message: 'Utilisateur introuvable' });
+
+    const invoices = [];
+    if (user.subscriptionStatus === 'active') {
+      invoices.push({
+        id: `INV-${String(user._id).slice(-6)}`,
+        number: `INV-${new Date().getFullYear()}-${String(user._id).slice(-4)}`,
+        amount: 19.90,
+        currency: 'EUR',
+        status: 'paid',
+        date: new Date(),
+        url: 'https://example.com/invoice.pdf',
+      });
+    }
+
+    return res.json({ invoices });
+  } catch (e) {
+    console.error('GET /my-invoices:', e);
+    return res.status(500).json({ message: 'Erreur serveur' });
   }
 });
 
