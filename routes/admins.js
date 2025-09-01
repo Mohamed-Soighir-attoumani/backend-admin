@@ -1,187 +1,325 @@
 // backend/routes/admins.js
 const express = require('express');
+const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
-const mongoose = require('mongoose');
-
-const router = express.Router();
 
 const auth = require('../middleware/authMiddleware');
 const requireRole = require('../middleware/requireRole');
-const User = require('../models/User');
 
+const Admin = require('../models/Admin'); // nouveaux comptes admins
+const User  = require('../models/User');  // anciens comptes "admin/superadmin" éventuels
+
+const router = express.Router();
+
+const isObjectId = (id) => mongoose.Types.ObjectId.isValid(id || '');
 const JWT_SECRET = process.env.JWT_SECRET || 'dev-secret';
 
-const isValidHex24 = (s) => typeof s === 'string' && /^[a-f0-9]{24}$/i.test(s);
-const norm = (v) => String(v || '').trim().toLowerCase();
-const decode = (v) => { try { return decodeURIComponent(String(v)); } catch { return String(v || ''); } };
-const pickHexFromAny = (v) => {
-  if (!v) return '';
-  if (typeof v === 'object') {
-    if (v.$oid && isValidHex24(v.$oid)) return v.$oid;
-    try {
-      const m = JSON.stringify(v).match(/[a-f0-9]{24}/i);
-      if (m && isValidHex24(m[0])) return m[0];
-    } catch {}
+// Petite utilitaire pour échapper une valeur en RegExp
+const escapeRegex = (s) => String(s || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+// (debug) log
+router.use((req, _res, next) => {
+  console.log(`[admins.js] ${req.method} ${req.originalUrl}`);
+  next();
+});
+
+/**
+ * GET /api/admins
+ * Liste fusionnée des administrateurs (Admin + User[role in admin/superadmin])
+ * Query:
+ *   - q (recherche partielle sur nom/email)
+ *   - communeId (filtre strict, insensible à la casse)
+ * Réponse: { admins: [...] }
+ */
+router.get('/', auth, requireRole('superadmin'), async (req, res) => {
+  const { q = '', communeId = '' } = req.query || {};
+
+  const andA = [];
+  if (q) {
+    andA.push({
+      $or: [
+        { name:  { $regex: q, $options: 'i' } },
+        { email: { $regex: q, $options: 'i' } },
+      ],
+    });
   }
-  const s = String(v);
-  const m = s.match(/[a-f0-9]{24}/i);
-  return m && isValidHex24(m[0]) ? m[0] : '';
-};
-
-async function findUserByAnyId(primary, body = {}, query = {}) {
-  const candidatesRaw = [
-    primary,
-    body && body.id,
-    body && body.userId,
-    body && body.email,
-    query && query.id,
-    query && query.userId,
-    query && query.email,
-  ].filter((x) => x !== undefined && x !== null);
-
-  const candidates = candidatesRaw
-    .map((x) => (typeof x === 'string' ? x.trim() : x))
-    .filter(Boolean);
-
-  for (const raw of candidates) {
-    const maybeEmail = typeof raw === 'string' && raw.includes('@');
-    const hex = pickHexFromAny(raw);
-
-    if (hex) {
-      const byId = await User.findById(hex);
-      if (byId) return byId;
-    }
-    if (maybeEmail) {
-      const byEmail = await User.findOne({ email: norm(raw) });
-      if (byEmail) return byEmail;
-    }
-    const rawStr = decode(raw).trim();
-    if (rawStr) {
-      const byUserId = await User.findOne({ userId: rawStr });
-      if (byUserId) return byUserId;
-    }
+  if (communeId) {
+    andA.push({ communeId: { $regex: `^${escapeRegex(communeId)}$`, $options: 'i' } });
   }
-  return null;
-}
+  const condA = andA.length ? { $and: andA } : {};
 
-/* ========= ALIAS CREATION (POST /api/admins) =========
-   Laisse /api/users gérer la création, mais on garde cet alias si ton front l’utilise.
-*/
+  // 1) Admins (nouvel ensemble)
+  const adminsA = await Admin.find(condA)
+    .select('name email role communeId communeName photo isActive createdAt updatedAt')
+    .lean();
+
+  // 2) Admins historiques stockés dans User
+  const andB = [];
+  if (q) {
+    andB.push({
+      $or: [
+        { name:  { $regex: q, $options: 'i' } },
+        { email: { $regex: q, $options: 'i' } },
+      ],
+    });
+  }
+  if (communeId) {
+    andB.push({ communeId: { $regex: `^${escapeRegex(communeId)}$`, $options: 'i' } });
+  }
+  andB.push({ role: { $in: ['admin', 'superadmin'] } });
+  const condB = andB.length ? { $and: andB } : {};
+
+  const adminsB = await User.find(condB)
+    .select('name email role communeId communeName photo isActive createdAt updatedAt')
+    .lean();
+
+  // Fusion + dédup par email (Admin prioritaire)
+  const byEmail = new Map();
+  for (const a of adminsB) byEmail.set(String(a.email).toLowerCase(), { ...a, _source: 'User' });
+  for (const a of adminsA) byEmail.set(String(a.email).toLowerCase(), { ...a, _source: 'Admin' });
+
+  return res.json({ admins: Array.from(byEmail.values()) });
+});
+
+/**
+ * POST /api/admins
+ * Crée un admin dans la collection Admin
+ * body: { name, email, password, role?, communeId?, communeName?, photo? }
+ */
 router.post('/', auth, requireRole('superadmin'), async (req, res) => {
   try {
-    let { email, password, name, communeId, communeName, createdBy } = req.body || {};
-    email = norm(email);
-    if (!email || !password) {
-      return res.status(400).json({ message: 'Email et mot de passe requis' });
+    let {
+      name = '',
+      email = '',
+      password = '',
+      role = 'admin',
+      communeId = '',
+      communeName = '',
+      photo = '',
+    } = req.body || {};
+
+    const emailRaw = String(email || '').trim();
+    const emailLower = emailRaw.toLowerCase();
+    const communeIdRaw = String(communeId || '').trim();
+    const communeIdLower = communeIdRaw.toLowerCase();
+
+    if (!emailRaw || !password) {
+      return res.status(400).json({ message: 'Email et mot de passe requis.' });
+    }
+    if (!['admin', 'superadmin'].includes(role)) role = 'admin';
+
+    // 🔎 Doublon UNIQUEMENT dans Admin, par (email, communeId) insensible à la casse
+    const existsAdmin = await Admin.findOne({
+      email:     { $regex: `^${escapeRegex(emailRaw)}$`,     $options: 'i' },
+      communeId: { $regex: `^${escapeRegex(communeIdRaw)}$`, $options: 'i' },
+    }).lean();
+
+    if (existsAdmin) {
+      return res.status(409).json({ message: 'Cet email est déjà utilisé pour cette commune.' });
     }
 
-    const exists = await User.findOne({ email });
-    if (exists) return res.status(409).json({ message: 'Email déjà utilisé' });
+    // (⚠️ Non-bloquant : on NE bloque PAS si un ancien User a le même email.
+    //  Débloque votre cas de faux-positifs.)
+    // const existsUser = await User.findOne({
+    //   email:     { $regex: `^${escapeRegex(emailRaw)}$`, $options: 'i' },
+    //   communeId: { $regex: `^${escapeRegex(communeIdRaw)}$`, $options: 'i' },
+    // }).lean();
+    // if (existsUser) {
+    //   return res.status(409).json({ message: 'Cet email est déjà utilisé pour cette commune (ancien compte).' });
+    // }
 
-    const hash = await bcrypt.hash(String(password), 10);
-    const doc = await User.create({
-      email,
+    const salt = await bcrypt.genSalt(10);
+    const hash = await bcrypt.hash(password, salt);
+
+    // on normalise l'email pour éviter les variantes de casse
+    const doc = await Admin.create({
+      name,
+      email: emailLower,            // on stocke en minuscule
       password: hash,
-      name: name || '',
-      role: 'admin',
-      communeId: communeId || '',
-      communeName: communeName || '',
-      createdBy: createdBy ? String(createdBy) : '',
+      role,
+      communeId: communeIdRaw,      // garde la casse d'affichage
+      communeName,
+      photo,
       isActive: true,
-      subscriptionStatus: 'none',
-      subscriptionEndAt: null,
+      tokenVersion: 0,
     });
 
-    res.status(201).json({ ...doc.toObject(), _idString: String(doc._id) });
-  } catch (err) {
-    console.error('❌ POST /api/admins', err);
+    res.status(201).json({ id: String(doc._id), message: 'Admin créé.' });
+  } catch (e) {
+    if (e && e.code === 11000) {
+      // Conflit index unique (au cas où vous en avez un)
+      return res.status(409).json({ message: 'Cet email est déjà utilisé pour cette commune.' });
+    }
+    console.error('POST /api/admins error:', e);
     res.status(500).json({ message: 'Erreur serveur' });
   }
 });
 
-/* ========= RESET PASSWORD ========= */
+/**
+ * PUT /api/admins/:id
+ * Met à jour un admin (pas le mot de passe ici)
+ */
+router.put('/:id', auth, requireRole('superadmin'), async (req, res) => {
+  const { id } = req.params;
+  if (!isObjectId(id)) return res.status(400).json({ message: 'ID invalide.' });
+
+  const meId = String(req.user.id);
+  if (meId === id) {
+    return res.status(400).json({ message: 'Impossible de modifier votre propre rôle ici.' });
+  }
+
+  const target = await Admin.findById(id).select('email role communeId');
+  if (!target) return res.status(404).json({ message: 'Admin introuvable.' });
+  if (String(target.role) === 'superadmin') {
+    return res.status(403).json({ message: 'Action interdite sur un superadmin.' });
+  }
+
+  // Prépare payload
+  const payload = {};
+  const nextEmailRaw = typeof req.body.email === 'string' ? String(req.body.email).trim() : target.email;
+  const nextCommuneRaw = typeof req.body.communeId === 'string' ? String(req.body.communeId).trim() : (target.communeId || '');
+
+  if (typeof req.body.name === 'string') payload.name = req.body.name;
+  if (typeof req.body.email === 'string') payload.email = nextEmailRaw.toLowerCase(); // normalise
+  if (typeof req.body.role === 'string' && ['admin', 'superadmin'].includes(req.body.role)) payload.role = req.body.role;
+  if (typeof req.body.communeId === 'string') payload.communeId = nextCommuneRaw;
+  if (typeof req.body.communeName === 'string') payload.communeName = req.body.communeName;
+  if (typeof req.body.photo === 'string') payload.photo = req.body.photo;
+
+  // Vérif doublon (email, communeId) sur un AUTRE document
+  const dupe = await Admin.findOne({
+    _id: { $ne: id },
+    email:     { $regex: `^${escapeRegex(nextEmailRaw)}$`,     $options: 'i' },
+    communeId: { $regex: `^${escapeRegex(nextCommuneRaw)}$`,   $options: 'i' },
+  }).lean();
+
+  if (dupe) {
+    return res.status(409).json({ message: 'Cet email est déjà utilisé pour cette commune.' });
+  }
+
+  await Admin.updateOne({ _id: id }, { $set: payload });
+  res.json({ message: 'Admin mis à jour.' });
+});
+
+/**
+ * POST /api/admins/:id/reset-password
+ * Réinitialise le mot de passe (collection Admin)
+ */
 router.post('/:id/reset-password', auth, requireRole('superadmin'), async (req, res) => {
-  try {
-    const user = await findUserByAnyId(req.params.id, req.body, req.query);
-    if (!user) return res.status(404).json({ message: 'Utilisateur introuvable' });
-    if (user.role !== 'admin') {
-      return res.status(400).json({ message: 'Seuls les administrateurs peuvent être traités ici' });
-    }
+  const { id } = req.params;
+  const { newPassword } = req.body || {};
+  if (!isObjectId(id)) return res.status(400).json({ message: 'ID invalide.' });
 
-    const { newPassword } = req.body || {};
-    if (typeof newPassword !== 'string' || newPassword.length < 6) {
-      return res.status(400).json({ message: 'Nouveau mot de passe invalide (min 6 caractères)' });
-    }
-
-    const hash = await bcrypt.hash(newPassword, 10);
-    user.password = hash;
-    // Invalidation des sessions existantes
-    user.tokenVersion = (user.tokenVersion || 0) + 1;
-    await user.save();
-
-    res.json({ ok: true, message: 'Mot de passe réinitialisé' });
-  } catch (err) {
-    console.error('❌ POST /api/admins/:id/reset-password', err);
-    res.status(500).json({ message: 'Erreur serveur' });
+  if (typeof newPassword !== 'string' || newPassword.trim().length < 8) {
+    return res.status(400).json({ message: 'Nouveau mot de passe invalide (min 8 caractères).' });
   }
+
+  const meId = String(req.user.id);
+  if (meId === id) {
+    return res.status(400).json({ message: 'Utilisez /api/change-password pour votre propre compte.' });
+  }
+
+  const doc = await Admin.findById(id).select('+password role tokenVersion');
+  if (!doc) return res.status(404).json({ message: 'Admin introuvable.' });
+  if (doc.role === 'superadmin') return res.status(403).json({ message: 'Action interdite sur un superadmin.' });
+
+  const salt = await bcrypt.genSalt(10);
+  doc.password = await bcrypt.hash(newPassword, salt);
+  if (typeof doc.tokenVersion === 'number') doc.tokenVersion += 1;
+  await doc.save();
+
+  res.json({ message: 'Mot de passe réinitialisé.' });
 });
 
-/* ========= IMPERSONATE ========= */
+/**
+ * POST /api/admins/:id/toggle-active
+ * Active/désactive un admin
+ * body: { active: boolean }
+ */
+router.post('/:id/toggle-active', auth, requireRole('superadmin'), async (req, res) => {
+  const { id } = req.params;
+  const { active } = req.body || {};
+  if (!isObjectId(id)) return res.status(400).json({ message: 'ID invalide.' });
+
+  const meId = String(req.user.id);
+  if (meId === id) return res.status(400).json({ message: 'Impossible de désactiver votre propre compte.' });
+
+  const doc = await Admin.findById(id).select('role isActive tokenVersion');
+  if (!doc) return res.status(404).json({ message: 'Admin introuvable.' });
+  if (doc.role === 'superadmin') return res.status(403).json({ message: 'Action interdite sur un superadmin.' });
+
+  doc.isActive = !!active;
+  if (typeof doc.tokenVersion === 'number') doc.tokenVersion += 1;
+  await doc.save();
+
+  res.json({ message: doc.isActive ? 'Compte réactivé.' : 'Compte désactivé.' });
+});
+
+/**
+ * POST /api/admins/:id/force-logout
+ * Invalide tous les tokens (augmente tokenVersion)
+ */
+router.post('/:id/force-logout', auth, requireRole('superadmin'), async (req, res) => {
+  const { id } = req.params;
+  if (!isObjectId(id)) return res.status(400).json({ message: 'ID invalide.' });
+
+  const doc = await Admin.findById(id).select('tokenVersion');
+  if (!doc) return res.status(404).json({ message: 'Admin introuvable.' });
+
+  if (typeof doc.tokenVersion !== 'number') return res.status(400).json({ message: 'tokenVersion non supporté.' });
+
+  doc.tokenVersion += 1;
+  await doc.save();
+
+  res.json({ ok: true, tokenVersion: doc.tokenVersion });
+});
+
+/**
+ * POST /api/admins/:id/impersonate
+ * Génère un token pour se connecter en tant que l’admin ciblé
+ */
 router.post('/:id/impersonate', auth, requireRole('superadmin'), async (req, res) => {
-  try {
-    const target = await findUserByAnyId(req.params.id, req.body, req.query);
-    if (!target) return res.status(404).json({ message: 'Utilisateur introuvable' });
-    if (target.role !== 'admin') {
-      return res.status(400).json({ message: 'Seuls les administrateurs peuvent être utilisés' });
-    }
-    if (target.isActive === false) {
-      return res.status(403).json({ message: 'Compte administrateur désactivé' });
-    }
+  const { id } = req.params;
+  if (!isObjectId(id)) return res.status(400).json({ message: 'ID invalide.' });
 
-    const payload = {
-      id: String(target._id),
-      email: target.email,
-      role: target.role || 'admin',
-      tv: typeof target.tokenVersion === 'number' ? target.tokenVersion : 0,
-      impersonated: true,
-      origUserId: req.user?.id || null,
-    };
+  const target = await Admin.findById(id).select('email role name communeId communeName isActive tokenVersion');
+  if (!target) return res.status(404).json({ message: 'Admin introuvable.' });
+  if (target.role === 'superadmin') return res.status(403).json({ message: 'Action interdite sur un superadmin.' });
+  if (target.isActive === false) return res.status(403).json({ message: 'Compte désactivé.' });
 
-    const token = jwt.sign(payload, JWT_SECRET, { expiresIn: '2h' });
+  const payload = {
+    id: String(target._id),
+    email: target.email,
+    role: target.role,
+    communeId: target.communeId || '',
+    communeName: target.communeName || '',
+    tv: typeof target.tokenVersion === 'number' ? target.tokenVersion : 0,
+    impersonated: true,
+    origUserId: String(req.user.id),
+  };
 
-    return res.json({
-      token,
-      user: {
-        id: String(target._id),
-        email: target.email,
-        name: target.name || '',
-        role: target.role || 'admin',
-        communeId: target.communeId || '',
-        communeName: target.communeName || '',
-        photo: target.photo || '',
-      },
-    });
-  } catch (err) {
-    console.error('❌ POST /api/admins/:id/impersonate', err);
-    res.status(500).json({ message: 'Erreur serveur' });
-  }
+  const token = jwt.sign(payload, JWT_SECRET, { expiresIn: '2h' });
+  res.json({ token, target: { id: String(target._id), email: target.email } });
 });
 
-/* ========= DELETE ADMIN ========= */
+/**
+ * DELETE /api/admins/:id
+ * Supprime un admin
+ */
 router.delete('/:id', auth, requireRole('superadmin'), async (req, res) => {
-  try {
-    const user = await findUserByAnyId(req.params.id, req.body, req.query);
-    if (!user) return res.status(404).json({ message: 'Utilisateur introuvable' });
-    if (user.role !== 'admin') {
-      return res.status(400).json({ message: 'Seuls les administrateurs peuvent être supprimés ici' });
-    }
-    await User.deleteOne({ _id: user._id });
-    res.json({ ok: true });
-  } catch (err) {
-    console.error('❌ DELETE /api/admins/:id', err);
-    res.status(500).json({ message: 'Erreur serveur' });
-  }
+  const { id } = req.params;
+  if (!isObjectId(id)) return res.status(400).json({ message: 'ID invalide.' });
+
+  const meId = String(req.user.id);
+  if (meId === id) return res.status(400).json({ message: 'Impossible de supprimer votre propre compte.' });
+
+  const doc = await Admin.findById(id).select('role');
+  if (!doc) return res.status(404).json({ message: 'Admin introuvable.' });
+  if (doc.role === 'superadmin') return res.status(403).json({ message: 'Action interdite sur un superadmin.' });
+
+  await Admin.deleteOne({ _id: id });
+  res.json({ message: 'Admin supprimé.' });
 });
 
 module.exports = router;
