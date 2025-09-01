@@ -1,3 +1,4 @@
+// backend/server.js
 require('dotenv').config();
 
 const express = require('express');
@@ -17,7 +18,7 @@ const PORT = process.env.PORT || 4000;
 const HOST = process.env.HOST || '0.0.0.0';
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/backend_admin';
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN || null;
-// typo résolue : accepte FRONEND_ORIGIN si mal orthographié
+// accepte FRONEND_ORIGIN si mal orthographié
 const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || process.env.FRONEND_ORIGIN || '*';
 
 app.set('trust proxy', 1);
@@ -70,17 +71,14 @@ app.use(
 
 app.get('/api/health', (_, res) => res.json({ status: 'ok', timestamp: Date.now() }));
 
-/* Routes */
+/* Routes (ordre important) */
 app.use('/api', require('./routes/setup-admin'));
 app.use('/api', require('./routes/auth'));
 app.use('/api', require('./routes/me'));
 
-/**
- * ⚠️ IMPORTANT :
- * On retire l’ancien montage dédié de /api/admins pour éviter le doublon.
- * Désormais, /api/admins est servi par routes/userRoutes.js (route GET '/admins').
- */
-// app.use('/api/admins', require('./routes/admins'));
+/* ❌ SUPPRIMÉ: montage doublon qui provoquait des collisions
+   app.use('/api/admins', require('./routes/admins'));
+*/
 
 app.use('/api/change-password', (req, _res, next) => { console.log('[HIT] /api/change-password', req.method, req.path || '/'); next(); }, require('./routes/changePassword'));
 app.use('/api/incidents', require('./routes/incidents'));
@@ -89,8 +87,9 @@ app.use('/api/infos', require('./routes/infos'));
 app.use('/api/notifications', require('./routes/notifications'));
 app.use('/api/projects', require('./routes/projects'));
 app.use('/api/devices', require('./routes/devices'));
-app.use('/api', require('./routes/userRoutes'));        // /api/admins (via ce fichier) + /api/users + invoices + toggles
-app.use('/api', require('./routes/subscriptions'));     // /api/subscriptions/* start/renew/cancel
+
+app.use('/api', require('./routes/userRoutes'));       // /api/admins + /api/users + invoices + toggles
+app.use('/api', require('./routes/subscriptions'));    // /api/subscriptions/* start/renew/cancel
 app.use('/api', require('./routes/debug'));
 
 app.get('/', (_, res) => res.send('API SecuriDem opérationnelle ✅'));
