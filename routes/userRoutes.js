@@ -9,63 +9,69 @@ const requireRole = require('../middleware/requireRole');
 const User = require('../models/User');
 
 /* Utils */
-const isValidId = (id) => mongoose.Types.ObjectId.isValid(String(id || ''));
+const isValidHex24 = (s) => typeof s === 'string' && /^[a-f0-9]{24}$/i.test(s);
+const isValidId = (id) => isValidHex24(String(id || ''));
 const norm = (v) => String(v || '').trim().toLowerCase();
-
-function cleanCandidate(v) {
-  if (v == null) return '';
-  let s = String(v).trim();
-  // enlève guillemets éventuellement passés
-  s = s.replace(/^"+|"+$/g, '').replace(/^'+|'+$/g, '');
-  try { s = decodeURIComponent(s); } catch {}
-  return s;
-}
+const decode = (v) => {
+  try { return decodeURIComponent(String(v)); } catch { return String(v || ''); }
+};
+const pickHexFromAny = (v) => {
+  if (!v) return '';
+  if (typeof v === 'object') {
+    if (v.$oid && isValidHex24(v.$oid)) return v.$oid;
+    try {
+      const m = JSON.stringify(v).match(/[a-f0-9]{24}/i);
+      if (m && isValidHex24(m[0])) return m[0];
+    } catch {}
+  }
+  const s = String(v);
+  const m = s.match(/[a-f0-9]{24}/i);
+  return m && isValidHex24(m[0]) ? m[0] : '';
+};
 
 /**
  * 🔍 Résout un utilisateur à partir de :
- *  - id Mongo (ObjectId),
- *  - _idString,
- *  - id/userId,
- *  - email
- *  Les formats encodés / mélangés sont supportés (extraction 24-hexa dans une string).
+ * - req.params.id (ObjectId, $oid, ObjectId("..."), email, userId)
+ * - req.body.id / req.body.userId / req.body.email
+ * - req.query.id / req.query.email
  */
-async function findUserByAnyId(primary, body = {}) {
+async function findUserByAnyId(primary, body = {}, query = {}) {
   const candidatesRaw = [
     primary,
-    body.id,
-    body.userId,
-    body._id,
-    body._idString,
-    body.email,
-    body.queryId,
-  ];
+    body && body.id,
+    body && body.userId,
+    body && body.email,
+    query && query.id,
+    query && query.userId,
+    query && query.email,
+  ].filter((x) => x !== undefined && x !== null);
 
-  if (primary && typeof primary === 'object') {
-    candidatesRaw.push(primary.id, primary._id, primary._idString, primary.email);
-  }
+  const candidates = candidatesRaw
+    .map((x) => (typeof x === 'string' ? x.trim() : x))
+    .filter(Boolean);
 
-  const candidates = candidatesRaw.map(cleanCandidate).filter(Boolean);
+  for (const raw of candidates) {
+    const maybeEmail = typeof raw === 'string' && raw.includes('@');
+    const hex = pickHexFromAny(raw);
 
-  for (const s of candidates) {
-    // 1) ObjectId direct
-    if (isValidId(s)) {
-      const byId = await User.findById(s);
+    // 1) ObjectId prioritaire
+    if (hex) {
+      const byId = await User.findById(hex);
       if (byId) return byId;
     }
-    // 2) ObjectId caché dans une chaîne (ObjectId("..."), {"$oid":"..."} ou texte)
-    const m = s.match(/[a-f0-9]{24}/i);
-    if (m && isValidId(m[0])) {
-      const byHex = await User.findById(m[0]);
-      if (byHex) return byHex;
-    }
-    // 3) email
-    if (s.includes('@')) {
-      const byEmail = await User.findOne({ email: norm(s) });
+
+    // 2) email
+    if (maybeEmail) {
+      const byEmail = await User.findOne({ email: norm(raw) });
       if (byEmail) return byEmail;
     }
-    // 4) userId custom éventuel
-    const byUserId = await User.findOne({ userId: s });
-    if (byUserId) return byUserId;
+
+    // 3) userId personnalisé
+    const rawStr = decode(raw).trim();
+    if (rawStr) {
+      const byUserId = await User.findOne({ userId: rawStr });
+      if (byUserId) return byUserId;
+    }
   }
 
   return null;
@@ -113,8 +119,12 @@ router.get('/admins', auth, requireRole('superadmin'), async (req, res) => {
       .limit(ps)
       .lean();
 
-    // standardise _idString
-    items = items.map(u => ({ ...u, _idString: String(u._id) }));
+    // ✅ standardiser _idString
+    items = items.map(u => ({
+      ...u,
+      _idString: (u._id && String(u._id)) || '',
+    }));
+
     const total = await User.countDocuments(find);
 
     res.json({ items, total });
@@ -124,7 +134,7 @@ router.get('/admins', auth, requireRole('superadmin'), async (req, res) => {
   }
 });
 
-/* ===================== LISTE /api/users (fallback/générique) ===================== */
+/* ===================== LISTE /api/users (fallback) ===================== */
 router.get('/users', auth, requireRole('superadmin'), async (req, res) => {
   try {
     const {
@@ -168,7 +178,11 @@ router.get('/users', auth, requireRole('superadmin'), async (req, res) => {
       .limit(ps)
       .lean();
 
-    items = items.map(u => ({ ...u, _idString: String(u._id) }));
+    items = items.map(u => ({
+      ...u,
+      _idString: (u._id && String(u._id)) || '',
+    }));
+
     const total = await User.countDocuments(find);
 
     res.json({ items, total });
@@ -181,11 +195,12 @@ router.get('/users', auth, requireRole('superadmin'), async (req, res) => {
 /* ===================== CRÉATION ADMIN ===================== */
 router.post('/users', auth, requireRole('superadmin'), async (req, res) => {
   try {
-    let { email, password, name, communeId, communeName, createdBy } = req.body || {};
+    let { email, password, name, communeId, communeName, role, createdBy } = req.body || {};
     email = norm(email);
     if (!email || !password) {
       return res.status(400).json({ message: 'Email et mot de passe requis' });
     }
+    role = 'admin';
 
     const exists = await User.findOne({ email });
     if (exists) return res.status(409).json({ message: 'Email déjà utilisé' });
@@ -194,9 +209,9 @@ router.post('/users', auth, requireRole('superadmin'), async (req, res) => {
 
     const doc = await User.create({
       email,
-      password: passwordHash,   // correspond au schéma User (password: String, select:false)
+      password: passwordHash, // ✅ correspond au schéma
       name: name || '',
-      role: 'admin',
+      role,
       communeId: communeId || '',
       communeName: communeName || '',
       createdBy: createdBy ? String(createdBy) : '',
@@ -218,7 +233,7 @@ router.post('/users', auth, requireRole('superadmin'), async (req, res) => {
 /* ===================== MISE À JOUR ADMIN ===================== */
 router.put('/users/:id', auth, requireRole('superadmin'), async (req, res) => {
   try {
-    const user = await findUserByAnyId(req.params.id, req.body);
+    const user = await findUserByAnyId(req.params.id, req.body, req.query);
     if (!user) return res.status(404).json({ message: 'Utilisateur introuvable' });
     if (user.role !== 'admin') {
       return res.status(400).json({ message: 'Seuls les admins sont éditables ici' });
@@ -246,7 +261,7 @@ router.put('/users/:id', auth, requireRole('superadmin'), async (req, res) => {
 /* ===================== TOGGLE ACTIVE ===================== */
 router.post('/users/:id/toggle-active', auth, requireRole('superadmin'), async (req, res) => {
   try {
-    const user = await findUserByAnyId(req.params.id, req.body);
+    const user = await findUserByAnyId(req.params.id, req.body, req.query);
     if (!user) return res.status(404).json({ message: 'Utilisateur introuvable' });
 
     const next = !!req.body.active;
@@ -255,7 +270,7 @@ router.post('/users/:id/toggle-active', auth, requireRole('superadmin'), async (
 
     res.json({ ok: true, user: { ...user.toObject(), _idString: String(user._id) } });
   } catch (err) {
-    console.error('❌ POST /users/:id/toggle-active', err);
+    console.error('❌ POST /api/users/:id/toggle-active', err);
     res.status(500).json({ message: 'Erreur serveur' });
   }
 });
@@ -263,7 +278,7 @@ router.post('/users/:id/toggle-active', auth, requireRole('superadmin'), async (
 /* ===================== FACTURES (exemple compatible) ===================== */
 router.get('/users/:id/invoices', auth, requireRole('superadmin'), async (req, res) => {
   try {
-    const user = await findUserByAnyId(req.params.id, req.query);
+    const user = await findUserByAnyId(req.params.id, req.query, req.query);
     if (!user) return res.status(404).json({ message: 'Utilisateur introuvable' });
 
     const inv = [{
@@ -279,46 +294,6 @@ router.get('/users/:id/invoices', auth, requireRole('superadmin'), async (req, r
     res.json({ invoices: inv });
   } catch (err) {
     console.error('❌ GET /api/users/:id/invoices', err);
-    res.status(500).json({ message: 'Erreur serveur' });
-  }
-});
-
-/* ===================== ENDPOINTS POUR LA PAGE MON ABONNEMENT ===================== */
-// Statut de l’abonnement de l’utilisateur courant (admin connecté)
-router.get('/my-subscription', auth, async (req, res) => {
-  try {
-    const me = await User.findById(req.user.id).lean();
-    if (!me) return res.status(404).json({ message: 'Utilisateur introuvable' });
-
-    return res.json({
-      status: me.subscriptionStatus || 'none',
-      endAt: me.subscriptionEndAt || null,
-    });
-  } catch (e) {
-    console.error('❌ GET /api/my-subscription', e);
-    res.status(500).json({ message: 'Erreur serveur' });
-  }
-});
-
-// Factures de l’utilisateur courant (admin connecté)
-router.get('/my-invoices', auth, async (req, res) => {
-  try {
-    const me = await User.findById(req.user.id).lean();
-    if (!me) return res.status(404).json({ message: 'Utilisateur introuvable' });
-
-    const invoices = [{
-      id: `INV-${String(me._id).slice(-6)}`,
-      number: `INV-${new Date().getFullYear()}-${String(me._id).slice(-4)}`,
-      amount: me.subscriptionStatus === 'active' ? 19.90 : 0.00,
-      currency: 'EUR',
-      status: me.subscriptionStatus === 'active' ? 'paid' : 'unpaid',
-      date: new Date(),
-      url: 'https://example.com/invoice.pdf',
-    }];
-
-    res.json({ invoices });
-  } catch (e) {
-    console.error('❌ GET /api/my-invoices', e);
     res.status(500).json({ message: 'Erreur serveur' });
   }
 });
