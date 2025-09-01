@@ -1,19 +1,15 @@
+// backend/routes/setup-admin.js
 const express = require('express');
 const bcrypt = require('bcryptjs');
 const User = require('../models/User');
 
 const router = express.Router();
 
-/**
- * GET /api/setup-admin
- * Assure l’existence d’un superadmin et d’un admin de base (si absents).
- * N’écrase jamais un mot de passe existant.
- */
-router.get('/setup-admin', async (_req, res) => {
+router.get('/setup-admin', async (req, res) => {
   try {
-    // SUPERADMIN
     const superEmail = process.env.SUPERADMIN_EMAIL || 'superadmin@mairie.fr';
     const superPlain = process.env.SUPERADMIN_PASSWORD || 'ChangeMoi!2025';
+
     let superU = await User.findOne({ email: superEmail }).select('_id email role');
     if (!superU) {
       const hash = await bcrypt.hash(superPlain, 10);
@@ -28,9 +24,9 @@ router.get('/setup-admin', async (_req, res) => {
       await superU.save();
     }
 
-    // ADMIN de base
     const adminEmail = process.env.ADMIN_EMAIL || 'admin@mairie.fr';
     const adminPlain = process.env.ADMIN_PASSWORD || 'ChangeMoi!2025';
+
     let adminU = await User.findOne({ email: adminEmail }).select('_id email role');
     if (!adminU) {
       const hash = await bcrypt.hash(adminPlain, 10);
