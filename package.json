@@ -23,7 +23,8 @@
     "sharp": "^0.33.4",
     "multer-storage-cloudinary": "^4.0.0",
     "node-cron": "^3.0.2",
-    "winston": "^3.17.0"
+    "winston": "^3.17.0",
+    "pdfkit": "^0.15.0"
   },
   "devDependencies": {
     "eslint": "^8.57.0",
