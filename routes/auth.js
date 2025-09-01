@@ -1,4 +1,3 @@
-// backend/routes/auth.js
 const express = require('express');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
@@ -25,16 +24,15 @@ router.post('/login', async (req, res) => {
       doc = await Admin.findOne({ email: emailNorm }).select(baseSelect);
     }
     if (!doc) {
-      // même message pour éviter le leakage d’infos
       return res.status(400).json({ message: 'Email ou mot de passe incorrect.' });
     }
 
-    // 2) Vérif compte actif (si le champ existe)
+    // 2) Vérif compte actif
     if (typeof doc.isActive === 'boolean' && !doc.isActive) {
       return res.status(403).json({ message: 'Compte désactivé. Contactez un administrateur.' });
     }
 
-    // 3) Comparer le mot de passe (doc.password est disponible grâce à .select('+password'))
+    // 3) Comparer le mot de passe
     const ok = await bcrypt.compare(password, doc.password || '');
     if (!ok) {
       return res.status(400).json({ message: 'Email ou mot de passe incorrect.' });
