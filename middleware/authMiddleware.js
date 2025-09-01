@@ -1,9 +1,12 @@
 const jwt = require('jsonwebtoken');
+const mongoose = require('mongoose');
 const User = require('../models/User');
 let Admin = null; try { Admin = require('../models/Admin'); } catch (_) {}
 
-/* IMPORTANT : même secret que dans routes/auth.js */
+/** IMPORTANT : même secret que dans routes/auth.js */
 const JWT_SECRET = process.env.JWT_SECRET || 'dev-secret';
+
+const norm = (v) => String(v || '').trim().toLowerCase();
 
 module.exports = async function auth(req, res, next) {
   try {
@@ -11,6 +14,7 @@ module.exports = async function auth(req, res, next) {
     const token = authz.startsWith('Bearer ') ? authz.slice(7).trim() : null;
     if (!token) return res.status(401).json({ message: 'Accès non autorisé - token manquant' });
 
+    // vérif signature + exp
     const payload = jwt.verify(token, JWT_SECRET);
 
     const tokenTv =
@@ -20,20 +24,25 @@ module.exports = async function auth(req, res, next) {
 
     let account = null;
 
-    if (payload.id) {
-      account = await User.findById(payload.id)
-        .select('isActive tokenVersion role email communeId communeName'); // _id inclus par défaut
+    // 1) par id si plausible
+    if (payload.id && mongoose.Types.ObjectId.isValid(String(payload.id))) {
+      const id = String(payload.id);
+      account = await User.findById(id)
+        .select('_id isActive tokenVersion role email communeId communeName');
       if (!account && Admin) {
-        account = await Admin.findById(payload.id)
-          .select('isActive tokenVersion role email communeId communeName');
+        account = await Admin.findById(id)
+          .select('_id isActive tokenVersion role email communeId communeName');
       }
     }
+
+    // 2) fallback par email
     if (!account && payload.email) {
-      account = await User.findOne({ email: payload.email })
-        .select('isActive tokenVersion role email communeId communeName');
+      const email = norm(payload.email);
+      account = await User.findOne({ email })
+        .select('_id isActive tokenVersion role email communeId communeName');
       if (!account && Admin) {
-        account = await Admin.findOne({ email: payload.email })
-          .select('isActive tokenVersion role email communeId communeName');
+        account = await Admin.findOne({ email })
+          .select('_id isActive tokenVersion role email communeId communeName');
       }
     }
 
