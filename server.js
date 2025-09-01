@@ -74,7 +74,14 @@ app.get('/api/health', (_, res) => res.json({ status: 'ok', timestamp: Date.now(
 app.use('/api', require('./routes/setup-admin'));
 app.use('/api', require('./routes/auth'));
 app.use('/api', require('./routes/me'));
-app.use('/api/admins', (req, _res, next) => { console.log('[HIT] /api/admins', req.method, req.originalUrl); next(); }, require('./routes/admins'));
+
+/**
+ * ⚠️ IMPORTANT :
+ * On retire l’ancien montage dédié de /api/admins pour éviter le doublon.
+ * Désormais, /api/admins est servi par routes/userRoutes.js (route GET '/admins').
+ */
+// app.use('/api/admins', require('./routes/admins'));
+
 app.use('/api/change-password', (req, _res, next) => { console.log('[HIT] /api/change-password', req.method, req.path || '/'); next(); }, require('./routes/changePassword'));
 app.use('/api/incidents', require('./routes/incidents'));
 app.use('/api/articles', require('./routes/articles'));
@@ -82,7 +89,7 @@ app.use('/api/infos', require('./routes/infos'));
 app.use('/api/notifications', require('./routes/notifications'));
 app.use('/api/projects', require('./routes/projects'));
 app.use('/api/devices', require('./routes/devices'));
-app.use('/api', require('./routes/userRoutes'));        // /api/admins (fallback) + /api/users + invoices + toggles
+app.use('/api', require('./routes/userRoutes'));        // /api/admins (via ce fichier) + /api/users + invoices + toggles
 app.use('/api', require('./routes/subscriptions'));     // /api/subscriptions/* start/renew/cancel
 app.use('/api', require('./routes/debug'));
 
