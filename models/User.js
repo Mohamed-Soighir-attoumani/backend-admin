@@ -36,10 +36,10 @@ const userSchema = new mongoose.Schema(
     },
     subscriptionEndAt: { type: Date, default: null },
 
-    // 💳 Montant/Devise/Mode stockés par le superadmin
-    subscriptionPrice: { type: Number, default: 0 },       // ex: 29.9
-    subscriptionCurrency: { type: String, default: 'EUR' },// ex: 'EUR'
-    subscriptionMethod: { type: String, default: '' },     // ex: 'card'|'cash'|'transfer'
+    // 💳 Champs personnalisés pour facturation
+    subscriptionPrice: { type: Number, default: 0 },
+    subscriptionCurrency: { type: String, default: 'EUR' },
+    subscriptionMethod: { type: String, default: '' },
 
     // Audit
     createdBy: { type: String, default: '' },
