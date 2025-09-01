@@ -1,4 +1,3 @@
-// backend/routes/userRoutes.js
 const express = require('express');
 const router = express.Router();
 const mongoose = require('mongoose');
@@ -121,7 +120,7 @@ router.get('/admins', auth, requireRole('superadmin'), async (req, res) => {
   }
 });
 
-/* ===================== LISTE /api/users (fallback/générale) ===================== */
+/* ===================== LISTE /api/users (générale) ===================== */
 router.get('/users', auth, requireRole('superadmin'), async (req, res) => {
   try {
     const {
@@ -179,8 +178,8 @@ router.get('/users', auth, requireRole('superadmin'), async (req, res) => {
   }
 });
 
-/* ===================== CRÉATION ADMIN ===================== */
-router.post('/users', auth, requireRole('superadmin'), async (req, res) => {
+/* ===================== Handlers communs (créa / update / toggle / invoices) ===================== */
+async function createAdminHandler(req, res) {
   try {
     let { email, password, name, communeId, communeName, createdBy } = req.body || {};
     email = norm(email);
@@ -197,7 +196,7 @@ router.post('/users', auth, requireRole('superadmin'), async (req, res) => {
       email,
       password: passwordHash,
       name: name || '',
-      role: 'admin',                         // <-- forcé
+      role: 'admin',                         // <-- forcé admin
       communeId: communeId || '',
       communeName: communeName || '',
       createdBy: createdBy ? String(createdBy) : String(req.user?.id || ''),
@@ -211,13 +210,12 @@ router.post('/users', auth, requireRole('superadmin'), async (req, res) => {
 
     res.status(201).json(plain);
   } catch (err) {
-    console.error('❌ POST /api/users', err);
+    console.error('❌ CREATE ADMIN', err);
     res.status(500).json({ message: 'Erreur serveur' });
   }
-});
+}
 
-/* ===================== MISE À JOUR ADMIN ===================== */
-router.put('/users/:id', auth, requireRole('superadmin'), async (req, res) => {
+async function updateAdminHandler(req, res) {
   try {
     const user = await findUserByAnyId(req.params.id, req.body, req.query);
     if (!user) return res.status(404).json({ message: 'Utilisateur introuvable' });
@@ -239,13 +237,12 @@ router.put('/users/:id', auth, requireRole('superadmin'), async (req, res) => {
     const updated = await User.findByIdAndUpdate(user._id, { $set: payload }, { new: true });
     res.json({ ...updated.toObject(), _idString: String(updated._id) });
   } catch (err) {
-    console.error('❌ PUT /api/users/:id', err);
+    console.error('❌ UPDATE ADMIN', err);
     res.status(500).json({ message: 'Erreur serveur' });
   }
-});
+}
 
-/* ===================== TOGGLE ACTIVE ===================== */
-router.post('/users/:id/toggle-active', auth, requireRole('superadmin'), async (req, res) => {
+async function toggleActiveHandler(req, res) {
   try {
     const user = await findUserByAnyId(req.params.id, req.body, req.query);
     if (!user) return res.status(404).json({ message: 'Utilisateur introuvable' });
@@ -256,13 +253,12 @@ router.post('/users/:id/toggle-active', auth, requireRole('superadmin'), async (
 
     res.json({ ok: true, user: { ...user.toObject(), _idString: String(user._id) } });
   } catch (err) {
-    console.error('❌ POST /api/users/:id/toggle-active', err);
+    console.error('❌ TOGGLE ACTIVE', err);
     res.status(500).json({ message: 'Erreur serveur' });
   }
-});
+}
 
-/* ===================== FACTURES (exemple) ===================== */
-router.get('/users/:id/invoices', auth, requireRole('superadmin'), async (req, res) => {
+async function invoicesHandler(req, res) {
   try {
     const user = await findUserByAnyId(req.params.id, req.query, req.query);
     if (!user) return res.status(404).json({ message: 'Utilisateur introuvable' });
@@ -279,9 +275,21 @@ router.get('/users/:id/invoices', auth, requireRole('superadmin'), async (req, r
 
     res.json({ invoices: inv });
   } catch (err) {
-    console.error('❌ GET /api/users/:id/invoices', err);
+    console.error('❌ INVOICES', err);
     res.status(500).json({ message: 'Erreur serveur' });
   }
-});
+}
+
+/* ===================== Routes "users" existantes ===================== */
+router.post('/users',            auth, requireRole('superadmin'), createAdminHandler);
+router.put('/users/:id',         auth, requireRole('superadmin'), updateAdminHandler);
+router.post('/users/:id/toggle-active', auth, requireRole('superadmin'), toggleActiveHandler);
+router.get('/users/:id/invoices',       auth, requireRole('superadmin'), invoicesHandler);
+
+/* ===================== ✅ ALIAS "admins" (corrige ton 404) ===================== */
+router.post('/admins',                  auth, requireRole('superadmin'), createAdminHandler);
+router.put('/admins/:id',               auth, requireRole('superadmin'), updateAdminHandler);
+router.post('/admins/:id/toggle-active',auth, requireRole('superadmin'), toggleActiveHandler);
+router.get('/admins/:id/invoices',      auth, requireRole('superadmin'), invoicesHandler);
 
 module.exports = router;
