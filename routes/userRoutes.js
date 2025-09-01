@@ -1,3 +1,4 @@
+// backend/routes/userRoutes.js
 const express = require('express');
 const router = express.Router();
 const mongoose = require('mongoose');
@@ -9,11 +10,8 @@ const User = require('../models/User');
 
 /* Utils */
 const isValidHex24 = (s) => typeof s === 'string' && /^[a-f0-9]{24}$/i.test(s);
-const isValidId = (id) => isValidHex24(String(id || ''));
 const norm = (v) => String(v || '').trim().toLowerCase();
-const decode = (v) => {
-  try { return decodeURIComponent(String(v)); } catch { return String(v || ''); }
-};
+const decode = (v) => { try { return decodeURIComponent(String(v)); } catch { return String(v || ''); } };
 const pickHexFromAny = (v) => {
   if (!v) return '';
   if (typeof v === 'object') {
@@ -29,10 +27,7 @@ const pickHexFromAny = (v) => {
 };
 
 /**
- * 🔍 Résout un utilisateur à partir de :
- * - req.params.id (ObjectId, $oid, ObjectId("..."), email, userId)
- * - req.body.id / req.body.userId / req.body.email
- * - req.query.id / req.query.email
+ * 🔍 Résout un utilisateur à partir de : params / body / query (id/email/userId)
  */
 async function findUserByAnyId(primary, body = {}, query = {}) {
   const candidatesRaw = [
@@ -53,26 +48,20 @@ async function findUserByAnyId(primary, body = {}, query = {}) {
     const maybeEmail = typeof raw === 'string' && raw.includes('@');
     const hex = pickHexFromAny(raw);
 
-    // 1) ObjectId prioritaire
     if (hex) {
       const byId = await User.findById(hex);
       if (byId) return byId;
     }
-
-    // 2) email
     if (maybeEmail) {
       const byEmail = await User.findOne({ email: norm(raw) });
       if (byEmail) return byEmail;
     }
-
-    // 3) userId personnalisé
     const rawStr = decode(raw).trim();
     if (rawStr) {
       const byUserId = await User.findOne({ userId: rawStr });
       if (byUserId) return byUserId;
     }
   }
-
   return null;
 }
 
@@ -118,7 +107,6 @@ router.get('/admins', auth, requireRole('superadmin'), async (req, res) => {
       .limit(ps)
       .lean();
 
-    // ✅ standardiser _idString
     items = items.map(u => ({
       ...u,
       _idString: (u._id && String(u._id)) || '',
@@ -133,7 +121,7 @@ router.get('/admins', auth, requireRole('superadmin'), async (req, res) => {
   }
 });
 
-/* ===================== LISTE /api/users (fallback) ===================== */
+/* ===================== LISTE /api/users (fallback/générale) ===================== */
 router.get('/users', auth, requireRole('superadmin'), async (req, res) => {
   try {
     const {
@@ -194,12 +182,11 @@ router.get('/users', auth, requireRole('superadmin'), async (req, res) => {
 /* ===================== CRÉATION ADMIN ===================== */
 router.post('/users', auth, requireRole('superadmin'), async (req, res) => {
   try {
-    let { email, password, name, communeId, communeName, role, createdBy } = req.body || {};
+    let { email, password, name, communeId, communeName, createdBy } = req.body || {};
     email = norm(email);
     if (!email || !password) {
       return res.status(400).json({ message: 'Email et mot de passe requis' });
     }
-    role = 'admin';
 
     const exists = await User.findOne({ email });
     if (exists) return res.status(409).json({ message: 'Email déjà utilisé' });
@@ -208,12 +195,12 @@ router.post('/users', auth, requireRole('superadmin'), async (req, res) => {
 
     const doc = await User.create({
       email,
-      password: passwordHash, // ✅ correspond au schéma
+      password: passwordHash,
       name: name || '',
-      role,
+      role: 'admin',                         // <-- forcé
       communeId: communeId || '',
       communeName: communeName || '',
-      createdBy: createdBy ? String(createdBy) : '',
+      createdBy: createdBy ? String(createdBy) : String(req.user?.id || ''),
       isActive: true,
       subscriptionStatus: 'none',
       subscriptionEndAt: null,
@@ -274,7 +261,7 @@ router.post('/users/:id/toggle-active', auth, requireRole('superadmin'), async (
   }
 });
 
-/* ===================== FACTURES (exemple compatible) ===================== */
+/* ===================== FACTURES (exemple) ===================== */
 router.get('/users/:id/invoices', auth, requireRole('superadmin'), async (req, res) => {
   try {
     const user = await findUserByAnyId(req.params.id, req.query, req.query);
