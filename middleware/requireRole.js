@@ -1,14 +1,16 @@
-module.exports = function requireRole(minRole = 'admin') {
-  const rank = { user: 1, admin: 2, superadmin: 3 };
-  const required = rank[minRole] ?? rank.admin;
+// backend/middleware/requireRole.js
+module.exports = function requireRole(required) {
+  const needed = Array.isArray(required) ? required : [required];
 
   return (req, res, next) => {
-    const role = req.user?.role;
-    if (!role) return res.status(401).json({ message: 'Non connecté' });
+    if (!req.user) return res.status(401).json({ message: 'Non connecté' });
 
-    const have = rank[role] ?? 0;
-    if (have >= required) return next();
+    // superadmin a tous les droits
+    if (req.user.role === 'superadmin') return next();
 
-    return res.status(403).json({ message: 'Accès interdit' });
+    if (!needed.includes(req.user.role)) {
+      return res.status(403).json({ message: 'Accès refusé' });
+    }
+    next();
   };
 };
