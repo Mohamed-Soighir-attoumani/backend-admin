@@ -6,7 +6,7 @@ const User = require('../models/User');
 let Admin = null; try { Admin = require('../models/Admin'); } catch (_) {}
 const router = express.Router();
 
-const JWT_SECRET = process.env.JWT_SECRET || 'dev-secret';
+const JWT_SECRET = require('../config/jwt'); // ✅ centralisé
 const TOKEN_EXPIRES_IN = '7d';
 
 router.post('/login', async (req, res) => {
@@ -58,7 +58,7 @@ router.post('/login', async (req, res) => {
       },
     });
   } catch (e) {
-    console.error('❌ POST /login error:', e);
+    console.error('❌ POST /auth/login error:', e);
     return res.status(500).json({ message: 'Erreur interne du serveur.' });
   }
 });
