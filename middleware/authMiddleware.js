@@ -2,39 +2,37 @@
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
 let Admin = null; try { Admin = require('../models/Admin'); } catch (_) {}
-const logger = require('../logger');
-const JWT_SECRET = require('../config/jwt'); // ✅ centralisé
+
+/* IMPORTANT : même secret que dans routes/auth.js */
+const JWT_SECRET = process.env.JWT_SECRET || 'dev-secret';
+
+function extractToken(req) {
+  // 1) Authorization: Bearer xxx
+  let authz = req.headers.authorization || req.headers.Authorization || '';
+  if (typeof authz === 'string' && authz.toLowerCase().startsWith('bearer ')) {
+    return authz.slice(7).trim().replace(/^"|"$/g, '');
+  }
+  // 2) x-access-token / x-auth-token
+  const hat = req.headers['x-access-token'] || req.headers['x-auth-token'];
+  if (hat) return String(hat).trim().replace(/^"|"$/g, '');
+  // 3) query/body token
+  if (req.query && req.query.token) return String(req.query.token).trim().replace(/^"|"$/g, '');
+  if (req.body && req.body.token) return String(req.body.token).trim().replace(/^"|"$/g, '');
+  // 4) cookie=token=...
+  const cookie = req.headers.cookie || '';
+  const m = cookie.match(/(?:^|;\s*)token=([^;]+)/);
+  if (m) return decodeURIComponent(m[1]).trim().replace(/^"|"$/g, '');
+  return null;
+}
 
 module.exports = async function auth(req, res, next) {
   try {
-    const authz = String(req.headers.authorization || '');
-    let token = null;
-
-    if (authz.toLowerCase().startsWith('bearer ')) {
-      token = authz.slice(7).trim();
-    }
-
-    // Option de secours: si un client met le token entre guillemets
-    if (token && ((token.startsWith('"') && token.endsWith('"')) || (token.startsWith("'") && token.endsWith("'")))) {
-      token = token.slice(1, -1);
-    }
-
+    const token = extractToken(req);
     if (!token) {
       return res.status(401).json({ message: 'Accès non autorisé - token manquant' });
     }
 
-    let payload;
-    try {
-      payload = jwt.verify(token, JWT_SECRET);
-    } catch (e) {
-      // Expiration → message distinct, sinon “token invalide”
-      if (e && e.name === 'TokenExpiredError') {
-        logger.warn('JWT expiré', { at: 'authMiddleware', error: e.message });
-        return res.status(401).json({ message: 'Session expirée' });
-      }
-      logger.warn('JWT invalide', { at: 'authMiddleware', error: e.message });
-      return res.status(401).json({ message: 'Token invalide' });
-    }
+    const payload = jwt.verify(token, JWT_SECRET);
 
     const tokenTv =
       typeof payload.tv === 'number' ? payload.tv
@@ -81,7 +79,7 @@ module.exports = async function auth(req, res, next) {
 
     next();
   } catch (e) {
-    logger.error('Erreur middleware auth', { error: e.stack });
-    return res.status(401).json({ message: 'Token invalide' });
+    const msg = e && e.name === 'TokenExpiredError' ? 'Session expirée' : 'Token invalide';
+    return res.status(401).json({ message: msg });
   }
 };
