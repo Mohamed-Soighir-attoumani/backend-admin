@@ -2,6 +2,7 @@
 const express = require('express');
 const router = express.Router();
 const mongoose = require('mongoose');
+
 const auth = require('../middleware/authMiddleware');
 const requireRole = require('../middleware/requireRole');
 const User = require('../models/User');
@@ -59,7 +60,7 @@ async function findUserByAnyId(primary, body = {}, query = {}) {
   return null;
 }
 
-// Plans
+// Plans (exemple)
 router.get('/subscriptions/plans', auth, requireRole('superadmin'), (_req, res) => {
   res.json({
     plans: [
@@ -70,7 +71,22 @@ router.get('/subscriptions/plans', auth, requireRole('superadmin'), (_req, res) 
   });
 });
 
-// Démarrer
+/** helper pour lire amount/currency/method depuis le body et normaliser */
+function extractPaymentFields(body = {}) {
+  let amount = Number(body.amount);
+  if (!Number.isFinite(amount) || amount < 0) amount = 0;
+  amount = Math.round(amount * 100) / 100;
+
+  let currency = String(body.currency || '').trim().toUpperCase();
+  if (!currency) currency = 'EUR';
+  if (currency.length > 6) currency = currency.slice(0, 6);
+
+  const method = String(body.method || '').trim(); // 'card'|'cash'|'transfer'...
+
+  return { amount, currency, method };
+}
+
+// Démarrer un abonnement
 router.post('/subscriptions/:id/start', auth, requireRole('superadmin'), async (req, res) => {
   try {
     const user = await findUserByAnyId(req.params.id, req.body, req.query);
@@ -81,8 +97,13 @@ router.post('/subscriptions/:id/start', auth, requireRole('superadmin'), async (
     const end = new Date();
     end.setMonth(end.getMonth() + months);
 
+    const { amount, currency, method } = extractPaymentFields(req.body);
+
     user.subscriptionStatus = 'active';
     user.subscriptionEndAt = end;
+    user.subscriptionPrice = amount;
+    user.subscriptionCurrency = currency;
+    user.subscriptionMethod = method;
     await user.save();
 
     res.json({ ok: true, user: user.toObject() });
@@ -106,8 +127,13 @@ router.post('/subscriptions/:id/renew', auth, requireRole('superadmin'), async (
       : new Date();
     base.setMonth(base.getMonth() + months);
 
+    const { amount, currency, method } = extractPaymentFields(req.body);
+
     user.subscriptionStatus = 'active';
     user.subscriptionEndAt = base;
+    user.subscriptionPrice = amount;
+    user.subscriptionCurrency = currency;
+    user.subscriptionMethod = method;
     await user.save();
 
     res.json({ ok: true, user: user.toObject() });
@@ -125,6 +151,8 @@ router.post('/subscriptions/:id/cancel', auth, requireRole('superadmin'), async 
 
     user.subscriptionStatus = 'none';
     user.subscriptionEndAt = null;
+    user.subscriptionPrice = 0;
+    user.subscriptionMethod = '';
     await user.save();
 
     res.json({ ok: true, user: user.toObject() });
@@ -134,19 +162,23 @@ router.post('/subscriptions/:id/cancel', auth, requireRole('superadmin'), async 
   }
 });
 
-/* --------- Endpoints “mon compte” --------- */
+/* --------- NOUVEAUX ENDPOINTS pour la page MonAbonnement --------- */
+
+// GET /api/my-subscription -> l’admin voit en direct son statut
 router.get('/my-subscription', auth, async (req, res) => {
   try {
     const id = req.user?.id;
     if (!id || !mongoose.Types.ObjectId.isValid(id)) {
       return res.status(401).json({ message: 'Non connecté' });
     }
-    const user = await User.findById(id).select('subscriptionStatus subscriptionEndAt');
+    const user = await User.findById(id).select('subscriptionStatus subscriptionEndAt subscriptionPrice subscriptionCurrency');
     if (!user) return res.status(404).json({ message: 'Utilisateur introuvable' });
 
     return res.json({
       status: user.subscriptionStatus || 'none',
       endAt: user.subscriptionEndAt || null,
+      price: typeof user.subscriptionPrice === 'number' ? user.subscriptionPrice : 0,
+      currency: user.subscriptionCurrency || 'EUR',
     });
   } catch (e) {
     console.error('GET /my-subscription:', e);
@@ -154,13 +186,14 @@ router.get('/my-subscription', auth, async (req, res) => {
   }
 });
 
+// GET /api/my-invoices -> factures "mock" avec le dernier montant
 router.get('/my-invoices', auth, async (req, res) => {
   try {
     const id = req.user?.id;
     if (!id || !mongoose.Types.ObjectId.isValid(id)) {
       return res.status(401).json({ message: 'Non connecté' });
     }
-    const user = await User.findById(id).select('subscriptionStatus subscriptionEndAt');
+    const user = await User.findById(id).select('subscriptionStatus subscriptionEndAt subscriptionPrice subscriptionCurrency');
     if (!user) return res.status(404).json({ message: 'Utilisateur introuvable' });
 
     const invoices = [];
@@ -168,8 +201,8 @@ router.get('/my-invoices', auth, async (req, res) => {
       invoices.push({
         id: `INV-${String(user._id).slice(-6)}`,
         number: `INV-${new Date().getFullYear()}-${String(user._id).slice(-4)}`,
-        amount: 19.90,
-        currency: 'EUR',
+        amount: typeof user.subscriptionPrice === 'number' ? user.subscriptionPrice : 0,
+        currency: user.subscriptionCurrency || 'EUR',
         status: 'paid',
         date: new Date(),
         url: 'https://example.com/invoice.pdf',
