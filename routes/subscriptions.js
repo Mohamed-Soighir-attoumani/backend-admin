@@ -24,6 +24,40 @@ const pickHexFromAny = (v) => {
   return m && isValidHex24(m[0]) ? m[0] : '';
 };
 
+function formatDateFR(d) {
+  try { return new Date(d).toLocaleDateString('fr-FR'); } catch { return ''; }
+}
+
+function buildInvoiceForUser(user) {
+  const now = new Date();
+  const amount = typeof user.subscriptionPrice === 'number' ? user.subscriptionPrice : 0;
+  const currency = user.subscriptionCurrency || 'EUR';
+  const status = user.subscriptionStatus === 'active' ? 'paid' : 'unpaid';
+
+  return {
+    id: `INV-${String(user._id).slice(-6)}`,
+    number: `INV-${now.getFullYear()}-${String(user._id).slice(-4)}`,
+    title: 'Licence Securidem',
+    issuer: {
+      name: 'Association Bellevue Dembeni',
+      siret: '913 987 905 00019',
+      address: '49, Rue Manga Chebane, 97660 Dembeni',
+    },
+    customer: {
+      name: user.name || user.email,
+      email: user.email,
+      communeId: user.communeId || '',
+      communeName: user.communeName || '',
+    },
+    invoiceDate: now,
+    invoiceDateFormatted: formatDateFR(now),
+    amount,
+    currency,
+    status,
+    url: null,
+  };
+}
+
 async function findUserByAnyId(primary, body = {}, query = {}) {
   const candidatesRaw = [
     primary,
@@ -162,16 +196,16 @@ router.post('/subscriptions/:id/cancel', auth, requireRole('superadmin'), async 
   }
 });
 
-/* --------- NOUVEAUX ENDPOINTS pour la page MonAbonnement --------- */
+/* --------- NOUVEAUX ENDPOINTS --------- */
 
-// GET /api/my-subscription -> l’admin voit en direct son statut
+// GET /api/my-subscription -> l’admin voit son statut
 router.get('/my-subscription', auth, async (req, res) => {
   try {
     const id = req.user?.id;
     if (!id || !mongoose.Types.ObjectId.isValid(id)) {
       return res.status(401).json({ message: 'Non connecté' });
     }
-    const user = await User.findById(id).select('subscriptionStatus subscriptionEndAt subscriptionPrice subscriptionCurrency');
+    const user = await User.findById(id).select('subscriptionStatus subscriptionEndAt subscriptionPrice subscriptionCurrency name email communeId communeName');
     if (!user) return res.status(404).json({ message: 'Utilisateur introuvable' });
 
     return res.json({
@@ -179,6 +213,12 @@ router.get('/my-subscription', auth, async (req, res) => {
       endAt: user.subscriptionEndAt || null,
       price: typeof user.subscriptionPrice === 'number' ? user.subscriptionPrice : 0,
       currency: user.subscriptionCurrency || 'EUR',
+      customer: {
+        name: user.name || user.email,
+        email: user.email,
+        communeId: user.communeId || '',
+        communeName: user.communeName || '',
+      }
     });
   } catch (e) {
     console.error('GET /my-subscription:', e);
@@ -186,27 +226,19 @@ router.get('/my-subscription', auth, async (req, res) => {
   }
 });
 
-// GET /api/my-invoices -> factures "mock" avec le dernier montant
+// GET /api/my-invoices -> factures personnalisées
 router.get('/my-invoices', auth, async (req, res) => {
   try {
     const id = req.user?.id;
     if (!id || !mongoose.Types.ObjectId.isValid(id)) {
       return res.status(401).json({ message: 'Non connecté' });
     }
-    const user = await User.findById(id).select('subscriptionStatus subscriptionEndAt subscriptionPrice subscriptionCurrency');
+    const user = await User.findById(id).select('subscriptionStatus subscriptionEndAt subscriptionPrice subscriptionCurrency name email communeId communeName');
     if (!user) return res.status(404).json({ message: 'Utilisateur introuvable' });
 
     const invoices = [];
     if (user.subscriptionStatus === 'active') {
-      invoices.push({
-        id: `INV-${String(user._id).slice(-6)}`,
-        number: `INV-${new Date().getFullYear()}-${String(user._id).slice(-4)}`,
-        amount: typeof user.subscriptionPrice === 'number' ? user.subscriptionPrice : 0,
-        currency: user.subscriptionCurrency || 'EUR',
-        status: 'paid',
-        date: new Date(),
-        url: 'https://example.com/invoice.pdf',
-      });
+      invoices.push(buildInvoiceForUser(user));
     }
 
     return res.json({ invoices });
