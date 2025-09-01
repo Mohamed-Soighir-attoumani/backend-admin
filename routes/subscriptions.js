@@ -133,9 +133,7 @@ router.post('/subscriptions/:id/cancel', auth, requireRole('superadmin'), async 
   }
 });
 
-/* --------- NOUVEAUX ENDPOINTS pour la page MonAbonnement --------- */
-
-// GET /api/my-subscription -> l’admin voit en direct ce que le superadmin a fait
+/* --------- endpoints "Mon abonnement" --------- */
 router.get('/my-subscription', auth, async (req, res) => {
   try {
     const id = req.user?.id;
@@ -155,7 +153,6 @@ router.get('/my-subscription', auth, async (req, res) => {
   }
 });
 
-// GET /api/my-invoices -> factures "mock" alignées avec le statut
 router.get('/my-invoices', auth, async (req, res) => {
   try {
     const id = req.user?.id;
