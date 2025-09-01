@@ -31,6 +31,47 @@ const pickHexFromAny = (v) => {
   return m && isValidHex24(m[0]) ? m[0] : '';
 };
 
+function formatDateFR(d) {
+  try { return new Date(d).toLocaleDateString('fr-FR'); } catch { return ''; }
+}
+
+function buildInvoiceForUser(user) {
+  const now = new Date();
+  const amount = typeof user.subscriptionPrice === 'number' ? user.subscriptionPrice : 0;
+  const currency = user.subscriptionCurrency || 'EUR';
+  const status = user.subscriptionStatus === 'active' ? 'paid' : 'unpaid';
+
+  return {
+    // Identifiants/numérotation
+    id: `INV-${String(user._id).slice(-6)}`,
+    number: `INV-${now.getFullYear()}-${String(user._id).slice(-4)}`,
+
+    // Personnalisation demandée
+    title: 'Licence Securidem',
+    issuer: {
+      name: 'Association Bellevue Dembeni',
+      siret: '913 987 905 00019',
+      address: '49, Rue Manga Chebane, 97660 Dembeni',
+    },
+    customer: {
+      name: user.name || user.email,
+      email: user.email,
+      communeId: user.communeId || '',
+      communeName: user.communeName || '',
+    },
+    invoiceDate: now,
+    invoiceDateFormatted: formatDateFR(now), // jj/mm/aaaa
+
+    // Montant & statut
+    amount,
+    currency,
+    status,
+
+    // éventuellement un lien PDF plus tard
+    url: null,
+  };
+}
+
 /** Résout un utilisateur */
 async function findUserByAnyId(primary, body = {}, query = {}) {
   const candidatesRaw = [
@@ -268,23 +309,16 @@ router.post('/users/:id/toggle-active', auth, requireRole('superadmin'), async (
   }
 });
 
-/* ===================== FACTURES (utilise le montant saisi) ===================== */
+/* ===================== FACTURES (personnalisées) ===================== */
 router.get('/users/:id/invoices', auth, requireRole('superadmin'), async (req, res) => {
   try {
     const user = await findUserByAnyId(req.params.id, req.query, req.query);
     if (!user) return res.status(404).json({ message: 'Utilisateur introuvable' });
 
     const invoices = [];
+    // on génère une facture “mock” si abonnement actif (exemple)
     if (user.subscriptionStatus === 'active') {
-      invoices.push({
-        id: `INV-${String(user._id).slice(-6)}`,
-        number: `INV-${new Date().getFullYear()}-${String(user._id).slice(-4)}`,
-        amount: typeof user.subscriptionPrice === 'number' ? user.subscriptionPrice : 0,
-        currency: user.subscriptionCurrency || 'EUR',
-        status: 'paid',
-        date: new Date(),
-        url: 'https://example.com/invoice.pdf',
-      });
+      invoices.push(buildInvoiceForUser(user));
     }
 
     res.json({ invoices });
