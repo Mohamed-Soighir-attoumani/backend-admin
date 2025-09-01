@@ -2,16 +2,39 @@
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
 let Admin = null; try { Admin = require('../models/Admin'); } catch (_) {}
-
-const JWT_SECRET = process.env.JWT_SECRET || 'dev-secret';
+const logger = require('../logger');
+const JWT_SECRET = require('../config/jwt'); // ✅ centralisé
 
 module.exports = async function auth(req, res, next) {
   try {
-    const authz = req.headers.authorization || '';
-    const token = authz.startsWith('Bearer ') ? authz.slice(7).trim() : null;
-    if (!token) return res.status(401).json({ message: 'Accès non autorisé - token manquant' });
+    const authz = String(req.headers.authorization || '');
+    let token = null;
 
-    const payload = jwt.verify(token, JWT_SECRET);
+    if (authz.toLowerCase().startsWith('bearer ')) {
+      token = authz.slice(7).trim();
+    }
+
+    // Option de secours: si un client met le token entre guillemets
+    if (token && ((token.startsWith('"') && token.endsWith('"')) || (token.startsWith("'") && token.endsWith("'")))) {
+      token = token.slice(1, -1);
+    }
+
+    if (!token) {
+      return res.status(401).json({ message: 'Accès non autorisé - token manquant' });
+    }
+
+    let payload;
+    try {
+      payload = jwt.verify(token, JWT_SECRET);
+    } catch (e) {
+      // Expiration → message distinct, sinon “token invalide”
+      if (e && e.name === 'TokenExpiredError') {
+        logger.warn('JWT expiré', { at: 'authMiddleware', error: e.message });
+        return res.status(401).json({ message: 'Session expirée' });
+      }
+      logger.warn('JWT invalide', { at: 'authMiddleware', error: e.message });
+      return res.status(401).json({ message: 'Token invalide' });
+    }
 
     const tokenTv =
       typeof payload.tv === 'number' ? payload.tv
@@ -29,11 +52,10 @@ module.exports = async function auth(req, res, next) {
       }
     }
     if (!account && payload.email) {
-      const email = String(payload.email).trim().toLowerCase();
-      account = await User.findOne({ email })
+      account = await User.findOne({ email: payload.email })
         .select('isActive tokenVersion role email communeId communeName');
       if (!account && Admin) {
-        account = await Admin.findOne({ email })
+        account = await Admin.findOne({ email: payload.email })
           .select('isActive tokenVersion role email communeId communeName');
       }
     }
@@ -59,7 +81,7 @@ module.exports = async function auth(req, res, next) {
 
     next();
   } catch (e) {
-    const msg = e && e.name === 'TokenExpiredError' ? 'Session expirée' : 'Token invalide';
-    return res.status(401).json({ message: msg });
+    logger.error('Erreur middleware auth', { error: e.stack });
+    return res.status(401).json({ message: 'Token invalide' });
   }
 };
