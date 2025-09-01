@@ -329,19 +329,68 @@ async function impersonateHandler(req, res) {
   }
 }
 
-/* ===================== Routes "users" existantes ===================== */
+/* ===================== Reset mot de passe (admin) ===================== */
+async function resetPasswordHandler(req, res) {
+  try {
+    const user = await findUserByAnyId(req.params.id, req.body, req.query);
+    if (!user) return res.status(404).json({ message: 'Utilisateur introuvable' });
+    if (user.role !== 'admin') {
+      return res.status(400).json({ message: 'Seuls les admins sont gérés ici' });
+    }
+
+    const newPassword = String(req.body?.newPassword || req.body?.password || '').trim();
+    if (!newPassword || newPassword.length < 6) {
+      return res.status(400).json({ message: 'Nouveau mot de passe requis (min 6 caractères)' });
+    }
+
+    const hash = await bcrypt.hash(newPassword, 10);
+
+    // On invalide aussi les sessions existantes en incrémentant tokenVersion
+    await User.updateOne(
+      { _id: user._id },
+      { $set: { password: hash }, $inc: { tokenVersion: 1 } }
+    );
+
+    return res.json({ ok: true, message: 'Mot de passe mis à jour' });
+  } catch (err) {
+    console.error('❌ POST reset-password', err);
+    res.status(500).json({ message: 'Erreur serveur' });
+  }
+}
+
+/* ===================== Suppression admin ===================== */
+async function deleteAdminHandler(req, res) {
+  try {
+    const user = await findUserByAnyId(req.params.id, req.body, req.query);
+    if (!user) return res.status(404).json({ message: 'Utilisateur introuvable' });
+    if (user.role !== 'admin') {
+      return res.status(400).json({ message: 'Seuls les admins sont supprimables ici' });
+    }
+
+    await User.deleteOne({ _id: user._id });
+    return res.json({ ok: true, message: 'Compte administrateur supprimé' });
+  } catch (err) {
+    console.error('❌ DELETE admin', err);
+    res.status(500).json({ message: 'Erreur serveur' });
+  }
+}
+
+/* ===================== Routes "users" existantes + alias ===================== */
 router.post('/users',                     auth, requireRole('superadmin'), createAdminHandler);
 router.put('/users/:id',                  auth, requireRole('superadmin'), updateAdminHandler);
 router.post('/users/:id/toggle-active',   auth, requireRole('superadmin'), toggleActiveHandler);
 router.get('/users/:id/invoices',         auth, requireRole('superadmin'), invoicesHandler);
-/* ✅ Impersonate alias côté /users */
 router.post('/users/:id/impersonate',     auth, requireRole('superadmin'), impersonateHandler);
+router.post('/users/:id/reset-password',  auth, requireRole('superadmin'), resetPasswordHandler);
+router.delete('/users/:id',               auth, requireRole('superadmin'), deleteAdminHandler);
 
-/* ===================== ✅ ALIAS "admins" (inclut impersonate) ===================== */
+/* ===================== ✅ ALIAS "admins" (inclut impersonate/reset/delete) ===================== */
 router.post('/admins',                          auth, requireRole('superadmin'), createAdminHandler);
 router.put('/admins/:id',                       auth, requireRole('superadmin'), updateAdminHandler);
 router.post('/admins/:id/toggle-active',        auth, requireRole('superadmin'), toggleActiveHandler);
 router.get('/admins/:id/invoices',              auth, requireRole('superadmin'), invoicesHandler);
 router.post('/admins/:id/impersonate',          auth, requireRole('superadmin'), impersonateHandler);
+router.post('/admins/:id/reset-password',       auth, requireRole('superadmin'), resetPasswordHandler);
+router.delete('/admins/:id',                    auth, requireRole('superadmin'), deleteAdminHandler);
 
 module.exports = router;
