@@ -11,6 +11,7 @@ const cron = require('node-cron');
 
 const logger = require('./logger');
 const runBackup = require('./scripts/backup');
+const { secretFingerprint } = require('./utils/jwt');
 
 const app = express();
 
@@ -31,6 +32,10 @@ const ALLOWED_HEADERS = [
   'x-commune-id',
   'x-app-key',
   'X-App-Key',
+  // ✅ fallbacks pour le token côté client
+  'x-access-token',
+  'x-token',
+  'x-auth-token',
 ];
 
 app.use(
@@ -76,9 +81,7 @@ app.use('/api', require('./routes/setup-admin'));
 app.use('/api', require('./routes/auth'));
 app.use('/api', require('./routes/me'));
 
-/* ❌ SUPPRIMÉ: montage doublon qui provoquait des collisions
-   app.use('/api/admins', require('./routes/admins'));
-*/
+// app.use('/api/admins', require('./routes/admins')); // inutile si tout est dans userRoutes
 
 app.use('/api/change-password', (req, _res, next) => { console.log('[HIT] /api/change-password', req.method, req.path || '/'); next(); }, require('./routes/changePassword'));
 app.use('/api/incidents', require('./routes/incidents'));
@@ -119,6 +122,7 @@ mongoose
   .connect(MONGODB_URI, { useNewUrlParser: true, useUnifiedTopology: true })
   .then(() => {
     logger.info('MongoDB connecté ✅');
+    logger.info(`JWT secret fingerprint: ${secretFingerprint()}`);
     if (!GITHUB_TOKEN) logger.warn('GITHUB_TOKEN manquant — endpoint /cve retournera []');
     app.listen(PORT, HOST, () =>
       logger.info(`Serveur dispo sur http://${HOST}:${PORT} 🚀`)
