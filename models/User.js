@@ -27,29 +27,19 @@ const userSchema = new mongoose.Schema(
     // UI
     photo: { type: String, default: '' },
 
-    // Abonnement (déjà partiellement présent → on complète)
+    // Abonnement
     subscriptionStatus: {
       type: String,
       enum: ['none', 'active', 'expired'],
       default: 'none',
       index: true,
     },
-    subscriptionStartAt: { type: Date, default: null },
     subscriptionEndAt: { type: Date, default: null },
-    subscriptionPrice: { type: Number, default: 0 },           // montant TTC (€/autre)
-    subscriptionCurrency: { type: String, default: 'EUR' },     // 'EUR', 'KMF', etc.
-    subscriptionMethod: { type: String, default: '' },          // 'card' | 'cash' | 'transfer' ...
 
-    // Infos de facturation (facultatives, utilisées sur la facture)
-    billingName: { type: String, default: '' },                 // ex. mairie/association/nom complet
-    billingEmail: { type: String, default: '' },
-    billingPhone: { type: String, default: '' },
-    billingAddress: { type: String, default: '' },
-    billingCity: { type: String, default: '' },
-    billingZip: { type: String, default: '' },
-    billingCountry: { type: String, default: '' },
-    vatNumber: { type: String, default: '' },                 
-    invoiceNotes: { type: String, default: '' },               
+    // 💳 Montant / devise / méthode choisis par le superadmin
+    subscriptionPrice: { type: Number, default: 0 },
+    subscriptionCurrency: { type: String, default: 'EUR' },
+    subscriptionMethod: { type: String, default: '' }, // card|cash|transfer…
 
     // Audit
     createdBy: { type: String, default: '' },
