@@ -1,12 +1,11 @@
 // backend/routes/auth.js
 const express = require('express');
 const bcrypt = require('bcryptjs');
-const jwt = require('jsonwebtoken');
 const User = require('../models/User');
 let Admin = null; try { Admin = require('../models/Admin'); } catch (_) {}
-const router = express.Router();
+const { sign } = require('../utils/jwt');
 
-const JWT_SECRET = require('../config/jwt'); // ✅ centralisé
+const router = express.Router();
 const TOKEN_EXPIRES_IN = '7d';
 
 router.post('/login', async (req, res) => {
@@ -16,7 +15,7 @@ router.post('/login', async (req, res) => {
       return res.status(400).json({ message: 'Email et mot de passe requis.' });
     }
 
-    const emailNorm = email.trim().toLowerCase();
+    const emailNorm = String(email).trim().toLowerCase();
     const baseSelect = '+password email role isActive tokenVersion name communeId communeName photo';
 
     let doc = await User.findOne({ email: emailNorm }).select(baseSelect);
@@ -43,7 +42,7 @@ router.post('/login', async (req, res) => {
       tv: typeof doc.tokenVersion === 'number' ? doc.tokenVersion : 0,
     };
 
-    const token = jwt.sign(payload, JWT_SECRET, { expiresIn: TOKEN_EXPIRES_IN });
+    const token = sign(payload, { expiresIn: TOKEN_EXPIRES_IN });
 
     return res.json({
       token,
