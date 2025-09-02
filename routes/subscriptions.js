@@ -2,14 +2,16 @@
 const express = require('express');
 const router = express.Router();
 const mongoose = require('mongoose');
-const path = require('path');
 const fs = require('fs');
+const path = require('path');
 const PDFDocument = require('pdfkit');
 
 const auth = require('../middleware/authMiddleware');
 const requireRole = require('../middleware/requireRole');
 const User = require('../models/User');
+const Invoice = require('../models/Invoice');
 
+/* ===== Utils génériques ===== */
 const isValidHex24 = (s) => typeof s === 'string' && /^[a-f0-9]{24}$/i.test(s);
 const decode = (v) => { try { return decodeURIComponent(String(v)); } catch { return String(v || ''); } };
 const norm = (v) => String(v || '').trim().toLowerCase();
@@ -26,83 +28,33 @@ const pickHexFromAny = (v) => {
   const m = s.match(/[a-f0-9]{24}/i);
   return m && isValidHex24(m[0]) ? m[0] : '';
 };
+function formatDateFR(d) { try { return new Date(d).toLocaleDateString('fr-FR'); } catch { return ''; } }
 
-const TAX_RATE = Number(process.env.INVOICE_TAX_RATE || 0); // ex: 0 ou 0.2
-const LOGO_PATH = process.env.INVOICE_LOGO_PATH || '';      // ex: ./uploads/logo.png
-
-function formatDateFR(d) {
-  try { return new Date(d).toLocaleDateString('fr-FR'); } catch { return ''; }
+/* ===== Numéro de facture: AMS-YYYYMMDD-<3 digits><2 letters> ===== */
+function randomDigits(n = 3) {
+  return Array.from({ length: n }, () => Math.floor(Math.random() * 10)).join('');
 }
-function invoiceNumberFor(user) {
-  const now = new Date();
-  const y = now.getFullYear();
-  const m = String(now.getMonth() + 1).padStart(2, '0');
-  const d = String(now.getDate()).padStart(2, '0');
-  return `INV-${y}${m}${d}-${String(user._id).slice(-4)}`;
+function randomLetters(n = 2) {
+  const A = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+  return Array.from({ length: n }, () => A[Math.floor(Math.random() * A.length)]).join('');
 }
-
-function buildInvoiceForUser(user) {
-  const now = new Date();
-  const amountTTC = typeof user.subscriptionPrice === 'number' ? user.subscriptionPrice : 0;
-  const currency = user.subscriptionCurrency || 'EUR';
-  const status = user.subscriptionStatus === 'active' ? 'paid' : 'unpaid';
-  const startAt = user.subscriptionStartAt ? new Date(user.subscriptionStartAt) : null;
-  const endAt = user.subscriptionEndAt ? new Date(user.subscriptionEndAt) : null;
-
-  // Si TVA configurée, on part du TTC pour reconstituer HT/TVA
-  const rate = TAX_RATE > 0 ? TAX_RATE : 0;
-  const amountHT = rate > 0 ? +(amountTTC / (1 + rate)).toFixed(2) : amountTTC;
-  const amountTVA = +(amountTTC - amountHT).toFixed(2);
-
-  return {
-    id: `INV-${String(user._id).slice(-6)}`,
-    number: invoiceNumberFor(user),
-    title: 'Licence Securidem',
-    issuer: {
-      name: 'Association Bellevue Dembeni',
-      siret: '913 987 905 00019',
-      address: '49, Rue Manga Chebane, 97660 Dembeni',
-    },
-    customer: {
-      name: user.billingName || user.name || user.email,
-      email: user.billingEmail || user.email,
-      phone: user.billingPhone || '',
-      address: user.billingAddress || '',
-      city: user.billingCity || '',
-      zip: user.billingZip || '',
-      country: user.billingCountry || '',
-      vatNumber: user.vatNumber || '',
-      // Contexte projet
-      communeId: user.communeId || '',
-      communeName: user.communeName || '',
-    },
-    invoiceDate: now,
-    invoiceDateFormatted: formatDateFR(now),
-    periodStart: startAt,
-    periodStartFormatted: startAt ? formatDateFR(startAt) : '',
-    periodEnd: endAt,
-    periodEndFormatted: endAt ? formatDateFR(endAt) : '',
-    amountHT,
-    amountTVA,
-    amountTTC,
-    tvaRate: rate, // ex: 0.2
-    currency,
-    status,        // 'paid' | 'unpaid'
-    method: user.subscriptionMethod || '',
-
-    // Lignes (une ligne simple “Licence Securidem – période”)
-    items: [{
-      description: `Licence Securidem${startAt && endAt ? ` – Période: ${formatDateFR(startAt)} au ${formatDateFR(endAt)}` : ''}`,
-      quantity: 1,
-      unitPriceHT: amountHT,
-      totalHT: amountHT,
-    }],
-
-    url: null, // rempli côté front
-    notes: user.invoiceNotes || '',
-  };
+function dateStamp(d = new Date()) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  return `${y}${m}${dd}`;
+}
+async function generateUniqueInvoiceNumber() {
+  for (let i = 0; i < 10; i++) {
+    const candidate = `AMS-${dateStamp(new Date())}-${randomDigits(3)}${randomLetters(2)}`;
+    const exists = await Invoice.exists({ number: candidate });
+    if (!exists) return candidate;
+  }
+  // très improbable – fallback avec timestamp
+  return `AMS-${dateStamp(new Date())}-${Date.now().toString().slice(-5)}XX`;
 }
 
+/* ===== Résolution utilisateur ===== */
 async function findUserByAnyId(primary, body = {}, query = {}) {
   const candidatesRaw = [
     primary,
@@ -139,7 +91,7 @@ async function findUserByAnyId(primary, body = {}, query = {}) {
   return null;
 }
 
-// Plans simples (démo)
+/* ===== Plans (mock) ===== */
 router.get('/subscriptions/plans', auth, requireRole('superadmin'), (_req, res) => {
   res.json({
     plans: [
@@ -150,7 +102,7 @@ router.get('/subscriptions/plans', auth, requireRole('superadmin'), (_req, res) 
   });
 });
 
-/** extrait montant/devise/méthode */
+/* ===== Montants envoyés par le superadmin ===== */
 function extractPaymentFields(body = {}) {
   let amount = Number(body.amount);
   if (!Number.isFinite(amount) || amount < 0) amount = 0;
@@ -160,12 +112,44 @@ function extractPaymentFields(body = {}) {
   if (!currency) currency = 'EUR';
   if (currency.length > 6) currency = currency.slice(0, 6);
 
-  const method = String(body.method || '').trim(); // 'card'|'cash'|'transfer'...
+  const method = String(body.method || '').trim();
 
   return { amount, currency, method };
 }
 
-// Démarrer un abonnement
+/* ===== Création et persistance d’une facture ===== */
+async function createInvoiceForUser(user, { amount, currency, method, periodStart, periodEnd }) {
+  const number = await generateUniqueInvoiceNumber();
+
+  const items = [{
+    description: 'Licence Securidem',
+    quantity: 1,
+    unitPrice: amount,
+    total: amount,
+  }];
+
+  const inv = await Invoice.create({
+    number,
+    userId: user._id,
+    userEmail: user.email,
+    customerName: user.name || user.email,
+    communeId: user.communeId || '',
+    communeName: user.communeName || '',
+    items,
+    amount,
+    currency,
+    method,
+    status: 'paid',
+    periodStart: periodStart || new Date(),
+    periodEnd: periodEnd || user.subscriptionEndAt || null,
+    issuedAt: new Date(),
+    meta: {},
+  });
+
+  return inv;
+}
+
+/* ===== Démarrer un abonnement ===== */
 router.post('/subscriptions/:id/start', auth, requireRole('superadmin'), async (req, res) => {
   try {
     const user = await findUserByAnyId(req.params.id, req.body, req.query);
@@ -173,29 +157,30 @@ router.post('/subscriptions/:id/start', auth, requireRole('superadmin'), async (
 
     const { periodMonths = 1 } = req.body || {};
     const months = Math.max(1, parseInt(periodMonths, 10) || 1);
-
-    const start = new Date();
-    const end = new Date(start);
+    const end = new Date();
     end.setMonth(end.getMonth() + months);
 
     const { amount, currency, method } = extractPaymentFields(req.body);
 
     user.subscriptionStatus = 'active';
-    user.subscriptionStartAt = start;
     user.subscriptionEndAt = end;
     user.subscriptionPrice = amount;
     user.subscriptionCurrency = currency;
     user.subscriptionMethod = method;
     await user.save();
 
-    res.json({ ok: true, user: user.toObject() });
+    const inv = await createInvoiceForUser(user, {
+      amount, currency, method, periodStart: new Date(), periodEnd: end,
+    });
+
+    res.json({ ok: true, user: user.toObject(), invoice: inv });
   } catch (err) {
     console.error('❌ POST /subscriptions/:id/start', err);
     res.status(500).json({ message: 'Erreur serveur' });
   }
 });
 
-// Renouveler (enchaîne la période)
+/* ===== Renouveler un abonnement ===== */
 router.post('/subscriptions/:id/renew', auth, requireRole('superadmin'), async (req, res) => {
   try {
     const user = await findUserByAnyId(req.params.id, req.body, req.query);
@@ -207,35 +192,36 @@ router.post('/subscriptions/:id/renew', auth, requireRole('superadmin'), async (
     const base = user.subscriptionEndAt && user.subscriptionEndAt > new Date()
       ? new Date(user.subscriptionEndAt)
       : new Date();
-    const start = new Date(base);
-    const end = new Date(base);
-    end.setMonth(end.getMonth() + months);
+    const oldEnd = new Date(base);
+    base.setMonth(base.getMonth() + months);
 
     const { amount, currency, method } = extractPaymentFields(req.body);
 
     user.subscriptionStatus = 'active';
-    user.subscriptionStartAt = start;
-    user.subscriptionEndAt = end;
+    user.subscriptionEndAt = base;
     user.subscriptionPrice = amount;
     user.subscriptionCurrency = currency;
     user.subscriptionMethod = method;
     await user.save();
 
-    res.json({ ok: true, user: user.toObject() });
+    const inv = await createInvoiceForUser(user, {
+      amount, currency, method, periodStart: oldEnd, periodEnd: base,
+    });
+
+    res.json({ ok: true, user: user.toObject(), invoice: inv });
   } catch (err) {
     console.error('❌ POST /subscriptions/:id/renew', err);
     res.status(500).json({ message: 'Erreur serveur' });
   }
 });
 
-// Annuler
+/* ===== Annuler un abonnement (pas de facture) ===== */
 router.post('/subscriptions/:id/cancel', auth, requireRole('superadmin'), async (req, res) => {
   try {
     const user = await findUserByAnyId(req.params.id, req.body, req.query);
     if (!user) return res.status(404).json({ message: 'Utilisateur introuvable' });
 
     user.subscriptionStatus = 'none';
-    user.subscriptionStartAt = null;
     user.subscriptionEndAt = null;
     user.subscriptionPrice = 0;
     user.subscriptionMethod = '';
@@ -248,9 +234,7 @@ router.post('/subscriptions/:id/cancel', auth, requireRole('superadmin'), async 
   }
 });
 
-/* --------- ENDPOINTS “MON COMPTE” --------- */
-
-// GET /api/my-subscription
+/* ===== “Mon abonnement” (client) ===== */
 router.get('/my-subscription', auth, async (req, res) => {
   try {
     const id = req.user?.id;
@@ -258,26 +242,19 @@ router.get('/my-subscription', auth, async (req, res) => {
       return res.status(401).json({ message: 'Non connecté' });
     }
     const user = await User.findById(id).select(
-      'subscriptionStatus subscriptionStartAt subscriptionEndAt subscriptionPrice subscriptionCurrency subscriptionMethod name email communeId communeName billingName billingEmail billingPhone billingAddress billingCity billingZip billingCountry vatNumber'
+      'subscriptionStatus subscriptionEndAt subscriptionPrice subscriptionCurrency name email communeId communeName subscriptionMethod'
     );
     if (!user) return res.status(404).json({ message: 'Utilisateur introuvable' });
 
     return res.json({
       status: user.subscriptionStatus || 'none',
-      startAt: user.subscriptionStartAt || null,
       endAt: user.subscriptionEndAt || null,
       price: typeof user.subscriptionPrice === 'number' ? user.subscriptionPrice : 0,
       currency: user.subscriptionCurrency || 'EUR',
       method: user.subscriptionMethod || '',
       customer: {
-        name: user.billingName || user.name || user.email,
-        email: user.billingEmail || user.email,
-        phone: user.billingPhone || '',
-        address: user.billingAddress || '',
-        city: user.billingCity || '',
-        zip: user.billingZip || '',
-        country: user.billingCountry || '',
-        vatNumber: user.vatNumber || '',
+        name: user.name || user.email,
+        email: user.email,
         communeId: user.communeId || '',
         communeName: user.communeName || '',
       }
@@ -288,144 +265,132 @@ router.get('/my-subscription', auth, async (req, res) => {
   }
 });
 
-// GET /api/my-invoices
+/* ===== Mes factures (client) – depuis la base ===== */
 router.get('/my-invoices', auth, async (req, res) => {
   try {
     const id = req.user?.id;
     if (!id || !mongoose.Types.ObjectId.isValid(id)) {
       return res.status(401).json({ message: 'Non connecté' });
     }
-    const user = await User.findById(id);
-    if (!user) return res.status(404).json({ message: 'Utilisateur introuvable' });
+    const invoices = await Invoice.find({ userId: id })
+      .sort({ issuedAt: -1 })
+      .lean();
 
-    const invoices = [];
-    if (user.subscriptionStatus === 'active') {
-      invoices.push(buildInvoiceForUser(user));
-    }
-    return res.json({ invoices });
+    const list = invoices.map(inv => ({
+      id: String(inv._id),
+      number: inv.number,
+      amount: inv.amount,
+      currency: inv.currency,
+      status: inv.status,
+      date: inv.issuedAt,
+      method: inv.method || '',
+      periodStart: inv.periodStart || null,
+      periodEnd: inv.periodEnd || null,
+      url: `/api/my-invoices/${encodeURIComponent(inv.number)}/pdf`,
+    }));
+
+    return res.json({ invoices: list });
   } catch (e) {
     console.error('GET /my-invoices:', e);
     return res.status(500).json({ message: 'Erreur serveur' });
   }
 });
 
-// GET /api/my-invoices/:num/pdf
+/* ===== PDF Helper (logo + rendu) ===== */
+function drawInvoicePDF(doc, invoice, { logoPathOrUrl } = {}) {
+  // Logo (fichier local)
+  if (logoPathOrUrl) {
+    try {
+      // si c’est un fichier local relatif au backend/
+      const p = logoPathOrUrl.startsWith('/') || logoPathOrUrl.includes(path.sep)
+        ? logoPathOrUrl
+        : path.join(__dirname, '..', logoPathOrUrl);
+      if (fs.existsSync(p)) {
+        doc.image(p, 50, 40, { fit: [90, 90], align: 'left', valign: 'top' });
+      }
+    } catch {}
+  }
+
+  // Titre & entête
+  doc.fontSize(20).text('Licence Securidem', 160, 50, { align: 'left' });
+  doc.moveDown(0.5);
+  doc.fontSize(10);
+  doc.text('Émetteur : Association Bellevue Dembeni', 160);
+  doc.text('SIRET : 913 987 905 00019', 160);
+  doc.text('Adresse : 49, Rue Manga Chebane, 97660 Dembeni', 160);
+
+  doc.text(`Date : ${formatDateFR(invoice.issuedAt)}`, 400, 50);
+  doc.text(`N° : ${invoice.number}`, 400);
+
+  doc.moveDown(1);
+  doc.moveTo(50, doc.y + 10).lineTo(545, doc.y + 10).stroke();
+
+  // Client
+  doc.moveDown(1.5);
+  doc.fontSize(12).text('Client', { underline: true });
+  doc.fontSize(10);
+  doc.text(`Nom : ${invoice.customerName || invoice.userEmail}`);
+  doc.text(`Email : ${invoice.userEmail}`);
+  if (invoice.communeName || invoice.communeId) {
+    doc.text(`Commune : ${invoice.communeName || invoice.communeId}`);
+  }
+
+  // Détails
+  doc.moveDown(1);
+  doc.fontSize(12).text('Détails', { underline: true });
+  doc.fontSize(10);
+
+  // tableau simple
+  const startY = doc.y + 10;
+  doc.text('Description', 50, startY);
+  doc.text('Qté', 330, startY);
+  doc.text('PU', 380, startY);
+  doc.text('Total', 460, startY);
+
+  doc.moveTo(50, startY + 12).lineTo(545, startY + 12).stroke();
+
+  let y = startY + 18;
+  for (const it of invoice.items || []) {
+    doc.text(it.description, 50, y);
+    doc.text(String(it.quantity), 330, y);
+    doc.text(`${(it.unitPrice || 0).toFixed(2)} ${invoice.currency}`, 380, y);
+    doc.text(`${(it.total || 0).toFixed(2)} ${invoice.currency}`, 460, y);
+    y += 16;
+  }
+
+  doc.moveTo(50, y + 6).lineTo(545, y + 6).stroke();
+  doc.fontSize(12).text(`Total TTC : ${invoice.amount.toFixed(2)} ${invoice.currency}`, 400, y + 12);
+
+  if (invoice.periodEnd) {
+    doc.fontSize(10).text(`Valable jusqu’au : ${formatDateFR(invoice.periodEnd)}`, 50, y + 12);
+  }
+
+  doc.moveDown(3);
+  doc.fontSize(8).fillColor('#666')
+    .text('Association Bellevue Dembeni – Licence Securidem', { align: 'center' })
+    .text('Document généré automatiquement, sans signature manuscrite.', { align: 'center' });
+}
+
+/* ===== Télécharger mon PDF par numéro ===== */
 router.get('/my-invoices/:num/pdf', auth, async (req, res) => {
   try {
     const id = req.user?.id;
     if (!id || !mongoose.Types.ObjectId.isValid(id)) {
       return res.status(401).json({ message: 'Non connecté' });
     }
-    const user = await User.findById(id);
-    if (!user) return res.status(404).json({ message: 'Utilisateur introuvable' });
-
-    const inv = buildInvoiceForUser(user);
+    const number = String(req.params.num || '').trim();
+    const invoice = await Invoice.findOne({ number, userId: id });
+    if (!invoice) return res.status(404).json({ message: 'Facture introuvable' });
 
     res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `inline; filename="${inv.number}.pdf"`);
+    res.setHeader('Content-Disposition', `inline; filename="${invoice.number}.pdf"`);
     res.setHeader('Cache-Control', 'no-store');
 
+    const logoPath = process.env.ASSO_LOGO_PATH || 'assets/logo-bellevue.png'; // place ton logo ici
     const doc = new PDFDocument({ size: 'A4', margin: 50 });
     doc.pipe(res);
 
-    // Bandeau haut
-    if (LOGO_PATH) {
-      try {
-        const abs = path.resolve(LOGO_PATH);
-        if (fs.existsSync(abs)) {
-          doc.image(abs, 50, 40, { width: 90 });
-        }
-      } catch {}
-    }
-
-    doc.fontSize(20).text(inv.title, 150, 45, { align: 'right' });
-    doc.moveDown(0.5);
-
-    doc.fontSize(10);
-    doc.text(`Émetteur : ${inv.issuer.name}`, 50, 110);
-    doc.text(`SIRET    : ${inv.issuer.siret}`, 50);
-    doc.text(`Adresse  : ${inv.issuer.address}`, 50);
-
-    doc.text(`Date : ${inv.invoiceDateFormatted}`, 350, 110, { align: 'left' });
-    doc.text(`Facture n° : ${inv.number}`, 350);
-
-    // Client
-    doc.moveDown(1.2);
-    doc.moveTo(50, doc.y).lineTo(545, doc.y).stroke();
-    doc.moveDown(0.6);
-    doc.fontSize(12).text('Client', { underline: true });
-    doc.fontSize(10);
-    doc.text(`${inv.customer.name}`);
-    if (inv.customer.vatNumber) doc.text(`N° TVA : ${inv.customer.vatNumber}`);
-    doc.text(`${inv.customer.email}`);
-    if (inv.customer.phone) doc.text(`${inv.customer.phone}`);
-    if (inv.customer.address) doc.text(`${inv.customer.address}`);
-    const loc = [inv.customer.zip, inv.customer.city].filter(Boolean).join(' ');
-    if (loc) doc.text(loc);
-    if (inv.customer.country) doc.text(inv.customer.country);
-    if (inv.customer.communeName || inv.customer.communeId) {
-      doc.text(`Commune : ${inv.customer.communeName || inv.customer.communeId}`);
-    }
-
-    // Détails abonnement / période
-    doc.moveDown(1);
-    doc.fontSize(12).text('Détails', { underline: true });
-    doc.fontSize(10);
-    if (inv.periodStartFormatted || inv.periodEndFormatted) {
-      doc.text(`Période : ${inv.periodStartFormatted || '—'} au ${inv.periodEndFormatted || '—'}`);
-    }
-    const statusLabel = inv.status === 'paid' ? 'Payée' : 'À payer';
-    const methodLabel = inv.method ? ` – Règlement: ${inv.method}` : '';
-    doc.text(`Statut : ${statusLabel}${methodLabel}`);
-
-    // Tableau lignes
-    doc.moveDown(0.6);
-    const tableTop = doc.y;
-    const colX = { desc: 50, qty: 360, pu: 400, total: 480 };
-    doc.fontSize(10).text('Description', colX.desc, tableTop);
-    doc.text('Qté', colX.qty, tableTop);
-    doc.text('PU HT', colX.pu, tableTop, { width: 60, align: 'right' });
-    doc.text('Total HT', colX.total, tableTop, { width: 60, align: 'right' });
-    doc.moveTo(50, doc.y + 3).lineTo(545, doc.y + 3).stroke();
-
-    let y = doc.y + 8;
-    inv.items.forEach(it => {
-      doc.text(it.description, colX.desc, y, { width: 300 });
-      doc.text(String(it.quantity), colX.qty, y);
-      doc.text(it.unitPriceHT.toFixed(2) + ' ' + inv.currency, colX.pu, y, { width: 60, align: 'right' });
-      doc.text(it.totalHT.toFixed(2) + ' ' + inv.currency, colX.total, y, { width: 60, align: 'right' });
-      y += 18;
-    });
-
-    // Totaux
-    doc.moveTo(50, y + 4).lineTo(545, y + 4).stroke();
-    y += 12;
-    const right = 540;
-
-    const line = (label, value) => {
-      doc.text(label, 350, y);
-      doc.text(value, right - 60, y, { width: 60, align: 'right' });
-      y += 16;
-    };
-
-    line('Sous-total HT', `${inv.amountHT.toFixed(2)} ${inv.currency}`);
-    if (inv.tvaRate > 0) {
-      line(`TVA (${(inv.tvaRate * 100).toFixed(0)}%)`, `${inv.amountTVA.toFixed(2)} ${inv.currency}`);
-    } else {
-      line('TVA', `0.00 ${inv.currency}`);
-    }
-    doc.font('Helvetica-Bold');
-    line('Total TTC', `${inv.amountTTC.toFixed(2)} ${inv.currency}`);
-    doc.font('Helvetica');
-
-    // Notes / mentions
-    doc.moveDown(1.2);
-    doc.moveTo(50, doc.y).lineTo(545, doc.y).stroke();
-    doc.moveDown(0.5);
-    doc.fontSize(9).fillColor('#444')
-      .text(inv.notes || 'Association Bellevue Dembeni – Licence Securidem', { align: 'center' })
-      .text('Document généré automatiquement, sans signature manuscrite.', { align: 'center' });
-    doc.fillColor('black');
+    drawInvoicePDF(doc, invoice, { logoPathOrUrl: logoPath });
 
     doc.end();
   } catch (e) {
