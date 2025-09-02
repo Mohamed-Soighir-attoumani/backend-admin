@@ -3,19 +3,21 @@ const express = require('express');
 const router = express.Router();
 const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
+const fs = require('fs');
+const path = require('path');
+const PDFDocument = require('pdfkit');
 
 const auth = require('../middleware/authMiddleware');
 const requireRole = require('../middleware/requireRole');
 const User = require('../models/User');
+const Invoice = require('../models/Invoice');
 const { sign } = require('../utils/jwt');
 
 /* Utils */
 const isValidHex24 = (s) => typeof s === 'string' && /^[a-f0-9]{24}$/i.test(s);
 const isValidId = (id) => isValidHex24(String(id || ''));
 const norm = (v) => String(v || '').trim().toLowerCase();
-const decode = (v) => {
-  try { return decodeURIComponent(String(v)); } catch { return String(v || ''); }
-};
+const decode = (v) => { try { return decodeURIComponent(String(v)); } catch { return String(v || ''); } };
 const pickHexFromAny = (v) => {
   if (!v) return '';
   if (typeof v === 'object') {
@@ -29,6 +31,7 @@ const pickHexFromAny = (v) => {
   const m = s.match(/[a-f0-9]{24}/i);
   return m && isValidHex24(m[0]) ? m[0] : '';
 };
+function formatDateFR(d) { try { return new Date(d).toLocaleDateString('fr-FR'); } catch { return ''; } }
 
 /**
  * 🔍 Résout un utilisateur à partir de :
@@ -136,7 +139,6 @@ router.get('/admins', auth, requireRole('superadmin'), async (req, res) => {
 });
 
 /* ===================== CRÉATION ADMIN ===================== */
-// (garde aussi /users pour compat)
 router.post('/admins', auth, requireRole('superadmin'), async (req, res) => {
   try {
     let { email, password, name, communeId, communeName, photo, createdBy } = req.body || {};
@@ -162,6 +164,9 @@ router.post('/admins', auth, requireRole('superadmin'), async (req, res) => {
       isActive: true,
       subscriptionStatus: 'none',
       subscriptionEndAt: null,
+      subscriptionPrice: 0,
+      subscriptionCurrency: 'EUR',
+      subscriptionMethod: '',
     });
 
     const plain = doc.toObject();
@@ -201,6 +206,9 @@ router.post('/users', auth, requireRole('superadmin'), async (req, res) => {
       isActive: true,
       subscriptionStatus: 'none',
       subscriptionEndAt: null,
+      subscriptionPrice: 0,
+      subscriptionCurrency: 'EUR',
+      subscriptionMethod: '',
     });
 
     const plain = doc.toObject();
@@ -258,25 +266,126 @@ router.post('/users/:id/toggle-active', auth, requireRole('superadmin'), async (
   }
 });
 
-/* ===================== FACTURES (exemple) ===================== */
+/* ===================== FACTURES (persistées) ===================== */
 router.get('/users/:id/invoices', auth, requireRole('superadmin'), async (req, res) => {
   try {
     const user = await findUserByAnyId(req.params.id, req.query, req.query);
     if (!user) return res.status(404).json({ message: 'Utilisateur introuvable' });
 
-    const inv = [{
-      id: `INV-${String(user._id).slice(-6)}`,
-      number: `INV-${new Date().getFullYear()}-${String(user._id).slice(-4)}`,
-      amount: user.subscriptionStatus === 'active' ? 19.90 : 0.00,
-      currency: 'EUR',
-      status: user.subscriptionStatus === 'active' ? 'paid' : 'unpaid',
-      date: new Date(),
-      url: 'https://example.com/invoice.pdf'
-    }];
+    const invoices = await Invoice.find({ userId: user._id }).sort({ issuedAt: -1 }).lean();
 
-    res.json({ invoices: inv });
+    const list = invoices.map(inv => ({
+      id: String(inv._id),
+      number: inv.number,
+      amount: inv.amount,
+      currency: inv.currency,
+      status: inv.status,
+      date: inv.issuedAt,
+      method: inv.method || '',
+      periodStart: inv.periodStart || null,
+      periodEnd: inv.periodEnd || null,
+      // lien de téléchargement pour le superadmin :
+      url: `/api/users/${encodeURIComponent(String(user._id))}/invoices/${encodeURIComponent(inv.number)}/pdf`,
+    }));
+
+    res.json({ invoices: list });
   } catch (err) {
     console.error('❌ GET /api/users/:id/invoices', err);
+    res.status(500).json({ message: 'Erreur serveur' });
+  }
+});
+
+/* ====== PDF Helper (réutilisé) ====== */
+function drawInvoicePDF(doc, invoice, { logoPathOrUrl } = {}) {
+  // Logo en haut à gauche
+  if (logoPathOrUrl) {
+    try {
+      const p = logoPathOrUrl.startsWith('/') || logoPathOrUrl.includes(path.sep)
+        ? logoPathOrUrl
+        : path.join(__dirname, '..', logoPathOrUrl);
+      if (fs.existsSync(p)) {
+        doc.image(p, 50, 40, { fit: [90, 90], align: 'left', valign: 'top' });
+      }
+    } catch {}
+  }
+
+  doc.fontSize(20).text('Licence Securidem', 160, 50, { align: 'left' });
+  doc.moveDown(0.5);
+  doc.fontSize(10);
+  doc.text('Émetteur : Association Bellevue Dembeni', 160);
+  doc.text('SIRET : 913 987 905 00019', 160);
+  doc.text('Adresse : 49, Rue Manga Chebane, 97660 Dembeni', 160);
+
+  doc.text(`Date : ${formatDateFR(invoice.issuedAt)}`, 400, 50);
+  doc.text(`N° : ${invoice.number}`, 400);
+
+  doc.moveDown(1);
+  doc.moveTo(50, doc.y + 10).lineTo(545, doc.y + 10).stroke();
+
+  doc.moveDown(1.5);
+  doc.fontSize(12).text('Client', { underline: true });
+  doc.fontSize(10);
+  doc.text(`Nom : ${invoice.customerName || invoice.userEmail}`);
+  doc.text(`Email : ${invoice.userEmail}`);
+  if (invoice.communeName || invoice.communeId) {
+    doc.text(`Commune : ${invoice.communeName || invoice.communeId}`);
+  }
+
+  doc.moveDown(1);
+  doc.fontSize(12).text('Détails', { underline: true });
+  doc.fontSize(10);
+
+  const startY = doc.y + 10;
+  doc.text('Description', 50, startY);
+  doc.text('Qté', 330, startY);
+  doc.text('PU', 380, startY);
+  doc.text('Total', 460, startY);
+  doc.moveTo(50, startY + 12).lineTo(545, startY + 12).stroke();
+
+  let y = startY + 18;
+  for (const it of invoice.items || []) {
+    doc.text(it.description, 50, y);
+    doc.text(String(it.quantity), 330, y);
+    doc.text(`${(it.unitPrice || 0).toFixed(2)} ${invoice.currency}`, 380, y);
+    doc.text(`${(it.total || 0).toFixed(2)} ${invoice.currency}`, 460, y);
+    y += 16;
+  }
+
+  doc.moveTo(50, y + 6).lineTo(545, y + 6).stroke();
+  doc.fontSize(12).text(`Total TTC : ${invoice.amount.toFixed(2)} ${invoice.currency}`, 400, y + 12);
+
+  if (invoice.periodEnd) {
+    doc.fontSize(10).text(`Valable jusqu’au : ${formatDateFR(invoice.periodEnd)}`, 50, y + 12);
+  }
+
+  doc.moveDown(3);
+  doc.fontSize(8).fillColor('#666')
+    .text('Association Bellevue Dembeni – Licence Securidem', { align: 'center' })
+    .text('Document généré automatiquement, sans signature manuscrite.', { align: 'center' });
+}
+
+/* ====== PDF pour le superadmin (télécharger la facture d’un admin) ====== */
+router.get('/users/:id/invoices/:num/pdf', auth, requireRole('superadmin'), async (req, res) => {
+  try {
+    const user = await findUserByAnyId(req.params.id, req.query, req.query);
+    if (!user) return res.status(404).json({ message: 'Utilisateur introuvable' });
+
+    const number = String(req.params.num || '').trim();
+    const invoice = await Invoice.findOne({ number, userId: user._id });
+    if (!invoice) return res.status(404).json({ message: 'Facture introuvable' });
+
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `inline; filename="${invoice.number}.pdf"`);
+    res.setHeader('Cache-Control', 'no-store');
+
+    const logoPath = process.env.ASSO_LOGO_PATH || 'assets/logo-bellevue.png';
+
+    const doc = new PDFDocument({ size: 'A4', margin: 50 });
+    doc.pipe(res);
+    drawInvoicePDF(doc, invoice, { logoPathOrUrl: logoPath });
+    doc.end();
+  } catch (err) {
+    console.error('❌ GET /api/users/:id/invoices/:num/pdf', err);
     res.status(500).json({ message: 'Erreur serveur' });
   }
 });
@@ -346,9 +455,7 @@ router.post('/admins/:id/impersonate', auth, requireRole('superadmin'), async (r
       origUserId: String(req.user.id),
     };
 
-    // tu peux choisir une durée plus courte pour l’impersonation (ex: 2h)
     const token = sign(payload, { expiresIn: '2h' });
-
     return res.json({ token });
   } catch (err) {
     console.error('❌ POST /api/admins/:id/impersonate', err);
