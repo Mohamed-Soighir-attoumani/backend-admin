@@ -96,11 +96,39 @@ router.post('/', auth, requireRole('admin'), async (req, res) => {
   }
 });
 
-/* ----------------- MARK ALL READ (public) ----------------- */
-router.patch('/mark-all-read', async (_req, res) => {
+/* ----------------- MARK ALL READ (public, multi-commune) ----------------- */
+/**
+ * Marque comme lues les notifications visibles pour une commune donnée.
+ * communeId peut être fourni dans:
+ *  - body.communeId (préféré)
+ *  - header "x-commune-id"
+ *  - query ?communeId=
+ * Si aucun communeId n’est fourni, on marque tout (comportement antérieur).
+ */
+router.patch('/mark-all-read', async (req, res) => {
   try {
-    await Notification.updateMany({}, { isRead: true });
-    res.json({ message: 'Toutes les notifications ont été marquées comme lues.' });
+    const bodyCid   = (req.body?.communeId || '').trim();
+    const headerCid = (req.header('x-commune-id') || '').trim();
+    const queryCid  = (req.query?.communeId || '').trim();
+    const communeId = bodyCid || headerCid || queryCid || '';
+
+    let filter = {};
+    if (communeId) {
+      // Filtre des notifs visibles pour cette commune (mêmes règles que GET /notifications côté public)
+      filter = buildVisibilityQuery({
+        communeId,
+        userRole: null,        // public
+        includeLegacy: true,   // inclure anciens docs sans visibilité
+        includeTimeWindow: false, // on ne restreint pas par startAt/endAt pour le marquage
+      }) || {};
+    }
+
+    const result = await Notification.updateMany(filter, { $set: { isRead: true } });
+    res.json({
+      message: 'Notifications marquées comme lues.',
+      matched: result?.matchedCount ?? undefined,
+      modified: result?.modifiedCount ?? undefined,
+    });
   } catch (err) {
     console.error('❌ PATCH /notifications/mark-all-read', err);
     res.status(500).json({ message: 'Erreur lors du marquage.' });
