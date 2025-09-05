@@ -1,3 +1,4 @@
+// backend/routes/communes.js
 const express = require('express');
 const router = express.Router();
 const Commune = require('../models/Commune');
@@ -22,7 +23,7 @@ router.get('/', async (req, res) => {
   }
 });
 
-// (Optionnel DEV) Seed rapide d’une commune Dembéni
+// Seed rapide Dembéni (optionnel dev)
 router.post('/seed-dembeni', async (req, res) => {
   try {
     const exists = await Commune.findOne({ slug: 'dembeni' });
