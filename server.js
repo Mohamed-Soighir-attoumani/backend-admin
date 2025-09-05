@@ -8,7 +8,7 @@ const path = require('path');
 const morgan = require('morgan');
 const promBundle = require('express-prom-bundle');
 const cron = require('node-cron');
-
+const communesRouter = require('./routes/communes');
 const logger = require('./logger');
 const runBackup = require('./scripts/backup');
 const { secretFingerprint } = require('./utils/jwt');
@@ -90,7 +90,7 @@ app.use('/api/infos', require('./routes/infos'));
 app.use('/api/notifications', require('./routes/notifications'));
 app.use('/api/projects', require('./routes/projects'));
 app.use('/api/devices', require('./routes/devices'));
-
+app.use('/api/communes', communesRouter);
 app.use('/api', require('./routes/userRoutes'));       // /api/admins + /api/users + invoices + toggles
 app.use('/api', require('./routes/subscriptions'));    // /api/subscriptions/* start/renew/cancel
 app.use('/api', require('./routes/debug'));
