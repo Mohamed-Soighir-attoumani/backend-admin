@@ -1,10 +1,11 @@
+// backend/models/Commune.js
 const mongoose = require('mongoose');
 
 const CommuneSchema = new mongoose.Schema({
-  name:   { type: String, required: true, trim: true },      // ex: "Dembéni"
-  slug:   { type: String, required: true, unique: true },    // ex: "dembeni"
-  region: { type: String, default: '' },                     // optionnel
-  imageUrl: { type: String, default: '' },                   // optionnel (vignette)
+  name:   { type: String, required: true, trim: true },
+  slug:   { type: String, required: true, unique: true },
+  region: { type: String, default: '' },
+  imageUrl: { type: String, default: '' },
   active: { type: Boolean, default: true },
 }, { timestamps: true });
 
