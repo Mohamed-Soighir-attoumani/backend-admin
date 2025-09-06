@@ -3,15 +3,15 @@ const mongoose = require('mongoose');
 
 const CommuneSchema = new mongoose.Schema(
   {
-    id: { type: String, trim: true, lowercase: true, unique: true, index: true },
-    slug: { type: String, trim: true, lowercase: true, index: true }, // <- PAS unique
+    id:   { type: String, trim: true, lowercase: true, unique: true, index: true }, // identifiant court (unique)
+    slug: { type: String, trim: true, lowercase: true, index: true },               // ⚠ non-unique
     code: { type: String, trim: true },
     name: { type: String, required: true, trim: true },
     communeName: { type: String, trim: true },
     region: { type: String, trim: true },
     imageUrl: { type: String, trim: true },
-    photo: { type: String, trim: true },
-    createdById: { type: String, trim: true },
+    photo:    { type: String, trim: true },
+    createdById:    { type: String, trim: true },
     createdByEmail: { type: String, trim: true },
   },
   { timestamps: true }
