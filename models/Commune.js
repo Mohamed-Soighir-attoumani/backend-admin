@@ -1,16 +1,24 @@
 const mongoose = require('mongoose');
 
-const CommuneSchema = new mongoose.Schema({
-  // identifiant "stable" côté app/panel (ex: "dembeni")
-  id: { type: String, required: true, unique: true, trim: true },
-  // nom affiché (ex: "Dembéni")
-  name: { type: String, required: true, trim: true },
-  // optionnels
-  region: { type: String, default: '' },
-  imageUrl: { type: String, default: '' }, // pour de jolies vignettes
-}, { timestamps: true });
+const CommuneSchema = new mongoose.Schema(
+  {
+    // identifiant court (ex: "dembeni"), pratique pour les URLs
+    id: { type: String, trim: true, lowercase: true, unique: true, index: true },
+    slug: { type: String, trim: true, lowercase: true },
+    code: { type: String, trim: true }, // ex: code INSEE si besoin
+    name: { type: String, required: true, trim: true }, // Nom affiché
+    communeName: { type: String, trim: true }, // alias si tu utilises ce champ côté admin
+    region: { type: String, trim: true },
 
-CommuneSchema.index({ id: 1 });
-CommuneSchema.index({ name: 'text', id: 'text', region: 'text' });
+    // visuels
+    imageUrl: { type: String, trim: true },
+    photo: { type: String, trim: true },
+
+    // audit
+    createdById: { type: String, trim: true },
+    createdByEmail: { type: String, trim: true },
+  },
+  { timestamps: true }
+);
 
 module.exports = mongoose.model('Commune', CommuneSchema);
