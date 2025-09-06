@@ -1,132 +1,144 @@
 // backend/routes/communes.js
 const express = require('express');
 const router = express.Router();
-const mongoose = require('mongoose');
 const Commune = require('../models/Commune');
+const User = require('../models/User'); // <- on lit les admins pour déduire les communes
 const auth = require('../middleware/authMiddleware');
 const requireRole = require('../middleware/requireRole');
 
-/* ---------- GET public: liste + recherche ---------- */
+/* Utils */
+const toKey = (s) =>
+  String(s || '')
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, '-');
+
+const normalizeCommuneFromAdminGroup = (g) => {
+  const id = toKey(g._id || g.communeId || '');
+  const name =
+    g.name ||
+    g.communeName ||
+    (g._id ? g._id.charAt(0).toUpperCase() + g._id.slice(1) : 'Commune');
+  return {
+    _source: 'admins',
+    _id: id,               // pas un ObjectId: juste une clé d’affichage
+    id,
+    slug: id,
+    code: '',
+    name,
+    communeName: name,
+    region: '',
+    imageUrl: '',          // pas d’image côté admins: reste vide
+    photo: '',
+    createdAt: null,
+  };
+};
+
+const normalizeCommuneDoc = (c) => ({
+  _source: 'collection',
+  _id: String(c._id || c.id || c.slug || c.code || c.name || ''),
+  id: c.id || toKey(c.slug || c.code || c.name || ''),
+  slug: c.slug || toKey(c.id || c.code || c.name || ''),
+  code: c.code || '',
+  name: c.name || c.communeName || 'Commune',
+  communeName: c.communeName || c.name || 'Commune',
+  region: c.region || '',
+  imageUrl: c.imageUrl || '',
+  photo: c.photo || '',
+  createdAt: c.createdAt || null,
+});
+
+/**
+ * Retourne l’union:
+ *  - des communes “officielles” (collection Commune)
+ *  - des communes déduites des admins (User.role='admin' avec communeId)
+ * Filtre optionnel ?search=...
+ */
 router.get('/', async (req, res) => {
   try {
     const q = (req.query.search || '').trim();
+    const rx = q ? new RegExp(q, 'i') : null;
+
+    // 1) communes depuis la collection
     const filter = q
       ? {
           $or: [
-            { name:        { $regex: q, $options: 'i' } },
-            { communeName: { $regex: q, $options: 'i' } },
-            { id:          { $regex: q, $options: 'i' } },
-            { slug:        { $regex: q, $options: 'i' } },
-            { code:        { $regex: q, $options: 'i' } },
+            { name: rx },
+            { communeName: rx },
+            { id: rx },
+            { slug: rx },
+            { code: rx },
+            { region: rx },
           ],
         }
       : {};
-
-    const communes = await Commune.find(filter)
+    const fromCollectionRaw = await Commune.find(filter)
       .select('_id id slug code name communeName region imageUrl photo createdAt')
       .sort({ name: 1 })
       .lean();
+    const fromCollection = fromCollectionRaw.map(normalizeCommuneDoc);
 
-    res.json(communes);
+    // 2) communes déduites des admins
+    const pipeline = [
+      { $match: { role: 'admin', communeId: { $nin: [null, ''] } } },
+      {
+        $group: {
+          _id: '$communeId',
+          name: { $first: '$communeName' },
+        },
+      },
+    ];
+    const groups = await User.aggregate(pipeline);
+    let fromAdmins = groups.map(normalizeCommuneFromAdminGroup);
+
+    // si ?search, filtre aussi côté admins
+    if (rx) {
+      fromAdmins = fromAdmins.filter(
+        (c) => rx.test(c.name) || rx.test(c.communeName) || rx.test(c.id) || rx.test(c.slug)
+      );
+    }
+
+    // 3) union sans doublons (clé = id)
+    const byId = new Map();
+    // priorité à la collection (visuels, etc.)
+    for (const c of fromAdmins) byId.set(c.id, c);
+    for (const c of fromCollection) byId.set(c.id, c);
+
+    // tableau final ordonné par nom
+    const items = Array.from(byId.values()).sort((a, b) =>
+      (a.name || '').localeCompare(b.name || '', 'fr', { sensitivity: 'base' })
+    );
+
+    res.json(items);
   } catch (e) {
     console.error('GET /api/communes error:', e);
     res.status(500).json({ message: 'Erreur serveur' });
   }
 });
 
-/* ---------- SEED rapide (superadmin) – déclaré AVANT la route paramétrée ---------- */
-router.post('/seed', auth, requireRole('superadmin'), async (_req, res) => {
-  try {
-    const samples = [
-      { id: 'dembeni',   name: 'Dembéni',   region: 'Mayotte', imageUrl: '/uploads/communes/dembeni.jpg' },
-      { id: 'mamoudzou', name: 'Mamoudzou', region: 'Mayotte', imageUrl: '/uploads/communes/mamoudzou.jpg' },
-      { id: 'chirongui', name: 'Chirongui', region: 'Mayotte', imageUrl: '/uploads/communes/chirongui.jpg' },
-    ];
-    for (const s of samples) {
-      await Commune.updateOne(
-        { id: s.id },
-        { $setOnInsert: { ...s, slug: s.id } }, // slug = id par défaut
-        { upsert: true }
-      );
-    }
-    const all = await Commune.find().sort({ name: 1 }).lean();
-    res.status(201).json(all);
-  } catch (e) {
-    console.error('POST /api/communes/seed', e);
-    res.status(500).json({ message: 'Erreur seed' });
-  }
-});
+/* =========== Endpoints d’admin (facultatifs) =========== */
 
-/* ---------- (Optionnel) Maintenance: supprimer un ancien index unique sur slug ---------- */
-// POST /api/communes/__maint_fix  (à appeler 1 fois, header X-Maint-Key requis)
-router.post('/__maint_fix', async (req, res) => {
-  try {
-    const maintKey = process.env.MAINT_KEY || '';
-    const got = (req.header('X-Maint-Key') || '').trim();
-    if (!maintKey || got !== maintKey) {
-      return res.status(401).json({ message: 'Unauthorized' });
-    }
-
-    const coll = mongoose.connection.collection('communes');
-    const indexes = await coll.indexes();
-    const slugIdx = indexes.find(i => i.name === 'slug_1');
-    if (slugIdx && slugIdx.unique) {
-      await coll.dropIndex('slug_1');
-      await coll.createIndex({ slug: 1 }, { name: 'slug_1' }); // non unique
-    }
-
-    // Petit upsert d’exemple
-    const samples = [
-      { id: 'dembeni',   name: 'Dembéni',   region: 'Mayotte', imageUrl: '/uploads/communes/dembeni.jpg' },
-      { id: 'mamoudzou', name: 'Mamoudzou', region: 'Mayotte', imageUrl: '/uploads/communes/mamoudzou.jpg' },
-      { id: 'chirongui', name: 'Chirongui', region: 'Mayotte', imageUrl: '/uploads/communes/chirongui.jpg' },
-    ];
-    for (const s of samples) {
-      await Commune.updateOne({ id: s.id }, { $setOnInsert: { ...s, slug: s.id } }, { upsert: true });
-    }
-
-    const all = await Commune.find().sort({ name: 1 }).lean();
-    res.json({ ok: true, count: all.length, items: all });
-  } catch (e) {
-    console.error('MAINT_FIX error', e);
-    res.status(500).json({ message: 'maintenance failed', error: String(e?.message || e) });
-  }
-});
-
-/* ---------- GET public: par id mongo ---------- */
-router.get('/:mongoId', async (req, res) => {
-  try {
-    const c = await Commune.findById(req.params.mongoId).lean();
-    if (!c) return res.status(404).json({ message: 'Commune introuvable' });
-    res.json(c);
-  } catch (e) {
-    res.status(400).json({ message: 'ID invalide' });
-  }
-});
-
-/* ---------- CREATE (superadmin) ---------- */
+/** CREATE (superadmin) — utile si tu veux enrichir avec image/region/etc. */
 router.post('/', auth, requireRole('superadmin'), async (req, res) => {
   try {
     let { id, name, communeName, slug, code, region, imageUrl, photo } = req.body || {};
     if (!name) return res.status(400).json({ message: 'name requis' });
 
-    const norm = (v) => (v || '').toString().trim();
-    const normId = norm(id || slug || name).toLowerCase().replace(/\s+/g, '-');
-
-    const created = await Commune.create({
+    const normId = toKey(id || slug || name);
+    const doc = await Commune.create({
       id: normId,
-      slug: norm(slug) || normId, // force un slug non nul
-      code: norm(code),
-      name: norm(name),
-      communeName: norm(communeName || name),
-      region: norm(region),
-      imageUrl: norm(imageUrl),
-      photo: norm(photo),
+      slug: toKey(slug || normId),
+      code: (code || '').trim(),
+      name: (name || '').trim(),
+      communeName: (communeName || name || '').trim(),
+      region: (region || '').trim(),
+      imageUrl: (imageUrl || '').trim(),
+      photo: (photo || '').trim(),
       createdById: req.user?.id || '',
       createdByEmail: req.user?.email || '',
     });
 
-    res.status(201).json(created);
+    res.status(201).json(normalizeCommuneDoc(doc));
   } catch (e) {
     console.error('POST /api/communes', e);
     if (e.code === 11000) return res.status(409).json({ message: 'id déjà utilisé' });
@@ -134,21 +146,21 @@ router.post('/', auth, requireRole('superadmin'), async (req, res) => {
   }
 });
 
-/* ---------- UPDATE (superadmin) ---------- */
+/** UPDATE (superadmin) */
 router.patch('/:mongoId', auth, requireRole('superadmin'), async (req, res) => {
   try {
     const payload = {};
-    const setIf = (k, v) => { if (v !== undefined) payload[k] = (''+v).trim(); };
+    const setIf = (k, v) => {
+      if (v !== undefined) payload[k] = String(v).trim();
+    };
 
-    ['id','slug','code','name','communeName','region','imageUrl','photo'].forEach(k => {
+    ['id', 'slug', 'code', 'name', 'communeName', 'region', 'imageUrl', 'photo'].forEach((k) => {
       if (req.body[k] !== undefined) setIf(k, req.body[k]);
     });
 
-    if (payload.id) {
-      payload.id = payload.id.toLowerCase().replace(/\s+/g, '-');
-      if (!payload.slug) payload.slug = payload.id; // cohérence
-    }
-    if (payload.slug) payload.slug = payload.slug.toLowerCase().replace(/\s+/g, '-');
+    if (payload.id) payload.id = toKey(payload.id);
+    if (payload.slug) payload.slug = toKey(payload.slug);
+    if (!payload.slug && payload.id) payload.slug = payload.id;
 
     const updated = await Commune.findByIdAndUpdate(
       req.params.mongoId,
@@ -156,14 +168,14 @@ router.patch('/:mongoId', auth, requireRole('superadmin'), async (req, res) => {
       { new: true }
     );
     if (!updated) return res.status(404).json({ message: 'Commune introuvable' });
-    res.json(updated);
+    res.json(normalizeCommuneDoc(updated));
   } catch (e) {
     console.error('PATCH /api/communes/:id', e);
     res.status(500).json({ message: 'Erreur serveur' });
   }
 });
 
-/* ---------- DELETE (superadmin) ---------- */
+/** DELETE (superadmin) */
 router.delete('/:mongoId', auth, requireRole('superadmin'), async (req, res) => {
   try {
     const r = await Commune.deleteOne({ _id: req.params.mongoId });
