@@ -14,12 +14,15 @@ const logger = require('./logger');
 const runBackup = require('./scripts/backup');
 const { secretFingerprint } = require('./utils/jwt');
 
+const Commune = require('./models/Commune');
+
 const app = express();
 
 const PORT = process.env.PORT || 4000;
 const HOST = process.env.HOST || '0.0.0.0';
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/backend_admin';
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN || null;
+// accepte FRONTEND_ORIGIN ou FRONEND_ORIGIN (typo)
 const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || process.env.FRONEND_ORIGIN || '*';
 
 app.set('trust proxy', 1);
@@ -39,18 +42,16 @@ const ALLOWED_HEADERS = [
 
 app.use(
   cors({
-    origin: FRONTEND_ORIGIN === '*' ? true : FRONTEND_ORIGIN, // écho l’origin si '*'
+    origin: FRONTEND_ORIGIN === '*' ? true : FRONTEND_ORIGIN,
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders: ALLOWED_HEADERS,
   })
 );
 
-// Preflight explicite (optionnel, mais utile si proxies)
 app.options('*', (req, res) => {
   const origin = req.headers.origin || (FRONTEND_ORIGIN !== '*' ? FRONTEND_ORIGIN : '*');
   res.header('Access-Control-Allow-Origin', origin);
-  res.header('Vary', 'Origin');
   res.header('Access-Control-Allow-Credentials', 'true');
   res.header('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
   res.header(
@@ -77,39 +78,25 @@ app.use(
 
 app.get('/api/health', (_, res) => res.json({ status: 'ok', timestamp: Date.now() }));
 
-/* Routes */
+/* Routes API */
 app.use('/api', require('./routes/setup-admin'));
 app.use('/api', require('./routes/auth'));
 app.use('/api', require('./routes/me'));
-app.use('/api/change-password', (req, _res, next) => { 
-  console.log('[HIT] /api/change-password', req.method, req.path || '/'); 
-  next(); 
-}, require('./routes/changePassword'));
-
+app.use('/api/change-password', (req, _res, next) => { console.log('[HIT] /api/change-password', req.method, req.path || '/'); next(); }, require('./routes/changePassword'));
 app.use('/api/incidents', require('./routes/incidents'));
 app.use('/api/articles', require('./routes/articles'));
 app.use('/api/infos', require('./routes/infos'));
 app.use('/api/notifications', require('./routes/notifications'));
 app.use('/api/projects', require('./routes/projects'));
 app.use('/api/devices', require('./routes/devices'));
-app.use('/api/communes', communesRouter);
+app.use('/api', communesRouter);                      // /api/communes
 app.use('/api', require('./routes/userRoutes'));
 app.use('/api', require('./routes/subscriptions'));
 app.use('/api', require('./routes/debug'));
 
 app.get('/', (_, res) => res.send('API SecuriDem opérationnelle ✅'));
 
-// 404 API
-app.use('/api/*', (req, res) => {
-  res.status(404).json({ message: `Route API introuvable ❌ (${req.method} ${req.originalUrl})` });
-});
-
-// 🟡 Place le handler d’erreurs tout à la fin
-app.use((err, req, res, _next) => {
-  logger.error('Erreur serveur 🧨', { error: err.stack });
-  res.status(500).json({ message: 'Erreur interne du serveur' });
-});
-
+// Cron backup
 cron.schedule('0 3 * * *', async () => {
   logger.info('Lancement sauvegarde quotidienne');
   try {
@@ -120,12 +107,39 @@ cron.schedule('0 3 * * *', async () => {
   }
 });
 
+// Error handler
+app.use((err, req, res, _next) => {
+  logger.error('Erreur serveur 🧨', { error: err.stack });
+  res.status(500).json({ message: 'Erreur interne du serveur' });
+});
+
+// 404 API
+app.use('/api/*', (req, res) => {
+  res.status(404).json({ message: `Route API introuvable ❌ (${req.method} ${req.originalUrl})` });
+});
+
+// --------- Seed automatique si vide ----------
+async function ensureDefaultCommunes() {
+  const count = await Commune.countDocuments();
+  if (count > 0) return;
+
+  await Commune.insertMany([
+    { id: 'dembeni',   name: 'Dembéni',   region: 'Mayotte', imageUrl: '/uploads/communes/dembeni.jpg' },
+    { id: 'mamoudzou', name: 'Mamoudzou', region: 'Mayotte', imageUrl: '/uploads/communes/mamoudzou.jpg' },
+    { id: 'chirongui', name: 'Chirongui', region: 'Mayotte', imageUrl: '/uploads/communes/chirongui.jpg' },
+  ]);
+  logger.info('Communes par défaut insérées ✅');
+}
+
 mongoose
-  .connect(MONGODB_URI /* options inutiles en Mongoose v6+ */)
-  .then(() => {
+  .connect(MONGODB_URI, { useNewUrlParser: true, useUnifiedTopology: true })
+  .then(async () => {
     logger.info('MongoDB connecté ✅');
     logger.info(`JWT secret fingerprint: ${secretFingerprint()}`);
     if (!GITHUB_TOKEN) logger.warn('GITHUB_TOKEN manquant — endpoint /cve retournera []');
+
+    // Seed auto si la collection est vide
+    await ensureDefaultCommunes();
 
     app.listen(PORT, HOST, () => logger.info(`Serveur dispo sur http://${HOST}:${PORT} 🚀`));
   })
