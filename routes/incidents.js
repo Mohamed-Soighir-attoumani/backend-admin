@@ -1,4 +1,3 @@
-// backend/routes/incidents.js
 const express = require('express');
 const router = express.Router();
 const mongoose = require('mongoose');
@@ -26,8 +25,14 @@ function getPanelCommuneId(req) {
   ).trim();
 }
 
+/* ===== helper pour autoriser anonyme (mobile) ou connecté (panel) ===== */
+function authOptional(req, res, next) {
+  if (isMobile(req)) return next(); // mobile → pas d’auth JWT
+  return auth(req, res, next);      // panel → JWT requis
+}
+
 /* ──────────────── GET /api/incidents ────────────────
-   - MOBILE : deviceId obligatoire
+   - MOBILE : deviceId obligatoire (communeId optionnel)
    - PANEL  : 
        * superadmin -> communeId facultatif (renvoie tout si absent)
        * admin      -> communeId obligatoire et doit correspondre à son compte
@@ -118,35 +123,45 @@ router.get('/count', auth, requireRole('admin'), async (req, res) => {
   }
 });
 
-/* ──────────────── POST /api/incidents ──────────────── */
+/* ──────────────── POST /api/incidents ────────────────
+   - Mobile (clé app) : multipart/form-data, communeId OBLIGATOIRE
+   - Panel (si jamais utilisé) : passe aussi
+*/
 router.post('/', upload.single('media'), async (req, res) => {
   try {
     const {
       title,
       description,
       lieu,
-      status,
+      status,        // peut être omis par le mobile → défaut "En cours"
       latitude,
       longitude,
       adresse,
       adminComment,
       deviceId,
-      communeId, // 🔑 on veut le stocker si fourni par le mobile
-    } = req.body;
+      communeId,     // 🔑 on veut le stocker si fourni par le mobile
+    } = req.body || {};
 
-    if (!title || !description || !lieu || !status || !latitude || !longitude || !deviceId) {
+    // 🔒 si requête mobile → communeId et deviceId obligatoires
+    if (isMobile(req)) {
+      if (!deviceId) return res.status(400).json({ message: 'deviceId requis (mobile)' });
+      if (!communeId) return res.status(400).json({ message: 'communeId requis (mobile)' });
+    }
+
+    if (!title || !description || !lieu || !latitude || !longitude || !deviceId) {
       return res.status(400).json({ message: '❌ Champs requis manquants.' });
     }
 
-    const mediaUrl = req.file ? req.file.path : null;
-    const mimeType = req.file ? req.file.mimetype : null;
-    const mediaType = mimeType?.startsWith('video') ? 'video' : 'image';
+    // Cloudinary / multer-storage-cloudinary : path/secure_url/url selon config
+    const mediaUrl = req.file ? (req.file.path || req.file.secure_url || req.file.url) : null;
+    const mimeType = req.file ? (req.file.mimetype || '') : '';
+    const mediaType = mimeType.startsWith('video') ? 'video' : 'image';
 
     const newIncident = new Incident({
       title,
       description,
       lieu,
-      status,
+      status: status || 'En cours',   // ✅ défaut si absent
       latitude,
       longitude,
       adresse,
@@ -298,13 +313,5 @@ router.get('/:id', authOptional, async (req, res) => {
     res.status(500).json({ message: 'Erreur serveur' });
   }
 });
-
-/* ====== petit helper pour autoriser anonyme (mobile) ou connecté (panel) ====== */
-function authOptional(req, res, next) {
-  // si mobile → pas d’auth JWT
-  if (isMobile(req)) return next();
-  // sinon panel → auth JWT requise
-  return auth(req, res, next);
-}
 
 module.exports = router;
