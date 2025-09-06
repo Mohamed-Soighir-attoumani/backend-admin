@@ -1,8 +1,12 @@
+// backend/routes/communes.js
 const express = require('express');
 const router = express.Router();
 const Commune = require('../models/Commune');
 const auth = require('../middleware/authMiddleware');
 const requireRole = require('../middleware/requireRole');
+
+// Base: ce router sera monté sur /api/communes
+// donc ici on expose '/' | '/:mongoId' | '/seed' etc.
 
 // --------- GET public: liste + recherche ---------
 router.get('/', async (req, res) => {
@@ -25,7 +29,7 @@ router.get('/', async (req, res) => {
       .sort({ name: 1 })
       .lean();
 
-    res.json(communes); // <-- renvoie TOUJOURS un tableau
+    res.json(communes); // renvoie un tableau
   } catch (e) {
     console.error('GET /api/communes error:', e);
     res.status(500).json({ message: 'Erreur serveur' });
@@ -53,8 +57,8 @@ router.post('/', auth, requireRole('superadmin'), async (req, res) => {
     const normId = norm(id || slug || name).toLowerCase().replace(/\s+/g, '-');
 
     const created = await Commune.create({
-      id: normId || undefined,
-      slug: norm(slug),
+      id: normId,
+      slug: norm(slug) || normId, // <= on force slug=id si vide
       code: norm(code),
       name: norm(name),
       communeName: norm(communeName || name),
@@ -83,7 +87,11 @@ router.patch('/:mongoId', auth, requireRole('superadmin'), async (req, res) => {
       if (req.body[k] !== undefined) setIf(k, req.body[k]);
     });
 
-    if (payload.id) payload.id = payload.id.toLowerCase();
+    if (payload.id) {
+      payload.id = payload.id.toLowerCase().replace(/\s+/g, '-');
+      if (!payload.slug) payload.slug = payload.id; // garder cohérent
+    }
+    if (payload.slug) payload.slug = payload.slug.toLowerCase().replace(/\s+/g, '-');
 
     const updated = await Commune.findByIdAndUpdate(
       req.params.mongoId,
@@ -110,21 +118,22 @@ router.delete('/:mongoId', auth, requireRole('superadmin'), async (req, res) => 
   }
 });
 
-// --------- SEED rapide (protégé superadmin) ---------
+// --------- SEED rapide (superadmin) ---------
 router.post('/seed', auth, requireRole('superadmin'), async (_req, res) => {
   try {
     const samples = [
-      { id: 'dembeni',  name: 'Dembéni',  region: 'Mayotte', imageUrl: '/uploads/communes/dembeni.jpg' },
-      { id: 'mamoudzou',name: 'Mamoudzou',region: 'Mayotte', imageUrl: '/uploads/communes/mamoudzou.jpg' },
-      { id: 'chirongui',name: 'Chirongui',region: 'Mayotte', imageUrl: '/uploads/communes/chirongui.jpg' },
+      { id: 'dembeni',   name: 'Dembéni',   region: 'Mayotte', imageUrl: '/uploads/communes/dembeni.jpg' },
+      { id: 'mamoudzou', name: 'Mamoudzou', region: 'Mayotte', imageUrl: '/uploads/communes/mamoudzou.jpg' },
+      { id: 'chirongui', name: 'Chirongui', region: 'Mayotte', imageUrl: '/uploads/communes/chirongui.jpg' },
     ];
-    const ops = [];
+
     for (const s of samples) {
-      ops.push(
-        Commune.updateOne({ id: s.id }, { $setOnInsert: s }, { upsert: true })
+      await Commune.updateOne(
+        { id: s.id },
+        { $setOnInsert: { ...s, slug: s.id } }, // slug=id
+        { upsert: true }
       );
     }
-    await Promise.all(ops);
     const all = await Commune.find().sort({ name: 1 }).lean();
     res.status(201).json(all);
   } catch (e) {
