@@ -32,7 +32,8 @@ function optionalAuth(req, _res, next) {
 }
 
 /* ================== CREATE ================== */
-router.post('/', auth, requireRole('admin'), upload.single('image'), async (req, res) => {
+// ⬅️ Autoriser admin ET superadmin (sinon superadmin reçoit 403)
+router.post('/', auth, requireRole(['admin','superadmin']), upload.single('image'), async (req, res) => {
   try {
     let { name, description, visibility, communeId, priority, startAt, endAt } = req.body || {};
 
@@ -47,7 +48,14 @@ router.post('/', auth, requireRole('admin'), upload.single('image'), async (req,
       [];
 
     if (typeof audienceCommunes === 'string') {
-      audienceCommunes = audienceCommunes.split(',').map(s => s.trim()).filter(Boolean);
+      // support JSON ["a","b"] ou CSV "a,b"
+      try {
+        const maybeJson = JSON.parse(audienceCommunes);
+        audienceCommunes = Array.isArray(maybeJson) ? maybeJson : audienceCommunes.split(',');
+      } catch {
+        audienceCommunes = audienceCommunes.split(',');
+      }
+      audienceCommunes = audienceCommunes.map(s => s.trim()).filter(Boolean);
     }
     if (!Array.isArray(audienceCommunes)) audienceCommunes = [];
 
@@ -166,7 +174,8 @@ router.get('/:id', optionalAuth, async (req, res) => {
 });
 
 /* ================== UPDATE ================== */
-router.put('/:id', auth, requireRole('admin'), upload.single('image'), async (req, res) => {
+// ⬅️ Autoriser admin ET superadmin
+router.put('/:id', auth, requireRole(['admin','superadmin']), upload.single('image'), async (req, res) => {
   try {
     const { id } = req.params;
     if (!mongoose.Types.ObjectId.isValid(id)) return res.status(400).json({ message: 'ID invalide' });
@@ -182,9 +191,9 @@ router.put('/:id', auth, requireRole('admin'), upload.single('image'), async (re
     }
 
     const payload = {};
-    if (req.body.name)        payload.name = String(req.body.name).trim();
-    if (req.body.description) payload.description = String(req.body.description).trim();
-    if (req.file)             payload.imageUrl = req.file.path;
+    if (req.body.name != null)        payload.name = String(req.body.name).trim();
+    if (req.body.description != null) payload.description = String(req.body.description).trim();
+    if (req.file)                      payload.imageUrl = req.file.path;
 
     if (req.body.priority && ['normal','pinned','urgent'].includes(req.body.priority)) {
       payload.priority = req.body.priority;
@@ -212,9 +221,17 @@ router.put('/:id', auth, requireRole('admin'), upload.single('image'), async (re
         } else if (visibility === 'custom') {
           payload.communeId = '';
           if (typeof audienceCommunes === 'string') {
-            audienceCommunes = audienceCommunes.split(',').map(s => s.trim()).filter(Boolean);
+            // support JSON ou CSV
+            try {
+              const maybeJson = JSON.parse(audienceCommunes);
+              audienceCommunes = Array.isArray(maybeJson) ? maybeJson : audienceCommunes.split(',');
+            } catch {
+              audienceCommunes = audienceCommunes.split(',');
+            }
           }
-          payload.audienceCommunes = Array.isArray(audienceCommunes) ? audienceCommunes : [];
+          payload.audienceCommunes = Array.isArray(audienceCommunes)
+            ? audienceCommunes.map(s => String(s).trim()).filter(Boolean)
+            : [];
         } else if (visibility === 'global') {
           payload.communeId = '';
           payload.audienceCommunes = [];
@@ -231,7 +248,8 @@ router.put('/:id', auth, requireRole('admin'), upload.single('image'), async (re
 });
 
 /* ================== DELETE ================== */
-router.delete('/:id', auth, requireRole('admin'), async (req, res) => {
+// ⬅️ Autoriser admin ET superadmin
+router.delete('/:id', auth, requireRole(['admin','superadmin']), async (req, res) => {
   try {
     const { id } = req.params;
     if (!mongoose.Types.ObjectId.isValid(id)) return res.status(400).json({ message: 'ID invalide' });
