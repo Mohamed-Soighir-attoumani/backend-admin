@@ -1,53 +1,6 @@
 // backend/models/Admin.js
-const mongoose = require('mongoose');
+// Alias propre : réutilise exactement le même modèle/collection que User.
+// Ainsi, tout code qui importe "Admin" pointe sur la collection "users".
 
-const AdminSchema = new mongoose.Schema(
-  {
-    name: { type: String, default: '' },
-
-    // email "affiché"
-    email: { type: String, required: true, trim: true },
-
-    // email normalisé pour l’unicité
-    emailLower: { type: String, required: true, index: true },
-
-    password: { type: String, required: true, select: false },
-    role: { type: String, enum: ['admin', 'superadmin'], default: 'admin', index: true },
-
-    // multi-communes
-    communeId: { type: String, default: '', index: true },
-    communeName: { type: String, default: '' },
-
-    // UI
-    photo: { type: String, default: '' },
-
-    // statut & sécurité
-    isActive: { type: Boolean, default: true, index: true },
-    tokenVersion: { type: Number, default: 0 },
-  },
-  { timestamps: true }
-);
-
-// Unicité sur (emailLower, communeId) — communeId est normalisé (trim+lowercase)
-AdminSchema.index({ emailLower: 1, communeId: 1 }, { unique: true, name: 'uniq_email_commune' });
-
-// Normaliser avant validation
-AdminSchema.pre('validate', function (next) {
-  if (typeof this.email === 'string') {
-    this.email = this.email.trim();
-    this.emailLower = this.email.toLowerCase();
-  }
-  if (typeof this.communeId === 'string') {
-    this.communeId = this.communeId.trim().toLowerCase();
-  } else {
-    this.communeId = '';
-  }
-  next();
-});
-
-// sécurité JSON
-AdminSchema.set('toJSON', {
-  transform: (_doc, ret) => { delete ret.password; return ret; },
-});
-
-module.exports = mongoose.model('Admin', AdminSchema);
+const UserModel = require('./User');
+module.exports = UserModel;
