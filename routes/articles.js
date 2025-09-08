@@ -6,34 +6,53 @@ const mongoose = require('mongoose');
 const jwt = require('jsonwebtoken');
 
 const Article = require('../models/Article');
-const auth = require('../middleware/authMiddleware');
-const requireRole = require('../middleware/requireRole');
 const { storage } = require('../utils/cloudinary'); // multer-storage-cloudinary
 const { buildVisibilityQuery } = require('../utils/visibility');
 
 const upload = multer({ storage });
 
-/** Auth optionnelle (pour /GET) : récupère rôle/commune si un Bearer est présent */
-function optionalAuth(req, _res, next) {
-  const authz = req.header('authorization') || '';
-  if (authz.startsWith('Bearer ')) {
-    const token = authz.slice(7).trim();
-    try {
-      const payload = jwt.verify(token, process.env.JWT_SECRET);
-      req.user = {
-        role: payload.role,
-        communeId: payload.communeId || '',
-        email: payload.email || '',
-        id: payload.id ? String(payload.id) : '',
-      };
-    } catch (_) {}
+/* -------------------- utils auth/role -------------------- */
+function readBearer(req) {
+  const h = req.header('authorization') || req.header('Authorization') || '';
+  if (!h.startsWith('Bearer ')) return null;
+  return h.slice(7).trim();
+}
+function getUserFromReq(req) {
+  // tente req.user (si déjà peuplé par un middleware), sinon décode le token
+  if (req.user && (req.user.role || req.user.id)) return req.user;
+  const token = readBearer(req);
+  if (!token) return {};
+  try {
+    const payload = jwt.verify(token, process.env.JWT_SECRET);
+    return {
+      role: payload.role,
+      communeId: payload.communeId || '',
+      email: payload.email || '',
+      id: payload.id ? String(payload.id) : '',
+    };
+  } catch {
+    return {};
   }
+}
+function ensureAdminOrSuperadmin(req, res, next) {
+  const u = getUserFromReq(req);
+  if (!u || !u.role) return res.status(401).json({ message: 'Non authentifié' });
+  if (u.role !== 'admin' && u.role !== 'superadmin') {
+    return res.status(403).json({ message: 'Accès réservé aux admins' });
+  }
+  req.user = u; // s’assure que req.user existe pour la suite
+  next();
+}
+
+/* -------------------- Auth optionnelle pour GET -------------------- */
+function optionalAuth(req, _res, next) {
+  const u = getUserFromReq(req);
+  if (u && u.role) req.user = u;
   next();
 }
 
 /* ================== CREATE ================== */
-// ⬅️ Autorise admin ET superadmin
-router.post('/', auth, requireRole(['admin','superadmin']), upload.single('image'), async (req, res) => {
+router.post('/', ensureAdminOrSuperadmin, upload.single('image'), async (req, res) => {
   try {
     let { title, content, visibility, communeId, priority, startAt, endAt } = req.body || {};
 
@@ -41,7 +60,7 @@ router.post('/', auth, requireRole(['admin','superadmin']), upload.single('image
       return res.status(400).json({ message: 'Titre et contenu requis' });
     }
 
-    // audienceCommunes: peut arriver en JSON, CSV ou tableau (FormData)
+    // audienceCommunes: JSON, CSV ou tableau
     let audienceCommunes =
       req.body.audienceCommunes ??
       req.body['audienceCommunes[]'] ??
@@ -49,9 +68,8 @@ router.post('/', auth, requireRole(['admin','superadmin']), upload.single('image
 
     if (typeof audienceCommunes === 'string') {
       try {
-        // Support JSON stringifié ["a","b"] ou CSV "a,b"
-        const maybeJson = JSON.parse(audienceCommunes);
-        audienceCommunes = Array.isArray(maybeJson) ? maybeJson : audienceCommunes.split(',');
+        const maybe = JSON.parse(audienceCommunes);
+        audienceCommunes = Array.isArray(maybe) ? maybe : audienceCommunes.split(',');
       } catch {
         audienceCommunes = audienceCommunes.split(',');
       }
@@ -87,7 +105,7 @@ router.post('/', auth, requireRole(['admin','superadmin']), upload.single('image
         }
       } else if (base.visibility === 'custom') {
         base.communeId = '';
-        base.audienceCommunes = Array.isArray(audienceCommunes) ? audienceCommunes : [];
+        base.audienceCommunes = audienceCommunes;
       } else if (base.visibility === 'global') {
         base.communeId = '';
         base.audienceCommunes = [];
@@ -107,15 +125,6 @@ router.post('/', auth, requireRole(['admin','superadmin']), upload.single('image
 });
 
 /* ================== LIST ================== */
-/**
- * - Public + panel (auth optionnelle)
- * - Filtre période (?period=7|30) optionnel
- * - Multi-commune (x-commune-id ou ?communeId)
- * - Admin : ne voit QUE ses propres articles (authorId = req.user.id)
- * - Superadmin : voit tout (avec filtre éventuel)
- * - Back-compat : inclut aussi les anciens docs sans visibility/communeId
- * - startAt/endAt : appliqué uniquement au public (panel voit tout)
- */
 router.get('/', optionalAuth, async (req, res) => {
   try {
     const { period } = req.query;
@@ -130,7 +139,7 @@ router.get('/', optionalAuth, async (req, res) => {
       communeId,
       userRole: role,
       includeLegacy: true,
-      includeTimeWindow: false, // on gère ci-dessous
+      includeTimeWindow: false,
     }) || {};
 
     if (!isPanel) {
@@ -166,7 +175,7 @@ router.get('/', optionalAuth, async (req, res) => {
   }
 });
 
-/* ================== GET BY ID (lecture) ================== */
+/* ================== GET BY ID ================== */
 router.get('/:id', optionalAuth, async (req, res) => {
   try {
     const { id } = req.params;
@@ -183,8 +192,7 @@ router.get('/:id', optionalAuth, async (req, res) => {
 });
 
 /* ================== UPDATE ================== */
-// ⬅️ Autorise admin ET superadmin
-router.put('/:id', auth, requireRole(['admin','superadmin']), upload.single('image'), async (req, res) => {
+router.put('/:id', ensureAdminOrSuperadmin, upload.single('image'), async (req, res) => {
   try {
     const { id } = req.params;
     if (!mongoose.Types.ObjectId.isValid(id)) return res.status(400).json({ message: 'ID invalide' });
@@ -215,7 +223,6 @@ router.put('/:id', auth, requireRole(['admin','superadmin']), upload.single('ima
 
     if (req.user.role === 'superadmin') {
       const { visibility, communeId } = req.body || {};
-      // audienceCommunes
       let audienceCommunes =
         req.body.audienceCommunes ??
         req.body['audienceCommunes[]'] ??
@@ -233,8 +240,8 @@ router.put('/:id', auth, requireRole(['admin','superadmin']), upload.single('ima
           payload.communeId = '';
           if (typeof audienceCommunes === 'string') {
             try {
-              const maybeJson = JSON.parse(audienceCommunes);
-              audienceCommunes = Array.isArray(maybeJson) ? maybeJson : audienceCommunes.split(',');
+              const maybe = JSON.parse(audienceCommunes);
+              audienceCommunes = Array.isArray(maybe) ? maybe : audienceCommunes.split(',');
             } catch {
               audienceCommunes = audienceCommunes.split(',');
             }
@@ -258,8 +265,7 @@ router.put('/:id', auth, requireRole(['admin','superadmin']), upload.single('ima
 });
 
 /* ================== DELETE ================== */
-// ⬅️ Autorise admin ET superadmin
-router.delete('/:id', auth, requireRole(['admin','superadmin']), async (req, res) => {
+router.delete('/:id', ensureAdminOrSuperadmin, async (req, res) => {
   try {
     const { id } = req.params;
     if (!mongoose.Types.ObjectId.isValid(id)) return res.status(400).json({ message: 'ID invalide' });
