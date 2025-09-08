@@ -1,4 +1,3 @@
-// backend/models/Notification.js
 const mongoose = require('mongoose');
 
 const notificationSchema = new mongoose.Schema(
@@ -27,5 +26,21 @@ const notificationSchema = new mongoose.Schema(
 notificationSchema.index({ visibility: 1, communeId: 1 });
 notificationSchema.index({ visibility: 1, audienceCommunes: 1 });
 notificationSchema.index({ createdAt: -1 });
+
+/** 🔧 Normalisation BEFORE save (source of truth) */
+notificationSchema.pre('validate', function (next) {
+  // communeId en lower-case trim
+  if (typeof this.communeId === 'string') {
+    this.communeId = this.communeId.trim().toLowerCase();
+  }
+  // audienceCommunes: lower-case + trim + unique
+  if (Array.isArray(this.audienceCommunes)) {
+    const normed = this.audienceCommunes
+      .map((s) => String(s || '').trim().toLowerCase())
+      .filter(Boolean);
+    this.audienceCommunes = Array.from(new Set(normed));
+  }
+  next();
+});
 
 module.exports = mongoose.model('Notification', notificationSchema);
