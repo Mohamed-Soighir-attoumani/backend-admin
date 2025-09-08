@@ -32,7 +32,8 @@ function optionalAuth(req, _res, next) {
 }
 
 /* ================== CREATE ================== */
-router.post('/', auth, requireRole('admin'), upload.single('image'), async (req, res) => {
+// ⬅️ Autorise admin ET superadmin
+router.post('/', auth, requireRole(['admin','superadmin']), upload.single('image'), async (req, res) => {
   try {
     let { title, content, visibility, communeId, priority, startAt, endAt } = req.body || {};
 
@@ -47,8 +48,14 @@ router.post('/', auth, requireRole('admin'), upload.single('image'), async (req,
       [];
 
     if (typeof audienceCommunes === 'string') {
-      // support CSV "a,b,c"
-      audienceCommunes = audienceCommunes.split(',').map(s => s.trim()).filter(Boolean);
+      try {
+        // Support JSON stringifié ["a","b"] ou CSV "a,b"
+        const maybeJson = JSON.parse(audienceCommunes);
+        audienceCommunes = Array.isArray(maybeJson) ? maybeJson : audienceCommunes.split(',');
+      } catch {
+        audienceCommunes = audienceCommunes.split(',');
+      }
+      audienceCommunes = audienceCommunes.map(s => String(s).trim()).filter(Boolean);
     }
     if (!Array.isArray(audienceCommunes)) audienceCommunes = [];
 
@@ -168,7 +175,6 @@ router.get('/:id', optionalAuth, async (req, res) => {
     const doc = await Article.findById(id).lean();
     if (!doc) return res.status(404).json({ message: 'Article introuvable' });
 
-    // Lecture publique : OK. Panel : OK. (On peut restreindre si besoin)
     res.json(doc);
   } catch (err) {
     console.error('❌ GET /articles/:id', err);
@@ -177,7 +183,8 @@ router.get('/:id', optionalAuth, async (req, res) => {
 });
 
 /* ================== UPDATE ================== */
-router.put('/:id', auth, requireRole('admin'), upload.single('image'), async (req, res) => {
+// ⬅️ Autorise admin ET superadmin
+router.put('/:id', auth, requireRole(['admin','superadmin']), upload.single('image'), async (req, res) => {
   try {
     const { id } = req.params;
     if (!mongoose.Types.ObjectId.isValid(id)) return res.status(400).json({ message: 'ID invalide' });
@@ -193,8 +200,8 @@ router.put('/:id', auth, requireRole('admin'), upload.single('image'), async (re
     }
 
     const payload = {};
-    if (req.body.title)   payload.title = String(req.body.title).trim();
-    if (req.body.content) payload.content = String(req.body.content).trim();
+    if (req.body.title != null)   payload.title   = String(req.body.title).trim();
+    if (req.body.content != null) payload.content = String(req.body.content).trim();
 
     if (req.file) payload.imageUrl = req.file.path;
 
@@ -225,9 +232,16 @@ router.put('/:id', auth, requireRole('admin'), upload.single('image'), async (re
         } else if (visibility === 'custom') {
           payload.communeId = '';
           if (typeof audienceCommunes === 'string') {
-            audienceCommunes = audienceCommunes.split(',').map(s => s.trim()).filter(Boolean);
+            try {
+              const maybeJson = JSON.parse(audienceCommunes);
+              audienceCommunes = Array.isArray(maybeJson) ? maybeJson : audienceCommunes.split(',');
+            } catch {
+              audienceCommunes = audienceCommunes.split(',');
+            }
           }
-          payload.audienceCommunes = Array.isArray(audienceCommunes) ? audienceCommunes : [];
+          payload.audienceCommunes = Array.isArray(audienceCommunes)
+            ? audienceCommunes.map(s => String(s).trim()).filter(Boolean)
+            : [];
         } else if (visibility === 'global') {
           payload.communeId = '';
           payload.audienceCommunes = [];
@@ -244,7 +258,8 @@ router.put('/:id', auth, requireRole('admin'), upload.single('image'), async (re
 });
 
 /* ================== DELETE ================== */
-router.delete('/:id', auth, requireRole('admin'), async (req, res) => {
+// ⬅️ Autorise admin ET superadmin
+router.delete('/:id', auth, requireRole(['admin','superadmin']), async (req, res) => {
   try {
     const { id } = req.params;
     if (!mongoose.Types.ObjectId.isValid(id)) return res.status(400).json({ message: 'ID invalide' });
