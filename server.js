@@ -75,8 +75,10 @@ app.use('/api/notifications', require('./routes/notifications'));
 app.use('/api/projects', require('./routes/projects'));
 app.use('/api/devices', require('./routes/devices'));
 
-// IMPORTANT: on monte bien le router sur /api/communes
+// IMPORTANT: router des communes
 app.use('/api/communes', communesRouter);
+// ✅ Alias public pour couvrir les appels mobile sans /api
+app.use('/communes', communesRouter);
 
 app.use('/api', require('./routes/userRoutes'));
 app.use('/api', require('./routes/subscriptions'));
