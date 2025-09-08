@@ -1,4 +1,3 @@
-// backend/routes/notifications.js
 const express = require('express');
 const router = express.Router();
 const mongoose = require('mongoose');
@@ -7,6 +6,8 @@ const Notification = require('../models/Notification');
 const auth = require('../middleware/authMiddleware');
 const requireRole = require('../middleware/requireRole');
 const { buildVisibilityQuery } = require('../utils/visibility');
+
+const normCid = (v) => String(v || '').trim().toLowerCase();
 
 /** Auth optionnelle: si Authorization présent, on essaie d’extraire quelques infos */
 function optionalAuth(req, _res, next) {
@@ -27,7 +28,7 @@ function optionalAuth(req, _res, next) {
 }
 
 /* --------------------- CREATE (panel) --------------------- */
-router.post('/', auth, requireRole('admin'), async (req, res) => {
+router.post('/', auth, requireRole(['admin', 'superadmin']), async (req, res) => {
   try {
     let {
       title,
@@ -49,14 +50,13 @@ router.post('/', auth, requireRole('admin'), async (req, res) => {
     message = String(message).trim();
     priority = ['normal','pinned','urgent'].includes(priority) ? priority : 'normal';
 
-    // Conversion dates si strings
     const toDateOrNull = (v) => (v ? new Date(v) : null);
 
     const base = {
       title,
       message,
       visibility: 'local',
-      communeId: req.user.communeId || '',
+      communeId: normCid(req.user.communeId || ''),
       audienceCommunes: [],
       priority,
       startAt: toDateOrNull(startAt),
@@ -70,12 +70,13 @@ router.post('/', auth, requireRole('admin'), async (req, res) => {
         base.visibility = visibility;
       }
       if (base.visibility === 'local') {
-        base.communeId = String(communeId || '').trim();
+        base.communeId = normCid(communeId);
         if (!base.communeId) {
           return res.status(400).json({ message: 'communeId requis pour visibility=local' });
         }
       } else if (base.visibility === 'custom') {
-        base.audienceCommunes = Array.isArray(audienceCommunes) ? audienceCommunes : [];
+        const arr = Array.isArray(audienceCommunes) ? audienceCommunes : [];
+        base.audienceCommunes = arr.map((s) => String(s || '').trim().toLowerCase()).filter(Boolean);
         base.communeId = '';
       } else if (base.visibility === 'global') {
         base.communeId = '';
@@ -97,29 +98,20 @@ router.post('/', auth, requireRole('admin'), async (req, res) => {
 });
 
 /* ----------------- MARK ALL READ (public, multi-commune) ----------------- */
-/**
- * Marque comme lues les notifications visibles pour une commune donnée.
- * communeId peut être fourni dans:
- *  - body.communeId (préféré)
- *  - header "x-commune-id"
- *  - query ?communeId=
- * Si aucun communeId n’est fourni, on marque tout (comportement antérieur).
- */
 router.patch('/mark-all-read', async (req, res) => {
   try {
-    const bodyCid   = (req.body?.communeId || '').trim();
-    const headerCid = (req.header('x-commune-id') || '').trim();
-    const queryCid  = (req.query?.communeId || '').trim();
+    const bodyCid   = normCid(req.body?.communeId || '');
+    const headerCid = normCid(req.header('x-commune-id') || '');
+    const queryCid  = normCid(req.query?.communeId || '');
     const communeId = bodyCid || headerCid || queryCid || '';
 
     let filter = {};
     if (communeId) {
-      // Filtre des notifs visibles pour cette commune (mêmes règles que GET /notifications côté public)
       filter = buildVisibilityQuery({
         communeId,
         userRole: null,        // public
-        includeLegacy: true,   // inclure anciens docs sans visibilité
-        includeTimeWindow: false, // on ne restreint pas par startAt/endAt pour le marquage
+        includeLegacy: true,
+        includeTimeWindow: false,
       }) || {};
     }
 
@@ -136,7 +128,7 @@ router.patch('/mark-all-read', async (req, res) => {
 });
 
 /* ------------------------ UPDATE ------------------------- */
-router.patch('/:id', auth, requireRole('admin'), async (req, res) => {
+router.patch('/:id', auth, requireRole(['admin','superadmin']), async (req, res) => {
   const { id } = req.params;
   if (!mongoose.Types.ObjectId.isValid(id)) {
     return res.status(400).json({ message: 'ID invalide' });
@@ -148,13 +140,11 @@ router.patch('/:id', auth, requireRole('admin'), async (req, res) => {
 
     // Admin: ne peut modifier que LOCAL de sa commune
     if (req.user.role === 'admin') {
-      if (current.visibility !== 'local' || current.communeId !== (req.user.communeId || '')) {
+      if (current.visibility !== 'local' || current.communeId !== normCid(req.user.communeId || '')) {
         return res.status(403).json({ message: 'Interdit pour votre commune' });
       }
-      // Optionnel : si vous voulez limiter à ses propres notifs:
-      // if (String(current.authorId || '') !== String(req.user.id || '')) {
-      //   return res.status(403).json({ message: 'Vous ne pouvez éditer que vos propres notifications' });
-      // }
+      // Optionnel : limiter à ses propres notifs
+      // if (String(current.authorId || '') !== String(req.user.id || '')) { ... }
     }
 
     const payload = {};
@@ -176,14 +166,15 @@ router.patch('/:id', auth, requireRole('admin'), async (req, res) => {
       if (visibility && ['local','global','custom'].includes(visibility)) {
         payload.visibility = visibility;
         if (visibility === 'local') {
-          payload.communeId = String(communeId || '').trim();
+          payload.communeId = normCid(communeId);
           payload.audienceCommunes = [];
           if (!payload.communeId) {
             return res.status(400).json({ message: 'communeId requis pour visibility=local' });
           }
         } else if (visibility === 'custom') {
           payload.communeId = '';
-          payload.audienceCommunes = Array.isArray(audienceCommunes) ? audienceCommunes : [];
+          const arr = Array.isArray(audienceCommunes) ? audienceCommunes : [];
+          payload.audienceCommunes = arr.map((s) => String(s || '').trim().toLowerCase()).filter(Boolean);
         } else if (visibility === 'global') {
           payload.communeId = '';
           payload.audienceCommunes = [];
@@ -200,7 +191,7 @@ router.patch('/:id', auth, requireRole('admin'), async (req, res) => {
 });
 
 /* ------------------------ DELETE ------------------------- */
-router.delete('/:id', auth, requireRole('admin'), async (req, res) => {
+router.delete('/:id', auth, requireRole(['admin','superadmin']), async (req, res) => {
   const { id } = req.params;
   if (!mongoose.Types.ObjectId.isValid(id)) {
     return res.status(400).json({ message: 'ID invalide' });
@@ -211,13 +202,9 @@ router.delete('/:id', auth, requireRole('admin'), async (req, res) => {
     if (!current) return res.status(404).json({ message: 'Notification non trouvée' });
 
     if (req.user.role === 'admin') {
-      if (current.visibility !== 'local' || current.communeId !== (req.user.communeId || '')) {
+      if (current.visibility !== 'local' || current.communeId !== normCid(req.user.communeId || '')) {
         return res.status(403).json({ message: 'Interdit pour votre commune' });
       }
-      // Optionnel : limiter à ses propres notifs
-      // if (String(current.authorId || '') !== String(req.user.id || '')) {
-      //   return res.status(403).json({ message: 'Vous ne pouvez supprimer que vos propres notifications' });
-      // }
     }
 
     await Notification.deleteOne({ _id: id });
@@ -229,25 +216,17 @@ router.delete('/:id', auth, requireRole('admin'), async (req, res) => {
 });
 
 /* ------------------------- LIST -------------------------- */
-/**
- * - Public + panel (auth optionnelle)
- * - Filtrage période (?period=7|30)
- * - Multi-commune: header x-commune-id ou ?communeId=
- * - Inclut AUSSI les anciennes notifications (sans visibility/communeId)
- * - Fenêtre d’affichage (startAt/endAt) : APPLIQUÉE UNIQUEMENT au public
- */
 router.get('/', optionalAuth, async (req, res) => {
   try {
     const { period } = req.query;
 
-    const headerCid = (req.header('x-commune-id') || '').trim();
-    const queryCid  = (req.query.communeId || '').trim();
+    const headerCid = normCid(req.header('x-commune-id') || '');
+    const queryCid  = normCid(req.query.communeId || '');
     const communeId = headerCid || queryCid || '';
 
     const role = req.user?.role || null;
     const isPanel = role === 'admin' || role === 'superadmin';
 
-    // Base via util: inclure anciens documents aussi
     const filter = buildVisibilityQuery({
       communeId,
       userRole: role,
@@ -274,7 +253,7 @@ router.get('/', optionalAuth, async (req, res) => {
       filter.createdAt = Object.assign(filter.createdAt || {}, { $gte: fromDate });
     }
 
-    // Admin simple : ne voir QUE ses propres notifications
+    // Admin simple : ne voir QUE ses propres notifications (pour le panel)
     if (role === 'admin' && req.user?.id) {
       filter.authorId = String(req.user.id);
     }
