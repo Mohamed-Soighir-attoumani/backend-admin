@@ -144,6 +144,25 @@ router.get('/count', auth, requireRole('admin','superadmin'), async (req, res) =
   }
 });
 
+// GET /api/devices/public-count  (public app, sécurisée par x-app-key)
+router.get('/public-count', requireAppKey, async (req, res) => {
+  try {
+    const nd = Math.max(1, parseInt(req.query.activeDays || '30', 10));
+    const since = new Date(Date.now() - nd * 24 * 60 * 60 * 1000);
+
+    const [total, active] = await Promise.all([
+      Device.countDocuments({}),
+      Device.countDocuments({ lastSeenAt: { $gte: since } }),
+    ]);
+
+    res.json({ count: total, active, activeDays: nd });
+  } catch (e) {
+    console.error('GET /devices/public-count', e);
+    res.status(500).json({ message: 'Erreur serveur' });
+  }
+});
+
+
 /**
  * GET /api/devices (admin)
  */
