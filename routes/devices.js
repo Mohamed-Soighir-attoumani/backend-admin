@@ -1,3 +1,4 @@
+// backend/routes/devices.js
 const express = require('express');
 const mongoose = require('mongoose');
 const auth = require('../middleware/authMiddleware');
@@ -6,6 +7,7 @@ const Device = require('../models/Device');
 
 const router = express.Router();
 const isObjectId = (id) => mongoose.Types.ObjectId.isValid(id || '');
+
 const APP_KEY = process.env.MOBILE_APP_KEY || null;
 
 // --------- Protection côté app (clé) ---------
@@ -125,6 +127,35 @@ router.post('/ping', requireAppKey, async (req, res) => {
 });
 
 /**
+ * GET /api/devices/public-count  (public app, sécurisée par x-app-key)
+ * ?activeDays=30 (par défaut)
+ * ?communeId=<id> (optionnel) -> filtre par commune
+ */
+router.get('/public-count', requireAppKey, async (req, res) => {
+  try {
+    const nd = Math.max(1, parseInt(req.query.activeDays || '30', 10));
+    const since = new Date(Date.now() - nd * 24 * 60 * 60 * 1000);
+
+    const filter = {};
+    const activeFilter = { lastSeenAt: { $gte: since } };
+    if (req.query.communeId) {
+      filter.communeId = String(req.query.communeId);
+      activeFilter.communeId = String(req.query.communeId);
+    }
+
+    const [total, active] = await Promise.all([
+      Device.countDocuments(filter),
+      Device.countDocuments(activeFilter),
+    ]);
+
+    res.json({ count: total, active, activeDays: nd });
+  } catch (e) {
+    console.error('GET /devices/public-count', e);
+    res.status(500).json({ message: 'Erreur serveur' });
+  }
+});
+
+/**
  * GET /api/devices/count  (admin)
  */
 router.get('/count', auth, requireRole('admin','superadmin'), async (req, res) => {
@@ -143,25 +174,6 @@ router.get('/count', auth, requireRole('admin','superadmin'), async (req, res) =
     res.status(500).json({ message: 'Erreur serveur' });
   }
 });
-
-// GET /api/devices/public-count  (public app, sécurisée par x-app-key)
-router.get('/public-count', requireAppKey, async (req, res) => {
-  try {
-    const nd = Math.max(1, parseInt(req.query.activeDays || '30', 10));
-    const since = new Date(Date.now() - nd * 24 * 60 * 60 * 1000);
-
-    const [total, active] = await Promise.all([
-      Device.countDocuments({}),
-      Device.countDocuments({ lastSeenAt: { $gte: since } }),
-    ]);
-
-    res.json({ count: total, active, activeDays: nd });
-  } catch (e) {
-    console.error('GET /devices/public-count', e);
-    res.status(500).json({ message: 'Erreur serveur' });
-  }
-});
-
 
 /**
  * GET /api/devices (admin)
