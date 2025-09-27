@@ -5,7 +5,7 @@ const multer = require('multer');
 const mongoose = require('mongoose');
 
 const Article = require('../models/Article');
-const auth = require('../middleware/authMiddleware'); // <-- utilise le middleware centralisé
+const auth = require('../middleware/authMiddleware'); // middleware centralisé (hydrate req.user)
 const { storage } = require('../utils/cloudinary');   // multer-storage-cloudinary
 const { buildVisibilityQuery } = require('../utils/visibility');
 
@@ -25,7 +25,6 @@ function ensureAdminOrSuperadmin(req, res, next) {
 /**
  * Auth optionnelle : ne fait rien si pas de token.
  * On NE décode PAS le token ici (on laisse ce travail au middleware auth).
- * Cette middleware sert juste d’emplacement futur si tu veux enrichir req sans forcer l’auth.
  */
 function optionalAuth(_req, _res, next) {
   return next();
@@ -116,29 +115,33 @@ router.post(
   }
 );
 
-/* ================== LIST ================== */
-router.get('/', optionalAuth, async (req, res) => {
+/* ================== LIST (PANEL + PUBLIC) ================== */
+router.get('/', auth, async (req, res) => {
   try {
     const { period } = req.query;
 
-    // Commune reçue explicitement (pour le site public par ex.)
+    // 1) Commune reçue explicitement (prioritaire)
     const headerCid = (req.header('x-commune-id') || '').trim();
     const queryCid  = (req.query.communeId || '').trim();
-    const communeId = headerCid || queryCid || '';
 
-    // Si la requête vient du panel authentifié, tu peux passer par req.user
+    // 2) Si rien fourni : on prend la commune de l'admin connecté (panel),
+    //    sauf si superadmin (il peut voir globalement sans commune)
     const role = req.user?.role || null;
     const isPanel = role === 'admin' || role === 'superadmin';
+    const communeId =
+      headerCid ||
+      queryCid ||
+      (isPanel && req.user.role !== 'superadmin' ? (req.user?.communeId || '') : '');
 
-    // Construit le filtre de visibilité
+    // 3) Construit le filtre de visibilité
     const filter = buildVisibilityQuery({
-      communeId,
+      communeId,         // peut être '' ou undefined pour superadmin sans commune ciblée
       userRole: role,
       includeLegacy: true,
       includeTimeWindow: false,
     }) || {};
 
-    // Sur l’interface publique (non panel), on applique la fenêtre d’affichage
+    // 4) Fenêtre d'affichage seulement si ce n'est PAS le panel
     if (!isPanel) {
       const now = new Date();
       const timeClauses = [
@@ -149,17 +152,18 @@ router.get('/', optionalAuth, async (req, res) => {
       else filter.$and = timeClauses;
     }
 
-    // Filtres rapides par période
+    // 5) (Option) — Si tu veux restreindre un admin à ses propres articles,
+    //    décommente la ligne ci-dessous. Par défaut on laisse voir toute la commune.
+    // if (role === 'admin' && req.user?.id) {
+    //   filter.authorId = String(req.user.id);
+    // }
+
+    // 6) Période rapide
     if (period === '7' || period === '30') {
       const days = parseInt(period, 10);
       const fromDate = new Date();
       fromDate.setDate(fromDate.getDate() - days);
       filter.createdAt = Object.assign(filter.createdAt || {}, { $gte: fromDate });
-    }
-
-    // Un admin simple ne voit que ses propres articles dans le panel
-    if (role === 'admin' && req.user?.id) {
-      filter.authorId = String(req.user.id);
     }
 
     const docs = await Article.find(filter)
