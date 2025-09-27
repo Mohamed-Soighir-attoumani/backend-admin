@@ -3,138 +3,134 @@ const express = require('express');
 const router = express.Router();
 const multer = require('multer');
 const mongoose = require('mongoose');
-const jwt = require('jsonwebtoken');
 
 const Article = require('../models/Article');
-const { storage } = require('../utils/cloudinary'); // multer-storage-cloudinary
+const auth = require('../middleware/authMiddleware'); // <-- utilise le middleware centralisé
+const { storage } = require('../utils/cloudinary');   // multer-storage-cloudinary
 const { buildVisibilityQuery } = require('../utils/visibility');
 
 const upload = multer({ storage });
 
-/* -------------------- utils auth/role -------------------- */
-function readBearer(req) {
-  const h = req.header('authorization') || req.header('Authorization') || '';
-  if (!h.startsWith('Bearer ')) return null;
-  return h.slice(7).trim();
-}
-function getUserFromReq(req) {
-  // tente req.user (si déjà peuplé par un middleware), sinon décode le token
-  if (req.user && (req.user.role || req.user.id)) return req.user;
-  const token = readBearer(req);
-  if (!token) return {};
-  try {
-    const payload = jwt.verify(token, process.env.JWT_SECRET);
-    return {
-      role: payload.role,
-      communeId: payload.communeId || '',
-      email: payload.email || '',
-      id: payload.id ? String(payload.id) : '',
-    };
-  } catch {
-    return {};
-  }
-}
+/* -------------------- Helpers Rôles -------------------- */
 function ensureAdminOrSuperadmin(req, res, next) {
-  const u = getUserFromReq(req);
-  if (!u || !u.role) return res.status(401).json({ message: 'Non authentifié' });
-  if (u.role !== 'admin' && u.role !== 'superadmin') {
+  if (!req.user) {
+    return res.status(401).json({ message: 'Non authentifié' });
+  }
+  if (req.user.role !== 'admin' && req.user.role !== 'superadmin') {
     return res.status(403).json({ message: 'Accès réservé aux admins' });
   }
-  req.user = u; // s’assure que req.user existe pour la suite
   next();
 }
 
-/* -------------------- Auth optionnelle pour GET -------------------- */
-function optionalAuth(req, _res, next) {
-  const u = getUserFromReq(req);
-  if (u && u.role) req.user = u;
-  next();
+/**
+ * Auth optionnelle : ne fait rien si pas de token.
+ * On NE décode PAS le token ici (on laisse ce travail au middleware auth).
+ * Cette middleware sert juste d’emplacement futur si tu veux enrichir req sans forcer l’auth.
+ */
+function optionalAuth(_req, _res, next) {
+  return next();
 }
 
 /* ================== CREATE ================== */
-router.post('/', ensureAdminOrSuperadmin, upload.single('image'), async (req, res) => {
-  try {
-    let { title, content, visibility, communeId, priority, startAt, endAt } = req.body || {};
+router.post(
+  '/',
+  auth, // <-- hydrate req.user (avec communeId depuis la BDD)
+  ensureAdminOrSuperadmin,
+  upload.single('image'),
+  async (req, res) => {
+    try {
+      let { title, content, visibility, communeId, priority, startAt, endAt } = req.body || {};
 
-    if (!title || !content) {
-      return res.status(400).json({ message: 'Titre et contenu requis' });
-    }
-
-    // audienceCommunes: JSON, CSV ou tableau
-    let audienceCommunes =
-      req.body.audienceCommunes ??
-      req.body['audienceCommunes[]'] ??
-      [];
-
-    if (typeof audienceCommunes === 'string') {
-      try {
-        const maybe = JSON.parse(audienceCommunes);
-        audienceCommunes = Array.isArray(maybe) ? maybe : audienceCommunes.split(',');
-      } catch {
-        audienceCommunes = audienceCommunes.split(',');
+      if (!title || !content) {
+        return res.status(400).json({ message: 'Titre et contenu requis' });
       }
-      audienceCommunes = audienceCommunes.map(s => String(s).trim()).filter(Boolean);
-    }
-    if (!Array.isArray(audienceCommunes)) audienceCommunes = [];
 
-    const toDateOrNull = v => (v ? new Date(v) : null);
-    const imageUrl = req.file ? req.file.path : null;
+      // audienceCommunes: JSON, CSV ou tableau
+      let audienceCommunes =
+        req.body.audienceCommunes ??
+        req.body['audienceCommunes[]'] ??
+        [];
 
-    const base = {
-      title: String(title).trim(),
-      content: String(content).trim(),
-      imageUrl,
-      visibility: 'local',
-      communeId: req.user.communeId || '',
-      audienceCommunes: [],
-      priority: ['normal','pinned','urgent'].includes(priority) ? priority : 'normal',
-      startAt: toDateOrNull(startAt),
-      endAt: toDateOrNull(endAt),
-      authorId: req.user.id,
-      authorEmail: req.user.email,
-    };
-
-    if (req.user.role === 'superadmin') {
-      if (visibility && ['local','global','custom'].includes(visibility)) {
-        base.visibility = visibility;
-      }
-      if (base.visibility === 'local') {
-        base.communeId = String(communeId || '').trim();
-        if (!base.communeId) {
-          return res.status(400).json({ message: 'communeId requis pour visibility=local' });
+      if (typeof audienceCommunes === 'string') {
+        try {
+          const maybe = JSON.parse(audienceCommunes);
+          audienceCommunes = Array.isArray(maybe) ? maybe : audienceCommunes.split(',');
+        } catch {
+          audienceCommunes = audienceCommunes.split(',');
         }
-      } else if (base.visibility === 'custom') {
-        base.communeId = '';
-        base.audienceCommunes = audienceCommunes;
-      } else if (base.visibility === 'global') {
-        base.communeId = '';
-        base.audienceCommunes = [];
+        audienceCommunes = audienceCommunes.map(s => String(s).trim()).filter(Boolean);
       }
-    } else {
-      if (!base.communeId) {
-        return res.status(403).json({ message: 'Votre compte n’est pas rattaché à une commune' });
-      }
-    }
+      if (!Array.isArray(audienceCommunes)) audienceCommunes = [];
 
-    const doc = await Article.create(base);
-    res.status(201).json(doc);
-  } catch (err) {
-    console.error('❌ POST /articles', err);
-    res.status(500).json({ message: 'Erreur serveur' });
+      const toDateOrNull = v => (v ? new Date(v) : null);
+      const imageUrl = req.file ? req.file.path : null;
+
+      // Base du document
+      const base = {
+        title: String(title).trim(),
+        content: String(content).trim(),
+        imageUrl,
+        visibility: 'local',             // valeur par défaut
+        communeId: req.user.communeId || '',
+        audienceCommunes: [],
+        priority: ['normal','pinned','urgent'].includes(priority) ? priority : 'normal',
+        startAt: toDateOrNull(startAt),
+        endAt: toDateOrNull(endAt),
+        authorId: req.user.id,
+        authorEmail: req.user.email,
+      };
+
+      if (req.user.role === 'superadmin') {
+        // Un superadmin peut définir la visibilité
+        if (visibility && ['local','global','custom'].includes(visibility)) {
+          base.visibility = visibility;
+        }
+        if (base.visibility === 'local') {
+          // local : communeId requis (string)
+          base.communeId = String(communeId || '').trim();
+          if (!base.communeId) {
+            return res.status(400).json({ message: 'communeId requis pour visibility=local' });
+          }
+        } else if (base.visibility === 'custom') {
+          base.communeId = '';
+          base.audienceCommunes = audienceCommunes;
+        } else if (base.visibility === 'global') {
+          base.communeId = '';
+          base.audienceCommunes = [];
+        }
+      } else {
+        // Admin simple : doit être rattaché à une commune
+        if (!base.communeId) {
+          return res.status(403).json({ message: 'Votre compte n’est pas rattaché à une commune' });
+        }
+        // force la visibilité locale pour un admin classique
+        base.visibility = 'local';
+      }
+
+      const doc = await Article.create(base);
+      res.status(201).json(doc);
+    } catch (err) {
+      console.error('❌ POST /articles', err);
+      res.status(500).json({ message: 'Erreur serveur' });
+    }
   }
-});
+);
 
 /* ================== LIST ================== */
 router.get('/', optionalAuth, async (req, res) => {
   try {
     const { period } = req.query;
+
+    // Commune reçue explicitement (pour le site public par ex.)
     const headerCid = (req.header('x-commune-id') || '').trim();
     const queryCid  = (req.query.communeId || '').trim();
     const communeId = headerCid || queryCid || '';
 
+    // Si la requête vient du panel authentifié, tu peux passer par req.user
     const role = req.user?.role || null;
     const isPanel = role === 'admin' || role === 'superadmin';
 
+    // Construit le filtre de visibilité
     const filter = buildVisibilityQuery({
       communeId,
       userRole: role,
@@ -142,6 +138,7 @@ router.get('/', optionalAuth, async (req, res) => {
       includeTimeWindow: false,
     }) || {};
 
+    // Sur l’interface publique (non panel), on applique la fenêtre d’affichage
     if (!isPanel) {
       const now = new Date();
       const timeClauses = [
@@ -152,6 +149,7 @@ router.get('/', optionalAuth, async (req, res) => {
       else filter.$and = timeClauses;
     }
 
+    // Filtres rapides par période
     if (period === '7' || period === '30') {
       const days = parseInt(period, 10);
       const fromDate = new Date();
@@ -159,7 +157,7 @@ router.get('/', optionalAuth, async (req, res) => {
       filter.createdAt = Object.assign(filter.createdAt || {}, { $gte: fromDate });
     }
 
-    // Admin: ne voit que ses propres docs
+    // Un admin simple ne voit que ses propres articles dans le panel
     if (role === 'admin' && req.user?.id) {
       filter.authorId = String(req.user.id);
     }
@@ -179,7 +177,9 @@ router.get('/', optionalAuth, async (req, res) => {
 router.get('/:id', optionalAuth, async (req, res) => {
   try {
     const { id } = req.params;
-    if (!mongoose.Types.ObjectId.isValid(id)) return res.status(400).json({ message: 'ID invalide' });
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ message: 'ID invalide' });
+    }
 
     const doc = await Article.findById(id).lean();
     if (!doc) return res.status(404).json({ message: 'Article introuvable' });
@@ -192,99 +192,116 @@ router.get('/:id', optionalAuth, async (req, res) => {
 });
 
 /* ================== UPDATE ================== */
-router.put('/:id', ensureAdminOrSuperadmin, upload.single('image'), async (req, res) => {
-  try {
-    const { id } = req.params;
-    if (!mongoose.Types.ObjectId.isValid(id)) return res.status(400).json({ message: 'ID invalide' });
-
-    const current = await Article.findById(id);
-    if (!current) return res.status(404).json({ message: 'Article introuvable' });
-
-    // Admin : ne peut modifier QUE ses propres articles
-    if (req.user.role === 'admin') {
-      if (String(current.authorId || '') !== String(req.user.id || '')) {
-        return res.status(403).json({ message: 'Interdit : vous ne pouvez modifier que vos articles' });
+router.put(
+  '/:id',
+  auth,
+  ensureAdminOrSuperadmin,
+  upload.single('image'),
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+      if (!mongoose.Types.ObjectId.isValid(id)) {
+        return res.status(400).json({ message: 'ID invalide' });
       }
-    }
 
-    const payload = {};
-    if (req.body.title != null)   payload.title   = String(req.body.title).trim();
-    if (req.body.content != null) payload.content = String(req.body.content).trim();
+      const current = await Article.findById(id);
+      if (!current) return res.status(404).json({ message: 'Article introuvable' });
 
-    if (req.file) payload.imageUrl = req.file.path;
-
-    if (req.body.priority && ['normal','pinned','urgent'].includes(req.body.priority)) {
-      payload.priority = req.body.priority;
-    }
-
-    const toDateOrNull = v => (v ? new Date(v) : null);
-    if ('startAt' in req.body) payload.startAt = toDateOrNull(req.body.startAt);
-    if ('endAt'   in req.body) payload.endAt   = toDateOrNull(req.body.endAt);
-
-    if (req.user.role === 'superadmin') {
-      const { visibility, communeId } = req.body || {};
-      let audienceCommunes =
-        req.body.audienceCommunes ??
-        req.body['audienceCommunes[]'] ??
-        undefined;
-
-      if (visibility && ['local','global','custom'].includes(visibility)) {
-        payload.visibility = visibility;
-        if (visibility === 'local') {
-          payload.communeId = String(communeId || '').trim();
-          payload.audienceCommunes = [];
-          if (!payload.communeId) {
-            return res.status(400).json({ message: 'communeId requis pour visibility=local' });
-          }
-        } else if (visibility === 'custom') {
-          payload.communeId = '';
-          if (typeof audienceCommunes === 'string') {
-            try {
-              const maybe = JSON.parse(audienceCommunes);
-              audienceCommunes = Array.isArray(maybe) ? maybe : audienceCommunes.split(',');
-            } catch {
-              audienceCommunes = audienceCommunes.split(',');
-            }
-          }
-          payload.audienceCommunes = Array.isArray(audienceCommunes)
-            ? audienceCommunes.map(s => String(s).trim()).filter(Boolean)
-            : [];
-        } else if (visibility === 'global') {
-          payload.communeId = '';
-          payload.audienceCommunes = [];
+      // Admin simple : ne peut modifier QUE ses propres articles
+      if (req.user.role === 'admin') {
+        if (String(current.authorId || '') !== String(req.user.id || '')) {
+          return res.status(403).json({ message: 'Interdit : vous ne pouvez modifier que vos articles' });
         }
       }
-    }
 
-    const updated = await Article.findByIdAndUpdate(id, { $set: payload }, { new: true });
-    res.json(updated);
-  } catch (err) {
-    console.error('❌ PUT /articles/:id', err);
-    res.status(500).json({ message: 'Erreur modification article' });
+      const payload = {};
+      if (req.body.title != null)   payload.title   = String(req.body.title).trim();
+      if (req.body.content != null) payload.content = String(req.body.content).trim();
+
+      if (req.file) payload.imageUrl = req.file.path;
+
+      if (req.body.priority && ['normal','pinned','urgent'].includes(req.body.priority)) {
+        payload.priority = req.body.priority;
+      }
+
+      const toDateOrNull = v => (v ? new Date(v) : null);
+      if ('startAt' in req.body) payload.startAt = toDateOrNull(req.body.startAt);
+      if ('endAt'   in req.body) payload.endAt   = toDateOrNull(req.body.endAt);
+
+      if (req.user.role === 'superadmin') {
+        // Seul le superadmin peut changer la visibilité/portée
+        const { visibility, communeId } = req.body || {};
+        let audienceCommunes =
+          req.body.audienceCommunes ??
+          req.body['audienceCommunes[]'] ??
+          undefined;
+
+        if (visibility && ['local','global','custom'].includes(visibility)) {
+          payload.visibility = visibility;
+          if (visibility === 'local') {
+            payload.communeId = String(communeId || '').trim();
+            payload.audienceCommunes = [];
+            if (!payload.communeId) {
+              return res.status(400).json({ message: 'communeId requis pour visibility=local' });
+            }
+          } else if (visibility === 'custom') {
+            payload.communeId = '';
+            if (typeof audienceCommunes === 'string') {
+              try {
+                const maybe = JSON.parse(audienceCommunes);
+                audienceCommunes = Array.isArray(maybe) ? maybe : audienceCommunes.split(',');
+              } catch {
+                audienceCommunes = audienceCommunes.split(',');
+              }
+            }
+            payload.audienceCommunes = Array.isArray(audienceCommunes)
+              ? audienceCommunes.map(s => String(s).trim()).filter(Boolean)
+              : [];
+          } else if (visibility === 'global') {
+            payload.communeId = '';
+            payload.audienceCommunes = [];
+          }
+        }
+      }
+
+      const updated = await Article.findByIdAndUpdate(id, { $set: payload }, { new: true });
+      res.json(updated);
+    } catch (err) {
+      console.error('❌ PUT /articles/:id', err);
+      res.status(500).json({ message: 'Erreur modification article' });
+    }
   }
-});
+);
 
 /* ================== DELETE ================== */
-router.delete('/:id', ensureAdminOrSuperadmin, async (req, res) => {
-  try {
-    const { id } = req.params;
-    if (!mongoose.Types.ObjectId.isValid(id)) return res.status(400).json({ message: 'ID invalide' });
-
-    const current = await Article.findById(id);
-    if (!current) return res.status(404).json({ message: 'Article introuvable' });
-
-    if (req.user.role === 'admin') {
-      if (String(current.authorId || '') !== String(req.user.id || '')) {
-        return res.status(403).json({ message: 'Interdit : vous ne pouvez supprimer que vos articles' });
+router.delete(
+  '/:id',
+  auth,
+  ensureAdminOrSuperadmin,
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+      if (!mongoose.Types.ObjectId.isValid(id)) {
+        return res.status(400).json({ message: 'ID invalide' });
       }
-    }
 
-    await Article.deleteOne({ _id: id });
-    res.json({ message: '✅ Article supprimé' });
-  } catch (err) {
-    console.error('❌ DELETE /articles/:id', err);
-    res.status(500).json({ message: 'Erreur suppression article' });
+      const current = await Article.findById(id);
+      if (!current) return res.status(404).json({ message: 'Article introuvable' });
+
+      // Admin simple : ne peut supprimer QUE ses propres articles
+      if (req.user.role === 'admin') {
+        if (String(current.authorId || '') !== String(req.user.id || '')) {
+          return res.status(403).json({ message: 'Interdit : vous ne pouvez supprimer que vos articles' });
+        }
+      }
+
+      await Article.deleteOne({ _id: id });
+      res.json({ message: '✅ Article supprimé' });
+    } catch (err) {
+      console.error('❌ DELETE /articles/:id', err);
+      res.status(500).json({ message: 'Erreur suppression article' });
+    }
   }
-});
+);
 
 module.exports = router;
