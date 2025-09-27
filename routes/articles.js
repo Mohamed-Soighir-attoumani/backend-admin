@@ -5,7 +5,7 @@ const multer = require('multer');
 const mongoose = require('mongoose');
 
 const Article = require('../models/Article');
-const auth = require('../middleware/authMiddleware'); // middleware centralisé (hydrate req.user)
+const auth = require('../middleware/authMiddleware'); // hydrate req.user depuis la BDD
 const { storage } = require('../utils/cloudinary');   // multer-storage-cloudinary
 const { buildVisibilityQuery } = require('../utils/visibility');
 
@@ -22,18 +22,10 @@ function ensureAdminOrSuperadmin(req, res, next) {
   next();
 }
 
-/**
- * Auth optionnelle : ne fait rien si pas de token.
- * On NE décode PAS le token ici (on laisse ce travail au middleware auth).
- */
-function optionalAuth(_req, _res, next) {
-  return next();
-}
-
-/* ================== CREATE ================== */
+/* ================== CREATE (panel) ================== */
 router.post(
   '/',
-  auth, // <-- hydrate req.user (avec communeId depuis la BDD)
+  auth,
   ensureAdminOrSuperadmin,
   upload.single('image'),
   async (req, res) => {
@@ -69,7 +61,7 @@ router.post(
         title: String(title).trim(),
         content: String(content).trim(),
         imageUrl,
-        visibility: 'local',             // valeur par défaut
+        visibility: 'local',             // par défaut
         communeId: req.user.communeId || '',
         audienceCommunes: [],
         priority: ['normal','pinned','urgent'].includes(priority) ? priority : 'normal',
@@ -80,12 +72,11 @@ router.post(
       };
 
       if (req.user.role === 'superadmin') {
-        // Un superadmin peut définir la visibilité
+        // Le superadmin choisit la portée
         if (visibility && ['local','global','custom'].includes(visibility)) {
           base.visibility = visibility;
         }
         if (base.visibility === 'local') {
-          // local : communeId requis (string)
           base.communeId = String(communeId || '').trim();
           if (!base.communeId) {
             return res.status(400).json({ message: 'communeId requis pour visibility=local' });
@@ -102,8 +93,7 @@ router.post(
         if (!base.communeId) {
           return res.status(403).json({ message: 'Votre compte n’est pas rattaché à une commune' });
         }
-        // force la visibilité locale pour un admin classique
-        base.visibility = 'local';
+        base.visibility = 'local'; // force locale
       }
 
       const doc = await Article.create(base);
@@ -115,50 +105,38 @@ router.post(
   }
 );
 
-/* ================== LIST (PANEL + PUBLIC) ================== */
+/* ================== LIST (panel, protégée) ================== */
 router.get('/', auth, async (req, res) => {
   try {
     const { period } = req.query;
 
-    // 1) Commune reçue explicitement (prioritaire)
+    // Commune explicite (prioritaire)
     const headerCid = (req.header('x-commune-id') || '').trim();
     const queryCid  = (req.query.communeId || '').trim();
 
-    // 2) Si rien fourni : on prend la commune de l'admin connecté (panel),
-    //    sauf si superadmin (il peut voir globalement sans commune)
     const role = req.user?.role || null;
     const isPanel = role === 'admin' || role === 'superadmin';
+
+    // Si rien n'est fourni et qu'on est admin (pas superadmin) → on prend la commune de l'admin
     const communeId =
       headerCid ||
       queryCid ||
       (isPanel && req.user.role !== 'superadmin' ? (req.user?.communeId || '') : '');
 
-    // 3) Construit le filtre de visibilité
+    // Filtre visibilité (pas de fenêtre de temps côté panel)
     const filter = buildVisibilityQuery({
-      communeId,         // peut être '' ou undefined pour superadmin sans commune ciblée
+      communeId,
       userRole: role,
       includeLegacy: true,
       includeTimeWindow: false,
     }) || {};
 
-    // 4) Fenêtre d'affichage seulement si ce n'est PAS le panel
-    if (!isPanel) {
-      const now = new Date();
-      const timeClauses = [
-        { $or: [{ startAt: { $exists: false } }, { startAt: null }, { startAt: { $lte: now } }] },
-        { $or: [{ endAt:   { $exists: false } }, { endAt:   null }, { endAt:   { $gte: now } }] },
-      ];
-      if (filter.$and) filter.$and.push(...timeClauses);
-      else filter.$and = timeClauses;
-    }
-
-    // 5) (Option) — Si tu veux restreindre un admin à ses propres articles,
-    //    décommente la ligne ci-dessous. Par défaut on laisse voir toute la commune.
+    // (Option) restreindre un admin à ses propres articles — laissé OFF par défaut
     // if (role === 'admin' && req.user?.id) {
     //   filter.authorId = String(req.user.id);
     // }
 
-    // 6) Période rapide
+    // Période rapide
     if (period === '7' || period === '30') {
       const days = parseInt(period, 10);
       const fromDate = new Date();
@@ -177,8 +155,44 @@ router.get('/', auth, async (req, res) => {
   }
 });
 
-/* ================== GET BY ID ================== */
-router.get('/:id', optionalAuth, async (req, res) => {
+/* ================== LIST PUBLIQUE (app/mobile) ================== */
+/**
+ * GET /api/articles/public
+ * Accès sans token.
+ * Requiert la commune ciblée via ?communeId=... ou header x-commune-id: ...
+ * Applique la fenêtre d’affichage (startAt/endAt).
+ */
+router.get('/public', async (req, res) => {
+  try {
+    const headerCid = (req.header('x-commune-id') || '').trim();
+    const queryCid  = (req.query.communeId || '').trim();
+    const communeId = headerCid || queryCid;
+
+    if (!communeId) {
+      return res.status(400).json({ message: 'communeId requis' });
+    }
+
+    // Filtre visibilité pour le public, AVEC fenêtre d’affichage
+    const filter = buildVisibilityQuery({
+      communeId,
+      userRole: null,              // public
+      includeLegacy: true,
+      includeTimeWindow: true,     // applique startAt/endAt
+    }) || {};
+
+    const docs = await Article.find(filter)
+      .sort({ priority: -1, createdAt: -1 })
+      .lean();
+
+    res.json(docs);
+  } catch (err) {
+    console.error('❌ GET /articles/public', err);
+    res.status(500).json({ message: 'Erreur serveur' });
+  }
+});
+
+/* ================== GET BY ID (public + panel) ================== */
+router.get('/:id', async (req, res) => {
   try {
     const { id } = req.params;
     if (!mongoose.Types.ObjectId.isValid(id)) {
@@ -195,7 +209,7 @@ router.get('/:id', optionalAuth, async (req, res) => {
   }
 });
 
-/* ================== UPDATE ================== */
+/* ================== UPDATE (panel) ================== */
 router.put(
   '/:id',
   auth,
@@ -277,7 +291,7 @@ router.put(
   }
 );
 
-/* ================== DELETE ================== */
+/* ================== DELETE (panel) ================== */
 router.delete(
   '/:id',
   auth,
