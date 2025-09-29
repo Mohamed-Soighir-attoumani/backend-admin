@@ -1,15 +1,10 @@
 // backend/controllers/articles.controller.js
 const Article = require("../models/Article");
 
-// === (Optionnel) Cloudinary ===
+// (Optionnel) Cloudinary
 let cloudinary = null;
-try {
-  cloudinary = require("cloudinary").v2;
-} catch (_) {
-  // Cloudinary non installé : OK
-}
+try { cloudinary = require("cloudinary").v2; } catch (_) {}
 
-/* ----------------------- Helpers ----------------------- */
 function getUserCommune(req) {
   if (req.user?.communeId) return { key: "communeId", value: String(req.user.communeId) };
   return null;
@@ -19,18 +14,15 @@ function assertLocalScopeAllowed(req, payloadCommune) {
   const userCommune = getUserCommune(req);
   if (!userCommune) {
     const err = new Error("Compte non rattaché à une commune");
-    err.status = 403;
-    throw err;
+    err.status = 403; throw err;
   }
   if (!payloadCommune) {
     const err = new Error("Commune requise pour la portée locale");
-    err.status = 400;
-    throw err;
+    err.status = 400; throw err;
   }
   if (String(payloadCommune) !== String(userCommune.value)) {
     const err = new Error("Commune non autorisée");
-    err.status = 403;
-    throw err;
+    err.status = 403; throw err;
   }
 }
 
@@ -50,47 +42,34 @@ async function maybeUploadToCloudinary(file) {
 
 const isHttpUrl = (u) => typeof u === 'string' && /^https?:\/\//i.test(u);
 
-/* ----------------------- Controllers ----------------------- */
-
 /**
  * POST /api/articles
  * body: { title, content, visibility, startAt?, endAt?, imageUrl?, communeId?, authorName?, publisher?, sourceUrl?, status? }
- * file: (optionnel) image (via multer) -> Cloudinary
  */
 exports.createArticle = async (req, res) => {
   try {
     const {
-      title,
-      content,
+      title, content,
       visibility = "local",
-      startAt,
-      endAt,
-      imageUrl,
+      startAt, endAt, imageUrl,
       communeId,
-      authorName,
-      publisher,
-      sourceUrl,
-      status,
+      authorName, publisher, sourceUrl, status,
     } = req.body || {};
 
-    if (!title || !content) {
-      return res.status(400).json({ message: "Titre et contenu sont requis." });
-    }
+    if (!title || !content) return res.status(400).json({ message: "Titre et contenu sont requis." });
 
-    // Si local -> vérifier commune
     if (visibility === "local") {
       const payloadCommune = communeId || getUserCommune(req)?.value;
       assertLocalScopeAllowed(req, payloadCommune);
     }
 
-    // Upload éventuel
     let finalImageUrl = imageUrl || null;
     let imagePublicId = null;
     if (!finalImageUrl && req.file) {
       const uploaded = await maybeUploadToCloudinary(req.file);
       if (uploaded) {
         finalImageUrl = uploaded.secure_url;
-        imagePublicId = uploaded.public_id || null;
+        imagePublicId = uploaded.public_id;
       }
     }
 
@@ -99,22 +78,21 @@ exports.createArticle = async (req, res) => {
       content: String(content).trim(),
       visibility,
       startAt: startAt ? new Date(startAt) : null,
-      endAt: endAt ? new Date(endAt) : null,
+      endAt:   endAt   ? new Date(endAt)   : null,
       imageUrl: finalImageUrl,
       imagePublicId,
 
-      // auteur (panel)
       authorId: req.user?.id ? String(req.user.id) : '',
       authorEmail: req.user?.email || '',
 
-      // Métadonnées Play
+      // métadonnées Play
       publishedAt: new Date(),
       authorName: (authorName || '').trim(),
       publisher: (publisher && String(publisher).trim()) || 'Association Bellevue Dembeni',
       sourceUrl: isHttpUrl(sourceUrl) ? sourceUrl : '',
       status: status === 'draft' ? 'draft' : 'published',
 
-      // Multi-commune
+      // multi-commune
       communeId: '',
       audienceCommunes: [],
     };
@@ -122,8 +100,8 @@ exports.createArticle = async (req, res) => {
     const userCommune = getUserCommune(req);
     if (visibility === "local" && userCommune) {
       doc.communeId = String(userCommune.value);
-    } else {
-      if (communeId) doc.communeId = String(communeId);
+    } else if (communeId) {
+      doc.communeId = String(communeId);
     }
 
     const article = await Article.create(doc);
@@ -140,14 +118,7 @@ exports.createArticle = async (req, res) => {
  */
 exports.getArticles = async (req, res) => {
   try {
-    const {
-      page = 1,
-      limit = 10,
-      q,
-      visibility,
-      onlyActive,
-      communeId,
-    } = req.query;
+    const { page = 1, limit = 10, q, visibility, onlyActive, communeId } = req.query;
 
     const filter = {};
     if (visibility) filter.visibility = visibility;
@@ -169,11 +140,9 @@ exports.getArticles = async (req, res) => {
 
     const userCommune = getUserCommune(req);
     if (visibility === "local") {
-      if (userCommune) {
-        filter[userCommune.key] = String(userCommune.value);
-      }
-    } else {
-      if (communeId) filter.communeId = String(communeId);
+      if (userCommune) filter[userCommune.key] = String(userCommune.value);
+    } else if (communeId) {
+      filter.communeId = String(communeId);
     }
 
     const skip = (Number(page) - 1) * Number(limit);
@@ -185,12 +154,7 @@ exports.getArticles = async (req, res) => {
       Article.countDocuments(filter),
     ]);
 
-    res.json({
-      items,
-      total,
-      page: Number(page),
-      pages: Math.ceil(total / Number(limit)),
-    });
+    res.json({ items, total, page: Number(page), pages: Math.ceil(total / Number(limit)) });
   } catch (err) {
     console.error("getArticles error:", err);
     res.status(500).json({ message: "Erreur serveur" });
@@ -208,13 +172,7 @@ exports.getArticleById = async (req, res) => {
     const article = await Article.findById(id);
     if (!article) return res.status(404).json({ message: "Article introuvable" });
 
-    if (article.visibility === "local") {
-      const userCommune = getUserCommune(req);
-      if (!userCommune || String(article[userCommune.key]) !== String(userCommune.value)) {
-        return res.status(403).json({ message: "Accès non autorisé à cette commune" });
-      }
-    }
-
+    // (si routé via contrôleur en admin uniquement — la route publique gère déjà ses propres règles)
     res.json(article);
   } catch (err) {
     console.error("getArticleById error:", err);
@@ -242,18 +200,8 @@ exports.updateArticle = async (req, res) => {
     }
 
     const {
-      title,
-      content,
-      visibility,
-      startAt,
-      endAt,
-      imageUrl,
-      communeId,
-      publishedAt,
-      authorName,
-      publisher,
-      sourceUrl,
-      status,
+      title, content, visibility, startAt, endAt, imageUrl, communeId,
+      publishedAt, authorName, publisher, sourceUrl, status,
     } = req.body || {};
 
     if (visibility === "local") {
@@ -270,7 +218,7 @@ exports.updateArticle = async (req, res) => {
     if (typeof content === "string") article.content = String(content).trim();
 
     if (startAt !== undefined) article.startAt = startAt ? new Date(startAt) : null;
-    if (endAt !== undefined)   article.endAt   = endAt   ? new Date(endAt)   : null;
+    if (endAt   !== undefined) article.endAt   = endAt   ? new Date(endAt)   : null;
 
     if (imageUrl !== undefined) {
       article.imageUrl = imageUrl || null;
@@ -296,9 +244,6 @@ exports.updateArticle = async (req, res) => {
   }
 };
 
-/**
- * DELETE /api/articles/:id
- */
 exports.deleteArticle = async (req, res) => {
   try {
     const id = String(req.params.id || '').trim();
