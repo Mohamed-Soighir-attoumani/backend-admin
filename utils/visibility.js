@@ -4,10 +4,10 @@
  * Construit un filtre MongoDB pour la visibilité multi-communes.
  *
  * @param {Object} params
- * @param {string}  [params.communeId]           - Commune ciblée (vide = pas de filtre de commune)
- * @param {string}  [params.userRole]            - 'admin' | 'superadmin' | 'user' | null
- * @param {boolean} [params.includeTimeWindow]   - Ajoute la fenêtre d'affichage (startAt/endAt). Par défaut: false
- * @param {boolean} [params.includeLegacy]       - Inclut les anciens documents (sans visibility/communeId). Par défaut: false
+ * @param {string}  [params.communeId]
+ * @param {string}  [params.userRole]            - 'admin' | 'superadmin' | ... | null
+ * @param {boolean} [params.includeTimeWindow]   - Applique (startAt/endAt)
+ * @param {boolean} [params.includeLegacy]       - Inclut anciens docs sans champs
  *
  * @returns {Object} filtre MongoDB
  */
@@ -20,23 +20,21 @@ function buildVisibilityQuery({
   const orParts = [];
 
   if (!communeId) {
-    // Sans commune ciblée :
-    // - toujours visibles: global
+    // Sans commune: global visible pour tous
     orParts.push({ visibility: 'global' });
 
-    // Panel (admin/superadmin) : on autorise aussi local/custom
+    // Panel peut voir local/custom sans commune explicite
     if (userRole === 'admin' || userRole === 'superadmin') {
       orParts.push({ visibility: 'local' });
       orParts.push({ visibility: 'custom' });
     }
   } else {
-    // Avec commune ciblée :
+    // Avec commune ciblée
     orParts.push({ visibility: 'global' });
     orParts.push({ visibility: 'local', communeId });
     orParts.push({ visibility: 'custom', audienceCommunes: communeId });
   }
 
-  // Back-compat (anciens documents) : activable au besoin
   if (includeLegacy) {
     orParts.push({ visibility: { $exists: false } });
     orParts.push({ communeId: { $exists: false } });
@@ -45,7 +43,6 @@ function buildVisibilityQuery({
 
   const filter = { $or: orParts };
 
-  // Fenêtre d'affichage (facultatif, utile côté public/mobile)
   if (includeTimeWindow) {
     const now = new Date();
     filter.$and = [
