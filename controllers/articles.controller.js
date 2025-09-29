@@ -1,9 +1,7 @@
 // backend/controllers/articles.controller.js
-const mongoose = require("mongoose");
 const Article = require("../models/Article"); // adapte le chemin si besoin
 
 // === (Optionnel) Cloudinary ===
-// Configurée ailleurs (ex. config/cloudinary.js avec cloudinary.v2.config(...))
 let cloudinary = null;
 try {
   cloudinary = require("cloudinary").v2;
@@ -13,14 +11,12 @@ try {
 
 /* ----------------------- Helpers ----------------------- */
 function getUserCommune(req) {
-  // On accepte soit un slug, soit un ObjectId
-  if (req.user?.communeId) return { key: "communeId", value: req.user.communeId };
-  if (req.user?.communeSlug) return { key: "communeSlug", value: req.user.communeSlug };
+  // On accepte communeId (String); communeSlug non utilisé dans le schéma actuel
+  if (req.user?.communeId) return { key: "communeId", value: String(req.user.communeId) };
   return null;
 }
 
 function assertLocalScopeAllowed(req, payloadCommune) {
-  // Autorise la création/màj "locale" uniquement dans la commune de l'admin
   const userCommune = getUserCommune(req);
   if (!userCommune) {
     const err = new Error("Compte non rattaché à une commune");
@@ -32,7 +28,7 @@ function assertLocalScopeAllowed(req, payloadCommune) {
     err.status = 400;
     throw err;
   }
-  const { key, value } = userCommune;
+  const { value } = userCommune;
   if (String(payloadCommune) !== String(value)) {
     const err = new Error("Commune non autorisée");
     err.status = 403;
@@ -42,10 +38,8 @@ function assertLocalScopeAllowed(req, payloadCommune) {
 
 async function maybeUploadToCloudinary(file) {
   if (!file || !cloudinary) return null;
-  // file.path si multer stocke en disque ; file.buffer si storage mémoire
   const uploadOpts = {};
   if (file.buffer && cloudinary.uploader.upload_stream) {
-    // Stream upload
     return new Promise((resolve, reject) => {
       const stream = cloudinary.uploader.upload_stream(uploadOpts, (err, res) =>
         err ? reject(err) : resolve(res)
@@ -53,15 +47,16 @@ async function maybeUploadToCloudinary(file) {
       stream.end(file.buffer);
     });
   }
-  // Upload depuis un path (multer diskStorage)
   return cloudinary.uploader.upload(file.path, uploadOpts);
 }
+
+const isHttpUrl = (u) => typeof u === 'string' && /^https?:\/\//i.test(u);
 
 /* ----------------------- Controllers ----------------------- */
 
 /**
  * POST /api/articles
- * body: { title, content, visibility, startAt?, endAt?, imageUrl?, tags?, communeId? | communeSlug? }
+ * body: { title, content, visibility, startAt?, endAt?, imageUrl?, communeId?, authorName?, publisher?, sourceUrl?, status? }
  * file: (optionnel) image (via multer) -> Cloudinary
  */
 exports.createArticle = async (req, res) => {
@@ -69,14 +64,17 @@ exports.createArticle = async (req, res) => {
     const {
       title,
       content,
-      visibility = "local", // "local" | "regional" | "national"
+      visibility = "local", // "local" | "global" | "custom"
       startAt,
       endAt,
       imageUrl,
-      tags = [],
-      communeId,
-      communeSlug,
-    } = req.body;
+      communeId,          // String
+      // Métadonnées Play (facultatives au POST)
+      authorName,
+      publisher,
+      sourceUrl,
+      status,
+    } = req.body || {};
 
     if (!title || !content) {
       return res.status(400).json({ message: "Titre et contenu sont requis." });
@@ -84,9 +82,8 @@ exports.createArticle = async (req, res) => {
 
     // Si visibilité locale => contrôle strict de la commune
     if (visibility === "local") {
-      // On prend d'abord la commune du payload, sinon on forcera plus bas
-      const payloadCommune = communeId || communeSlug;
-      assertLocalScopeAllowed(req, payloadCommune || getUserCommune(req)?.value);
+      const payloadCommune = communeId || getUserCommune(req)?.value;
+      assertLocalScopeAllowed(req, payloadCommune);
     }
 
     // Upload éventuel sur Cloudinary
@@ -102,27 +99,35 @@ exports.createArticle = async (req, res) => {
 
     // Construction de l'objet article
     const doc = {
-      title,
-      content,
+      title: String(title).trim(),
+      content: String(content).trim(),
       visibility,
-      startAt: startAt ? new Date(startAt) : undefined,
-      endAt: endAt ? new Date(endAt) : undefined,
+      startAt: startAt ? new Date(startAt) : null,
+      endAt: endAt ? new Date(endAt) : null,
       imageUrl: finalImageUrl,
       imagePublicId,
-      tags: Array.isArray(tags) ? tags : typeof tags === "string" ? tags.split(",").map(t => t.trim()).filter(Boolean) : [],
-      author: req.user?.id ? new mongoose.Types.ObjectId(req.user.id) : undefined,
+      // Traçabilité auteur (panel)
+      authorId: req.user?.id ? String(req.user.id) : '',
+      authorEmail: req.user?.email || '',
+      // Métadonnées Play
       publishedAt: new Date(),
+      authorName: (authorName || '').trim(),
+      publisher: (publisher && String(publisher).trim()) || 'Association Bellevue Dembeni',
+      sourceUrl: isHttpUrl(sourceUrl) ? sourceUrl : '',
+      status: status === 'draft' ? 'draft' : 'published',
+      // Multi-commune
+      communeId: '',
+      audienceCommunes: [],
     };
 
     // Verrouillage commune côté serveur
     const userCommune = getUserCommune(req);
     if (visibility === "local" && userCommune) {
-      if (userCommune.key === "communeId") doc.communeId = new mongoose.Types.ObjectId(userCommune.value);
-      if (userCommune.key === "communeSlug") doc.communeSlug = userCommune.value;
+      doc.communeId = String(userCommune.value);
     } else {
       // Pour d'autres portées, on accepte le payload si fourni (facultatif)
-      if (communeId) doc.communeId = new mongoose.Types.ObjectId(communeId);
-      if (communeSlug) doc.communeSlug = communeSlug;
+      if (communeId) doc.communeId = String(communeId);
+      // si "custom", prévoir audienceCommunes côté route si besoin
     }
 
     const article = await Article.create(doc);
@@ -130,12 +135,12 @@ exports.createArticle = async (req, res) => {
   } catch (err) {
     console.error("createArticle error:", err);
     return res.status(err.status || 500).json({ message: err.message || "Erreur serveur" });
-    }
+  }
 };
 
 /**
  * GET /api/articles
- * query: page?, limit?, q?, visibility?, onlyActive? (1|0), communeSlug?, communeId?
+ * query: page?, limit?, q?, visibility?, onlyActive? (1|0), communeId?
  * - Si user admin local -> par défaut on filtre sur sa commune quand visibility=local.
  */
 exports.getArticles = async (req, res) => {
@@ -146,7 +151,6 @@ exports.getArticles = async (req, res) => {
       q,
       visibility,
       onlyActive,
-      communeSlug,
       communeId,
     } = req.query;
 
@@ -157,39 +161,33 @@ exports.getArticles = async (req, res) => {
     if (String(onlyActive) === "1") {
       const now = new Date();
       filter.$and = [
-        { $or: [{ startAt: { $exists: false } }, { startAt: { $lte: now } }] },
-        { $or: [{ endAt: { $exists: false } }, { endAt: { $gte: now } }] },
+        { $or: [{ startAt: { $exists: false } }, { startAt: null }, { startAt: { $lte: now } }] },
+        { $or: [{ endAt: { $exists: false } }, { endAt: null }, { endAt: { $gte: now } }] },
       ];
     }
 
-    // Recherche full-text simple
+    // Recherche simple
     if (q) {
       filter.$or = [
-        { title: { $regex: q, $options: "i" } },
+        { title:   { $regex: q, $options: "i" } },
         { content: { $regex: q, $options: "i" } },
-        { tags: { $elemMatch: { $regex: q, $options: "i" } } },
       ];
     }
 
     // Filtrage commune
     const userCommune = getUserCommune(req);
     if (visibility === "local") {
-      // Par défaut, les admins locaux ne voient que leur commune
       if (userCommune) {
-        filter[userCommune.key] = userCommune.key === "communeId"
-          ? new mongoose.Types.ObjectId(userCommune.value)
-          : userCommune.value;
+        filter[userCommune.key] = String(userCommune.value);
       }
     } else {
-      // Sinon, on accepte les filtres explicites
-      if (communeId) filter.communeId = new mongoose.Types.ObjectId(communeId);
-      if (communeSlug) filter.communeSlug = communeSlug;
+      if (communeId) filter.communeId = String(communeId);
     }
 
     const skip = (Number(page) - 1) * Number(limit);
     const [items, total] = await Promise.all([
       Article.find(filter)
-        .sort({ publishedAt: -1, createdAt: -1 })
+        .sort({ status: -1, priority: -1, publishedAt: -1, createdAt: -1 })
         .skip(skip)
         .limit(Number(limit)),
       Article.countDocuments(filter),
@@ -212,7 +210,10 @@ exports.getArticles = async (req, res) => {
  */
 exports.getArticleById = async (req, res) => {
   try {
-    const article = await Article.findById(req.params.id);
+    const id = String(req.params.id || '').trim();
+    if (!id || id.length < 12) return res.status(400).json({ message: "ID invalide" });
+
+    const article = await Article.findById(id);
     if (!article) return res.status(404).json({ message: "Article introuvable" });
 
     // Si article local, vérifier l'accès de l'admin à sa commune
@@ -237,7 +238,9 @@ exports.getArticleById = async (req, res) => {
  */
 exports.updateArticle = async (req, res) => {
   try {
-    const id = req.params.id;
+    const id = String(req.params.id || '').trim();
+    if (!id || id.length < 12) return res.status(400).json({ message: "ID invalide" });
+
     const article = await Article.findById(id);
     if (!article) return res.status(404).json({ message: "Article introuvable" });
 
@@ -257,51 +260,51 @@ exports.updateArticle = async (req, res) => {
       startAt,
       endAt,
       imageUrl,
-      tags,
       communeId,
-      communeSlug,
-    } = req.body;
+      // métadonnées Play
+      publishedAt,
+      authorName,
+      publisher,
+      sourceUrl,
+      status,
+    } = req.body || {};
 
     // Empêche de déplacer un article local hors de la commune de l'admin
     if (visibility === "local") {
       const userCommune = getUserCommune(req);
-      assertLocalScopeAllowed(req, (communeId || communeSlug || article.communeId || article.communeSlug));
-      if (userCommune.key === "communeId") article.communeId = new mongoose.Types.ObjectId(userCommune.value);
-      if (userCommune.key === "communeSlug") article.communeSlug = userCommune.value;
-    } else {
-      // visibilité non locale : accepte un changement facultatif
-      if (communeId) article.communeId = new mongoose.Types.ObjectId(communeId);
-      if (communeSlug) article.communeSlug = communeSlug;
-    }
-
-    if (typeof title === "string") article.title = title;
-    if (typeof content === "string") article.content = content;
-    if (typeof visibility === "string") article.visibility = visibility;
-    if (startAt !== undefined) article.startAt = startAt ? new Date(startAt) : undefined;
-    if (endAt !== undefined) article.endAt = endAt ? new Date(endAt) : undefined;
-    if (tags !== undefined) {
-      article.tags = Array.isArray(tags) ? tags : typeof tags === "string" ? tags.split(",").map(t => t.trim()).filter(Boolean) : [];
-    }
-
-    // Gestion image: nouvelle imageUrl OU upload fichier
-    if (imageUrl !== undefined) {
-      // Si on remplace une image Cloudinary, supprimer l'ancienne si public_id connu
-      if (article.imagePublicId && cloudinary && imageUrl && imageUrl !== article.imageUrl) {
-        try { await cloudinary.uploader.destroy(article.imagePublicId); } catch {}
-        article.imagePublicId = null;
+      assertLocalScopeAllowed(req, (communeId || article.communeId));
+      article.communeId = userCommune ? String(userCommune.value) : String(communeId || article.communeId || '');
+    } else if (typeof visibility === 'string' && ['global','custom'].includes(visibility)) {
+      article.visibility = visibility;
+      if (visibility !== 'local') {
+        // si custom: on gèrera audienceCommunes côté route si nécessaire
+        article.communeId = '';
       }
+    }
+
+    if (typeof title === "string")   article.title = String(title).trim();
+    if (typeof content === "string") article.content = String(content).trim();
+
+    if (startAt !== undefined) article.startAt = startAt ? new Date(startAt) : null;
+    if (endAt !== undefined)   article.endAt   = endAt   ? new Date(endAt)   : null;
+
+    // Image: nouvelle imageUrl OU upload fichier
+    if (imageUrl !== undefined) {
       article.imageUrl = imageUrl || null;
     } else if (req.file) {
-      // upload nouvelle image
       const uploaded = await maybeUploadToCloudinary(req.file);
       if (uploaded) {
-        if (article.imagePublicId && cloudinary) {
-          try { await cloudinary.uploader.destroy(article.imagePublicId); } catch {}
-        }
         article.imageUrl = uploaded.secure_url;
-        article.imagePublicId = uploaded.public_id;
+        article.imagePublicId = uploaded.public_id || null;
       }
     }
+
+    // Métadonnées Play
+    if (publishedAt !== undefined) article.publishedAt = publishedAt ? new Date(publishedAt) : (article.publishedAt || new Date());
+    if (authorName  !== undefined) article.authorName  = String(authorName || '').trim();
+    if (publisher   !== undefined) article.publisher   = String(publisher || 'Association Bellevue Dembeni').trim();
+    if (sourceUrl   !== undefined) article.sourceUrl   = isHttpUrl(sourceUrl) ? sourceUrl : '';
+    if (status      !== undefined) article.status      = status === 'draft' ? 'draft' : 'published';
 
     const saved = await article.save();
     res.json(saved);
@@ -316,7 +319,9 @@ exports.updateArticle = async (req, res) => {
  */
 exports.deleteArticle = async (req, res) => {
   try {
-    const id = req.params.id;
+    const id = String(req.params.id || '').trim();
+    if (!id || id.length < 12) return res.status(400).json({ message: "ID invalide" });
+
     const article = await Article.findById(id);
     if (!article) return res.status(404).json({ message: "Article introuvable" });
 
@@ -329,9 +334,9 @@ exports.deleteArticle = async (req, res) => {
       }
     }
 
-    // Suppression image Cloudinary si présente
+    // Suppression image Cloudinary si présente (best effort)
     if (article.imagePublicId && cloudinary) {
-      try { await cloudinary.uploader.destroy(article.imagePublicId); } catch {}
+      try { await cloudinary.uploader.destroy(article.imagePublicId); } catch (_) {}
     }
 
     await article.deleteOne();
