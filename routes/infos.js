@@ -131,13 +131,14 @@ router.get('/', optionalAuth, async (req, res) => {
       filter.createdAt = Object.assign(filter.createdAt || {}, { $gte: fromDate });
     }
 
-    // Inclure legacy (au cas où) : pas nécessaire ici car nouveau modèle,
-    // mais on reste souple:
-    // (rien à ajouter)
-
     const items = await Info.find(filter)
       .sort({ priority: -1, createdAt: -1 })
       .lean();
+
+    // 🔹 Empêche un cache “vide” côté reviewer / store
+    res.set('Cache-Control', 'no-store');
+    res.set('Pragma', 'no-cache');
+    res.set('Expires', '0');
 
     res.json(items);
   } catch (err) {
