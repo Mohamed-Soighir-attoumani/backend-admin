@@ -61,13 +61,17 @@ router.post(
       const toDateOrNull = v => (v ? new Date(v) : null);
       const imageUrl = req.file ? req.file.path : (req.body.imageUrl || null);
 
+      // normalisations utiles
+      const normCommuneFromUser = (req.user.communeId ? String(req.user.communeId) : '').trim().toLowerCase();
+      const normCommuneFromBody = (communeId ? String(communeId) : '').trim().toLowerCase();
+
       const base = {
         title: String(title).trim(),
         content: String(content).trim(),
         imageUrl: imageUrl || null,
 
         visibility: 'local', // par défaut
-        communeId: req.user.communeId ? String(req.user.communeId) : '', // 🔧 forcer String
+        communeId: normCommuneFromUser, // si admin
         audienceCommunes: [],
 
         priority: ['normal','pinned','urgent'].includes(priority) ? priority : 'normal',
@@ -90,7 +94,7 @@ router.post(
           base.visibility = visibility;
         }
         if (base.visibility === 'local') {
-          base.communeId = String(communeId || '').trim(); // 🔧 String côté DB
+          base.communeId = normCommuneFromBody;
           if (!base.communeId) return res.status(400).json({ message: 'communeId requis pour visibility=local' });
         } else if (base.visibility === 'custom') {
           base.communeId = '';
@@ -100,13 +104,17 @@ router.post(
             try { const j = JSON.parse(raw); arr = Array.isArray(j) ? j : raw.split(','); }
             catch { arr = raw.split(','); }
           }
-          base.audienceCommunes = Array.isArray(arr) ? arr.map(s => String(s).trim()).filter(Boolean) : [];
+          base.audienceCommunes = Array.isArray(arr)
+            ? arr.map(s => String(s).trim().toLowerCase()).filter(Boolean)
+            : [];
         } else if (base.visibility === 'global') {
           base.communeId = '';
           base.audienceCommunes = [];
         }
       } else {
-        if (!base.communeId) return res.status(403).json({ message: 'Votre compte n’est pas rattaché à une commune' });
+        if (!base.communeId) {
+          return res.status(403).json({ message: 'Votre compte n’est pas rattaché à une commune' });
+        }
         base.visibility = 'local';
       }
 
@@ -124,8 +132,8 @@ router.get('/', auth, async (req, res) => {
   try {
     const { period } = req.query;
 
-    const headerCid = (req.header('x-commune-id') || '').trim();
-    const queryCid  = (req.query.communeId || '').trim();
+    const headerCid = (req.header('x-commune-id') || '').trim().toLowerCase();
+    const queryCid  = (req.query.communeId || '').trim().toLowerCase();
 
     const role = req.user?.role || null;
     const isPanel = role === 'admin' || role === 'superadmin';
@@ -133,7 +141,7 @@ router.get('/', auth, async (req, res) => {
     const communeId =
       headerCid ||
       queryCid ||
-      (isPanel && req.user.role !== 'superadmin' ? (req.user?.communeId || '') : '');
+      (isPanel && req.user.role !== 'superadmin' ? (req.user?.communeId || '').toLowerCase() : '');
 
     const filter = buildVisibilityQuery({
       communeId,
@@ -166,21 +174,23 @@ router.get('/', auth, async (req, res) => {
  * Accès sans token.
  * Requiert ?communeId=... ou header x-commune-id: ...
  * 🔒 Renvoie UNIQUEMENT les articles locaux de la commune demandée,
- *     dans la fenêtre temporelle, publiés, et récents (< 90j).
- *     (Pas de global/custom en public pour éviter le “cross-commune”.)
+ *     dans la fenêtre temporelle, publiés, et récents (par défaut < 90j).
+ *     Tu peux desserrer la fenêtre via ?days=365 (exemple).
  */
 router.get('/public', async (req, res) => {
   try {
-    const headerCid = (req.header('x-commune-id') || '').trim();
-    const queryCid  = (req.query.communeId || '').trim();
+    const headerCid = (req.header('x-commune-id') || '').trim().toLowerCase();
+    const queryCid  = (req.query.communeId || '').trim().toLowerCase();
     const communeId = headerCid || queryCid;
 
     if (!communeId) return res.status(400).json({ message: 'communeId requis' });
 
+    // Permet de configurer la fenêtre (par ex. ?days=365 pour tester de vieux articles)
+    const days = Number.isFinite(parseInt(req.query.days, 10)) ? parseInt(req.query.days, 10) : 90;
+    const cutoff = new Date(Date.now() - (days * 24 * 60 * 60 * 1000));
     const now = new Date();
-    const cutoff = new Date(Date.now() - NINETY_DAYS_MS);
 
-    // Match robuste en cas d'anciens docs stockés en ObjectId
+    // Match robuste (anciens docs ObjectId éventuels)
     const communeMatch = [{ communeId: String(communeId) }];
     if (mongoose.Types.ObjectId.isValid(communeId)) {
       communeMatch.push({ communeId: new mongoose.Types.ObjectId(communeId) });
@@ -247,19 +257,14 @@ router.get('/:id', optionalAuth, async (req, res) => {
     const doc = await Article.findById(id).lean();
     if (!doc) return res.status(404).json({ message: 'Article introuvable' });
 
-    // Détection "panel" (admin/superadmin) vs public
     const role = req.user?.role || null;
     const isPanel = role === 'admin' || role === 'superadmin';
 
     if (!isPanel) {
-      // Côté public : n’autoriser QUE les articles locaux de la commune appelante
-      const cid = (req.header('x-commune-id') || req.query.communeId || '').trim();
+      const cid = (req.header('x-commune-id') || req.query.communeId || '').trim().toLowerCase();
 
-      if (doc.visibility !== 'local') {
-        return res.status(404).json({ message: 'Article introuvable' });
-      }
-
-      if (!cid || String(doc.communeId) !== String(cid)) {
+      if (doc.visibility !== 'local') return res.status(404).json({ message: 'Article introuvable' });
+      if (!cid || String(doc.communeId).toLowerCase() !== cid) {
         return res.status(404).json({ message: 'Article introuvable' });
       }
 
@@ -328,7 +333,7 @@ router.put(
         if (['local','global','custom'].includes(v)) {
           payload.visibility = v;
           if (v === 'local') {
-            const cid = String(req.body.communeId || '').trim();
+            const cid = String(req.body.communeId || '').trim().toLowerCase();
             if (!cid) return res.status(400).json({ message: 'communeId requis pour visibility=local' });
             payload.communeId = cid;
             payload.audienceCommunes = [];
@@ -339,7 +344,9 @@ router.put(
               try { const j = JSON.parse(arr); arr = Array.isArray(j) ? j : arr.split(','); }
               catch { arr = arr.split(','); }
             }
-            payload.audienceCommunes = Array.isArray(arr) ? arr.map(s => String(s).trim()).filter(Boolean) : [];
+            payload.audienceCommunes = Array.isArray(arr)
+              ? arr.map(s => String(s).trim().toLowerCase()).filter(Boolean)
+              : [];
           } else if (v === 'global') {
             payload.communeId = '';
             payload.audienceCommunes = [];
