@@ -14,17 +14,24 @@ const articleSchema = new mongoose.Schema(
       default: 'local',
       index: true,
     },
-    communeId:        { type: String, default: '', index: true },         // si local
-    audienceCommunes: { type: [String], default: [], index: true },       // si custom
+    communeId:        { type: String, default: '', index: true },   // si local
+    audienceCommunes: { type: [String], default: [], index: true }, // si custom
 
-    // Options d’affichage (facultatif)
+    // Options d’affichage
     priority: { type: String, enum: ['normal', 'pinned', 'urgent'], default: 'normal', index: true },
     startAt:  { type: Date, default: null, index: true },
     endAt:    { type: Date, default: null, index: true },
 
-    // Traçabilité (pour limiter la vue/édition aux auteurs)
+    // Traçabilité auteur (panel)
     authorId:    { type: String, default: '' },
     authorEmail: { type: String, default: '' },
+
+    // 🔹 Métadonnées requises par Google Play pour la section "Annonces"
+    publishedAt: { type: Date, default: Date.now, index: true }, // date de publication
+    authorName:  { type: String, default: '' },                  // nom affiché (facultatif)
+    publisher:   { type: String, default: 'Association Bellevue Dembeni' }, // éditeur affiché
+    sourceUrl:   { type: String, default: '' },                  // lien vers source officielle si reprise
+    status:      { type: String, enum: ['draft','published'], default: 'published', index: true }, // statut éditorial
   },
   { timestamps: true }
 );
