@@ -1,4 +1,3 @@
-// backend/models/Article.js
 const mongoose = require('mongoose');
 
 const articleSchema = new mongoose.Schema(
@@ -14,7 +13,7 @@ const articleSchema = new mongoose.Schema(
       default: 'local',
       index: true,
     },
-    communeId:        { type: String, default: '', index: true },   // si local
+    communeId:        { type: String, default: '', index: true },   // si local (toujours en lowercase)
     audienceCommunes: { type: [String], default: [], index: true }, // si custom
 
     // Options d’affichage
@@ -41,5 +40,14 @@ const articleSchema = new mongoose.Schema(
 articleSchema.index({ visibility: 1, communeId: 1 });
 articleSchema.index({ visibility: 1, audienceCommunes: 1 });
 articleSchema.index({ createdAt: -1 });
+
+// Sécurise: s'assurer que communeId et audienceCommunes sont lowercase
+articleSchema.pre('save', function(next) {
+  if (this.communeId) this.communeId = String(this.communeId).trim().toLowerCase();
+  if (Array.isArray(this.audienceCommunes)) {
+    this.audienceCommunes = this.audienceCommunes.map(s => String(s).trim().toLowerCase()).filter(Boolean);
+  }
+  next();
+});
 
 module.exports = mongoose.model('Article', articleSchema);
