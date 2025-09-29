@@ -4,7 +4,7 @@ const router = express.Router();
 const multer = require('multer');
 
 const Article = require('../models/Article');
-const auth = require('../middleware/authMiddleware'); // hydrate req.user
+const auth = require('../middleware/authMiddleware');
 const { storage } = require('../utils/cloudinary');
 const { buildVisibilityQuery } = require('../utils/visibility');
 
@@ -45,7 +45,7 @@ router.post(
         content: String(content).trim(),
         imageUrl: imageUrl || null,
 
-        visibility: 'local', // par défaut
+        visibility: 'local',
         communeId: req.user.communeId || '',
         audienceCommunes: [],
 
@@ -56,7 +56,7 @@ router.post(
         authorId: req.user.id,
         authorEmail: req.user.email,
 
-        // 🔹 métadonnées Play
+        // Métadonnées Play
         publishedAt: new Date(),
         authorName: (authorName || '').trim(),
         publisher: (publisher && publisher.trim()) || 'Association Bellevue Dembeni',
@@ -144,7 +144,7 @@ router.get('/', auth, async (req, res) => {
  * GET /api/articles/public
  * Accès sans token.
  * Requiert ?communeId=... ou header x-commune-id: ...
- * 🔹 Renvoie uniquement: status=published, publishedAt < 90j, dans fenêtre startAt/endAt
+ * Renvoie uniquement: status=published, publishedAt < 90j, dans fenêtre startAt/endAt
  */
 router.get('/public', async (req, res) => {
   try {
@@ -157,7 +157,6 @@ router.get('/public', async (req, res) => {
     const now = Date.now();
     const cutoff = new Date(now - NINETY_DAYS_MS);
 
-    // visibilité + fenêtre temporelle (publique)
     const filter = buildVisibilityQuery({
       communeId,
       userRole: null,
@@ -165,7 +164,6 @@ router.get('/public', async (req, res) => {
       includeTimeWindow: true,
     }) || {};
 
-    // 🔹 Contraintes Play
     filter.status = 'published';
     filter.publishedAt = Object.assign(filter.publishedAt || {}, { $gte: cutoff });
 
@@ -253,7 +251,7 @@ router.put(
       if ('startAt' in req.body) setIf('startAt', toDateOrNull(req.body.startAt));
       if ('endAt'   in req.body) setIf('endAt',   toDateOrNull(req.body.endAt));
 
-      // 🔹 métadonnées Play
+      // Métadonnées Play
       if ('publishedAt' in req.body) setIf('publishedAt', toDateOrNull(req.body.publishedAt) || current.publishedAt || new Date());
       if ('authorName'  in req.body) setIf('authorName', (req.body.authorName || '').trim());
       if ('publisher'   in req.body) setIf('publisher', (req.body.publisher || 'Association Bellevue Dembeni').trim());
