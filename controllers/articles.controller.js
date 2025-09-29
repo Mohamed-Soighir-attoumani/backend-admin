@@ -1,17 +1,16 @@
 // backend/controllers/articles.controller.js
-const Article = require("../models/Article"); // adapte le chemin si besoin
+const Article = require("../models/Article");
 
 // === (Optionnel) Cloudinary ===
 let cloudinary = null;
 try {
   cloudinary = require("cloudinary").v2;
 } catch (_) {
-  // Cloudinary non installé : on ignore silencieusement
+  // Cloudinary non installé : OK
 }
 
 /* ----------------------- Helpers ----------------------- */
 function getUserCommune(req) {
-  // On accepte communeId (String); communeSlug non utilisé dans le schéma actuel
   if (req.user?.communeId) return { key: "communeId", value: String(req.user.communeId) };
   return null;
 }
@@ -28,8 +27,7 @@ function assertLocalScopeAllowed(req, payloadCommune) {
     err.status = 400;
     throw err;
   }
-  const { value } = userCommune;
-  if (String(payloadCommune) !== String(value)) {
+  if (String(payloadCommune) !== String(userCommune.value)) {
     const err = new Error("Commune non autorisée");
     err.status = 403;
     throw err;
@@ -64,12 +62,11 @@ exports.createArticle = async (req, res) => {
     const {
       title,
       content,
-      visibility = "local", // "local" | "global" | "custom"
+      visibility = "local",
       startAt,
       endAt,
       imageUrl,
-      communeId,          // String
-      // Métadonnées Play (facultatives au POST)
+      communeId,
       authorName,
       publisher,
       sourceUrl,
@@ -80,24 +77,23 @@ exports.createArticle = async (req, res) => {
       return res.status(400).json({ message: "Titre et contenu sont requis." });
     }
 
-    // Si visibilité locale => contrôle strict de la commune
+    // Si local -> vérifier commune
     if (visibility === "local") {
       const payloadCommune = communeId || getUserCommune(req)?.value;
       assertLocalScopeAllowed(req, payloadCommune);
     }
 
-    // Upload éventuel sur Cloudinary
+    // Upload éventuel
     let finalImageUrl = imageUrl || null;
     let imagePublicId = null;
     if (!finalImageUrl && req.file) {
       const uploaded = await maybeUploadToCloudinary(req.file);
       if (uploaded) {
         finalImageUrl = uploaded.secure_url;
-        imagePublicId = uploaded.public_id;
+        imagePublicId = uploaded.public_id || null;
       }
     }
 
-    // Construction de l'objet article
     const doc = {
       title: String(title).trim(),
       content: String(content).trim(),
@@ -106,28 +102,28 @@ exports.createArticle = async (req, res) => {
       endAt: endAt ? new Date(endAt) : null,
       imageUrl: finalImageUrl,
       imagePublicId,
-      // Traçabilité auteur (panel)
+
+      // auteur (panel)
       authorId: req.user?.id ? String(req.user.id) : '',
       authorEmail: req.user?.email || '',
+
       // Métadonnées Play
       publishedAt: new Date(),
       authorName: (authorName || '').trim(),
       publisher: (publisher && String(publisher).trim()) || 'Association Bellevue Dembeni',
       sourceUrl: isHttpUrl(sourceUrl) ? sourceUrl : '',
       status: status === 'draft' ? 'draft' : 'published',
+
       // Multi-commune
       communeId: '',
       audienceCommunes: [],
     };
 
-    // Verrouillage commune côté serveur
     const userCommune = getUserCommune(req);
     if (visibility === "local" && userCommune) {
       doc.communeId = String(userCommune.value);
     } else {
-      // Pour d'autres portées, on accepte le payload si fourni (facultatif)
       if (communeId) doc.communeId = String(communeId);
-      // si "custom", prévoir audienceCommunes côté route si besoin
     }
 
     const article = await Article.create(doc);
@@ -141,7 +137,6 @@ exports.createArticle = async (req, res) => {
 /**
  * GET /api/articles
  * query: page?, limit?, q?, visibility?, onlyActive? (1|0), communeId?
- * - Si user admin local -> par défaut on filtre sur sa commune quand visibility=local.
  */
 exports.getArticles = async (req, res) => {
   try {
@@ -157,7 +152,6 @@ exports.getArticles = async (req, res) => {
     const filter = {};
     if (visibility) filter.visibility = visibility;
 
-    // Période d'affichage (startAt/endAt)
     if (String(onlyActive) === "1") {
       const now = new Date();
       filter.$and = [
@@ -166,7 +160,6 @@ exports.getArticles = async (req, res) => {
       ];
     }
 
-    // Recherche simple
     if (q) {
       filter.$or = [
         { title:   { $regex: q, $options: "i" } },
@@ -174,7 +167,6 @@ exports.getArticles = async (req, res) => {
       ];
     }
 
-    // Filtrage commune
     const userCommune = getUserCommune(req);
     if (visibility === "local") {
       if (userCommune) {
@@ -216,7 +208,6 @@ exports.getArticleById = async (req, res) => {
     const article = await Article.findById(id);
     if (!article) return res.status(404).json({ message: "Article introuvable" });
 
-    // Si article local, vérifier l'accès de l'admin à sa commune
     if (article.visibility === "local") {
       const userCommune = getUserCommune(req);
       if (!userCommune || String(article[userCommune.key]) !== String(userCommune.value)) {
@@ -233,8 +224,6 @@ exports.getArticleById = async (req, res) => {
 
 /**
  * PUT /api/articles/:id
- * body: mêmes champs que create
- * file: (optionnel) nouvelle image
  */
 exports.updateArticle = async (req, res) => {
   try {
@@ -244,7 +233,6 @@ exports.updateArticle = async (req, res) => {
     const article = await Article.findById(id);
     if (!article) return res.status(404).json({ message: "Article introuvable" });
 
-    // Contrôle commune si local
     if (article.visibility === "local") {
       const userCommune = getUserCommune(req);
       if (!userCommune) return res.status(403).json({ message: "Compte non rattaché à une commune" });
@@ -261,7 +249,6 @@ exports.updateArticle = async (req, res) => {
       endAt,
       imageUrl,
       communeId,
-      // métadonnées Play
       publishedAt,
       authorName,
       publisher,
@@ -269,17 +256,14 @@ exports.updateArticle = async (req, res) => {
       status,
     } = req.body || {};
 
-    // Empêche de déplacer un article local hors de la commune de l'admin
     if (visibility === "local") {
       const userCommune = getUserCommune(req);
       assertLocalScopeAllowed(req, (communeId || article.communeId));
       article.communeId = userCommune ? String(userCommune.value) : String(communeId || article.communeId || '');
+      article.visibility = 'local';
     } else if (typeof visibility === 'string' && ['global','custom'].includes(visibility)) {
       article.visibility = visibility;
-      if (visibility !== 'local') {
-        // si custom: on gèrera audienceCommunes côté route si nécessaire
-        article.communeId = '';
-      }
+      article.communeId = '';
     }
 
     if (typeof title === "string")   article.title = String(title).trim();
@@ -288,7 +272,6 @@ exports.updateArticle = async (req, res) => {
     if (startAt !== undefined) article.startAt = startAt ? new Date(startAt) : null;
     if (endAt !== undefined)   article.endAt   = endAt   ? new Date(endAt)   : null;
 
-    // Image: nouvelle imageUrl OU upload fichier
     if (imageUrl !== undefined) {
       article.imageUrl = imageUrl || null;
     } else if (req.file) {
@@ -299,7 +282,6 @@ exports.updateArticle = async (req, res) => {
       }
     }
 
-    // Métadonnées Play
     if (publishedAt !== undefined) article.publishedAt = publishedAt ? new Date(publishedAt) : (article.publishedAt || new Date());
     if (authorName  !== undefined) article.authorName  = String(authorName || '').trim();
     if (publisher   !== undefined) article.publisher   = String(publisher || 'Association Bellevue Dembeni').trim();
@@ -325,7 +307,6 @@ exports.deleteArticle = async (req, res) => {
     const article = await Article.findById(id);
     if (!article) return res.status(404).json({ message: "Article introuvable" });
 
-    // Contrôle commune si local
     if (article.visibility === "local") {
       const userCommune = getUserCommune(req);
       if (!userCommune) return res.status(403).json({ message: "Compte non rattaché à une commune" });
@@ -334,7 +315,6 @@ exports.deleteArticle = async (req, res) => {
       }
     }
 
-    // Suppression image Cloudinary si présente (best effort)
     if (article.imagePublicId && cloudinary) {
       try { await cloudinary.uploader.destroy(article.imagePublicId); } catch (_) {}
     }
