@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const multer = require('multer');
+const mongoose = require('mongoose');
 
 const Article = require('../models/Article');
 const auth = require('../middleware/authMiddleware'); // hydrate req.user
@@ -66,7 +67,7 @@ router.post(
         imageUrl: imageUrl || null,
 
         visibility: 'local', // par défaut
-        communeId: req.user.communeId || '',
+        communeId: req.user.communeId ? String(req.user.communeId) : '', // 🔧 forcer String
         audienceCommunes: [],
 
         priority: ['normal','pinned','urgent'].includes(priority) ? priority : 'normal',
@@ -89,7 +90,7 @@ router.post(
           base.visibility = visibility;
         }
         if (base.visibility === 'local') {
-          base.communeId = String(communeId || '').trim();
+          base.communeId = String(communeId || '').trim(); // 🔧 String côté DB
           if (!base.communeId) return res.status(400).json({ message: 'communeId requis pour visibility=local' });
         } else if (base.visibility === 'custom') {
           base.communeId = '';
@@ -164,8 +165,9 @@ router.get('/', auth, async (req, res) => {
  * GET /api/articles/public
  * Accès sans token.
  * Requiert ?communeId=... ou header x-commune-id: ...
- * Renvoie UNIQUEMENT: visibility=local sur la commune demandée,
- * status=published, publishedAt < 90j, et dans la fenêtre startAt/endAt.
+ * 🔒 Renvoie UNIQUEMENT les articles locaux de la commune demandée,
+ *     dans la fenêtre temporelle, publiés, et récents (< 90j).
+ *     (Pas de global/custom en public pour éviter le “cross-commune”.)
  */
 router.get('/public', async (req, res) => {
   try {
@@ -175,30 +177,36 @@ router.get('/public', async (req, res) => {
 
     if (!communeId) return res.status(400).json({ message: 'communeId requis' });
 
-    const now = Date.now();
-    const cutoff = new Date(now - NINETY_DAYS_MS);
+    const now = new Date();
+    const cutoff = new Date(Date.now() - NINETY_DAYS_MS);
+
+    // Match robuste en cas d'anciens docs stockés en ObjectId
+    const communeMatch = [{ communeId: String(communeId) }];
+    if (mongoose.Types.ObjectId.isValid(communeId)) {
+      communeMatch.push({ communeId: new mongoose.Types.ObjectId(communeId) });
+    }
 
     const filter = {
-      visibility: 'local',
-      communeId,
-      status: 'published',
-      publishedAt: { $gte: cutoff },
       $and: [
+        { visibility: 'local' },
+        { $or: communeMatch },
         {
           $or: [
             { startAt: { $exists: false } },
             { startAt: null },
-            { startAt: { $lte: new Date() } },
-          ],
+            { startAt: { $lte: now } },
+          ]
         },
         {
           $or: [
             { endAt: { $exists: false } },
             { endAt: null },
-            { endAt: { $gte: new Date() } },
-          ],
+            { endAt: { $gte: now } },
+          ]
         },
-      ],
+        { status: 'published' },
+        { publishedAt: { $gte: cutoff } },
+      ]
     };
 
     const docs = await Article.find(
@@ -247,17 +255,14 @@ router.get('/:id', optionalAuth, async (req, res) => {
       // Côté public : n’autoriser QUE les articles locaux de la commune appelante
       const cid = (req.header('x-commune-id') || req.query.communeId || '').trim();
 
-      // Si article non-local -> masquer
       if (doc.visibility !== 'local') {
         return res.status(404).json({ message: 'Article introuvable' });
       }
 
-      // Commune manquante ou différente -> masquer
       if (!cid || String(doc.communeId) !== String(cid)) {
         return res.status(404).json({ message: 'Article introuvable' });
       }
 
-      // Bonus sécurité temporelle sur la lecture publique
       const now = new Date();
       const okStart = !doc.startAt || doc.startAt <= now;
       const okEnd   = !doc.endAt   || doc.endAt   >= now;
