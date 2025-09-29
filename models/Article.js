@@ -6,8 +6,9 @@ const articleSchema = new mongoose.Schema(
     title:     { type: String, required: true, trim: true },
     content:   { type: String, required: true, trim: true },
     imageUrl:  { type: String, default: null },
+    imagePublicId: { type: String, default: null }, // pour nettoyage Cloudinary
 
-    // Portée multi-commune (aligné sur notifications/projets)
+    // Portée multi-commune
     visibility: {
       type: String,
       enum: ['local', 'global', 'custom'],
@@ -26,12 +27,12 @@ const articleSchema = new mongoose.Schema(
     authorId:    { type: String, default: '' },
     authorEmail: { type: String, default: '' },
 
-    // 🔹 Métadonnées requises par Google Play pour la section "Annonces"
-    publishedAt: { type: Date, default: Date.now, index: true }, // date de publication
-    authorName:  { type: String, default: '' },                  // nom affiché (facultatif)
-    publisher:   { type: String, default: 'Association Bellevue Dembeni' }, // éditeur affiché
-    sourceUrl:   { type: String, default: '' },                  // lien vers source officielle si reprise
-    status:      { type: String, enum: ['draft','published'], default: 'published', index: true }, // statut éditorial
+    // Métadonnées utiles pour Play et l’app
+    publishedAt: { type: Date, default: Date.now, index: true },
+    authorName:  { type: String, default: '' },
+    publisher:   { type: String, default: 'Association Bellevue Dembeni' },
+    sourceUrl:   { type: String, default: '' },
+    status:      { type: String, enum: ['draft','published'], default: 'published', index: true },
   },
   { timestamps: true }
 );
