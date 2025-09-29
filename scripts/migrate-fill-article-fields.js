@@ -7,18 +7,13 @@ const Article = require('../models/Article');
   try {
     await mongoose.connect(process.env.MONGODB_URI);
 
-    // Convertir d’anciens communeId ObjectId -> String (si présent)
-    try {
-      await mongoose.connection.db.collection('articles').updateMany(
-        { communeId: { $type: 'objectId' } },
-        [ { $set: { communeId: { $toString: '$communeId' } } } ]
-      );
-      console.log('communeId ObjectId -> String : OK');
-    } catch (e) {
-      console.log('Skip communeId type migration (Mongo <4.2 ?)', e.message);
-    }
+    // Convertit d'anciens communeId ObjectId -> String (si besoin)
+    await mongoose.connection.db.collection('articles').updateMany(
+      { communeId: { $type: "objectId" } },
+      [ { $set: { communeId: { $toString: "$communeId" } } } ]
+    );
 
-    const res = await Article.updateMany(
+    const res1 = await Article.updateMany(
       { $or: [ { publishedAt: { $exists: false } }, { publishedAt: null } ] },
       { $set: { publishedAt: new Date() } }
     );
@@ -31,14 +26,15 @@ const Article = require('../models/Article');
       { $set: { status: 'published' } }
     );
 
-    console.log(
-      'publishedAt filled:', res.modifiedCount,
-      '| publisher filled:', res2.modifiedCount,
-      '| status filled:', res3.modifiedCount
-    );
+    console.log('publishedAt filled:', res1.modifiedCount);
+    console.log('publisher filled:', res2.modifiedCount);
+    console.log('status filled:', res3.modifiedCount);
+
+    process.exit(0);
   } catch (e) {
     console.error(e);
+    process.exit(1);
   } finally {
-    await mongoose.disconnect();
+    try { await mongoose.disconnect(); } catch (_) {}
   }
 })();
