@@ -1,16 +1,35 @@
+// backend/routes/articles.js
 const express = require('express');
 const router = express.Router();
 const multer = require('multer');
 const mongoose = require('mongoose');
+const path = require('path');
 
 const Article = require('../models/Article');
-const auth = require('../middleware/authMiddleware'); // hydrate req.user
-const { storage } = require('../utils/cloudinary');
+const Commune = require('../models/Commune');
+const auth = require('../middleware/authMiddleware');
 const { buildVisibilityQuery } = require('../utils/visibility');
 
-const upload = multer({ storage });
+// ⚙️ On utilise EXACTEMENT le storage fourni par utils/cloudinary.js
+const { storage, hasCloudinary } = require('../utils/cloudinary');
+const upload = multer({ storage, limits: { fileSize: 10 * 1024 * 1024 } });
 
-/* -------------------- Helpers Rôles -------------------- */
+/* -------------------- Helpers -------------------- */
+
+// Transforme le fichier uploadé en URL publique
+// - Cloudinary: file.path est déjà une URL https
+// - Disque local: on expose /uploads/<filename> (server.js => app.use('/uploads', express.static(...)))
+function publicUrlFromFile(file) {
+  if (!file) return null;
+  if (hasCloudinary) {
+    // Cloudinary renvoie directement une URL publique
+    return file.path;
+  }
+  // Disk storage (utils/cloudinary fallback): on doit renvoyer /uploads/<filename>
+  const filename = file.filename || path.basename(file.path || '');
+  return filename ? `/uploads/${filename}` : null;
+}
+
 function ensureAdminOrSuperadmin(req, res, next) {
   if (!req.user) return res.status(401).json({ message: 'Non authentifié' });
   if (req.user.role !== 'admin' && req.user.role !== 'superadmin') {
@@ -21,7 +40,18 @@ function ensureAdminOrSuperadmin(req, res, next) {
 
 const isHttpUrl = (u) => typeof u === 'string' && /^https?:\/\//i.test(u);
 
-/** Auth optionnelle (lecture publique avec token possible) */
+// Normalise n’importe quel communeId en **slug** (si ObjectId => on lit la commune)
+async function normalizeCommuneId(anyId) {
+  const raw = (anyId ?? '').toString().trim().toLowerCase();
+  if (!raw) return '';
+  if (mongoose.Types.ObjectId.isValid(raw)) {
+    const c = await Commune.findById(raw).lean();
+    if (c) return (c.slug || c.id || '').toString().trim().toLowerCase();
+  }
+  return raw;
+}
+
+// JWT optionnel pour GET /articles/:id (lecture publique)
 const jwt = require('jsonwebtoken');
 function optionalAuth(req, _res, next) {
   const authz = req.header('authorization') || '';
@@ -31,7 +61,7 @@ function optionalAuth(req, _res, next) {
       const payload = jwt.verify(token, process.env.JWT_SECRET);
       req.user = {
         role: payload.role,
-        communeId: (payload.communeId || '').toString().toLowerCase(),
+        communeId: payload.communeId || '',
         email: payload.email || '',
         id: payload.id ? String(payload.id) : '',
       };
@@ -41,111 +71,107 @@ function optionalAuth(req, _res, next) {
 }
 
 /* ================== CREATE (panel) ================== */
-router.post(
-  '/',
-  auth,
-  ensureAdminOrSuperadmin,
-  upload.single('image'),
-  async (req, res) => {
-    try {
-      let {
-        title, content, visibility, communeId, priority, startAt, endAt,
-        authorName, publisher, sourceUrl, status
-      } = req.body || {};
+router.post('/', auth, ensureAdminOrSuperadmin, upload.single('image'), async (req, res) => {
+  try {
+    let {
+      title, content, visibility, communeId, priority, startAt, endAt,
+      authorName, publisher, sourceUrl, status
+    } = req.body || {};
 
-      if (!title || !content) {
-        return res.status(400).json({ message: 'Titre et contenu requis' });
-      }
-
-      const toDateOrNull = v => (v ? new Date(v) : null);
-      const imageUrl = req.file ? req.file.path : (req.body.imageUrl || null);
-
-      // normalisations utiles
-      const normCommuneFromUser = (req.user.communeId ? String(req.user.communeId) : '').trim().toLowerCase();
-      const normCommuneFromBody = (communeId ? String(communeId) : '').trim().toLowerCase();
-
-      const base = {
-        title: String(title).trim(),
-        content: String(content).trim(),
-        imageUrl: imageUrl || null,
-
-        visibility: 'local', // par défaut
-        communeId: normCommuneFromUser, // si admin
-        audienceCommunes: [],
-
-        priority: ['normal','pinned','urgent'].includes(priority) ? priority : 'normal',
-        startAt: toDateOrNull(startAt),
-        endAt: toDateOrNull(endAt),
-
-        authorId: req.user.id,
-        authorEmail: req.user.email,
-
-        // métadonnées Play / affichage
-        publishedAt: new Date(),
-        authorName: (authorName || '').trim(),
-        publisher: (publisher && publisher.trim()) || 'Association Bellevue Dembeni',
-        sourceUrl: isHttpUrl(sourceUrl) ? sourceUrl : '',
-        status: status === 'draft' ? 'draft' : 'published',
-      };
-
-      if (req.user.role === 'superadmin') {
-        // superadmin contrôle tout
-        if (visibility && ['local','global','custom'].includes(visibility)) {
-          base.visibility = visibility;
-        }
-        if (base.visibility === 'local') {
-          base.communeId = normCommuneFromBody;
-          if (!base.communeId) return res.status(400).json({ message: 'communeId requis pour visibility=local' });
-        } else if (base.visibility === 'custom') {
-          base.communeId = '';
-          const raw = req.body.audienceCommunes ?? req.body['audienceCommunes[]'] ?? [];
-          let arr = raw;
-          if (typeof raw === 'string') {
-            try { const j = JSON.parse(raw); arr = Array.isArray(j) ? j : raw.split(','); }
-            catch { arr = raw.split(','); }
-          }
-          base.audienceCommunes = Array.isArray(arr)
-            ? arr.map(s => String(s).trim().toLowerCase()).filter(Boolean)
-            : [];
-        } else if (base.visibility === 'global') {
-          base.communeId = '';
-          base.audienceCommunes = [];
-        }
-      } else {
-        // admin local
-        if (!base.communeId) {
-          return res.status(403).json({ message: 'Votre compte n’est pas rattaché à une commune' });
-        }
-        base.visibility = 'local';
-      }
-
-      const doc = await Article.create(base);
-      res.status(201).json(doc);
-    } catch (err) {
-      console.error('❌ POST /articles', err);
-      res.status(500).json({ message: 'Erreur serveur' });
+    if (!title || !content) {
+      return res.status(400).json({ message: 'Titre et contenu requis' });
     }
+
+    // Image: Cloudinary -> URL https, sinon /uploads/<file>
+    let imageUrl = req.body.imageUrl || null;
+    if (req.file) imageUrl = publicUrlFromFile(req.file);
+
+    const toDateOrNull = v => (v ? new Date(v) : null);
+
+    // Normalise la commune en slug pour la persistance
+    const userCidRaw = (req.user?.communeId || '').toString().trim().toLowerCase();
+    const bodyCidRaw = (communeId || '').toString().trim().toLowerCase();
+    const userCid = await normalizeCommuneId(userCidRaw);
+    const bodyCid = await normalizeCommuneId(bodyCidRaw);
+
+    const base = {
+      title: String(title).trim(),
+      content: String(content).trim(),
+      imageUrl: imageUrl || null,
+
+      visibility: 'local',
+      communeId: userCid, // par défaut pour admin
+      audienceCommunes: [],
+
+      priority: ['normal','pinned','urgent'].includes(priority) ? priority : 'normal',
+      startAt: toDateOrNull(startAt),
+      endAt: toDateOrNull(endAt),
+
+      authorId: req.user.id,
+      authorEmail: req.user.email,
+
+      publishedAt: new Date(),
+      authorName: (authorName || '').trim(),
+      publisher: (publisher && publisher.trim()) || 'Association Bellevue Dembeni',
+      sourceUrl: isHttpUrl(sourceUrl) ? sourceUrl : '',
+      status: status === 'draft' ? 'draft' : 'published',
+    };
+
+    if (req.user.role === 'superadmin') {
+      if (visibility && ['local','global','custom'].includes(visibility)) {
+        base.visibility = visibility;
+      }
+      if (base.visibility === 'local') {
+        base.communeId = bodyCid;
+        if (!base.communeId) {
+          return res.status(400).json({ message: 'communeId requis pour visibility=local' });
+        }
+      } else if (base.visibility === 'custom') {
+        base.communeId = '';
+        const raw = req.body.audienceCommunes ?? req.body['audienceCommunes[]'] ?? [];
+        let arr = raw;
+        if (typeof raw === 'string') {
+          try { const j = JSON.parse(raw); arr = Array.isArray(j) ? j : raw.split(','); }
+          catch { arr = raw.split(','); }
+        }
+        base.audienceCommunes = Array.isArray(arr)
+          ? arr.map(s => s.toString().trim().toLowerCase()).filter(Boolean)
+          : [];
+      } else if (base.visibility === 'global') {
+        base.communeId = '';
+        base.audienceCommunes = [];
+      }
+    } else {
+      if (!base.communeId) {
+        return res.status(403).json({ message: 'Votre compte n’est pas rattaché à une commune' });
+      }
+      base.visibility = 'local';
+    }
+
+    const doc = await Article.create(base);
+    res.status(201).json(doc);
+  } catch (err) {
+    console.error('❌ POST /articles', err);
+    res.status(500).json({ message: 'Erreur serveur' });
   }
-);
+});
 
 /* ================== LIST (panel, protégée) ================== */
 router.get('/', auth, async (req, res) => {
   try {
     const { period } = req.query;
-
     const headerCid = (req.header('x-commune-id') || '').trim().toLowerCase();
     const queryCid  = (req.query.communeId || '').trim().toLowerCase();
 
     const role = req.user?.role || null;
     const isPanel = role === 'admin' || role === 'superadmin';
 
-    const communeId =
-      headerCid ||
-      queryCid ||
-      (isPanel && req.user.role !== 'superadmin' ? (req.user?.communeId || '').toLowerCase() : '');
+    const resolvedCid = await normalizeCommuneId(
+      headerCid || queryCid || (isPanel && req.user.role !== 'superadmin' ? (req.user?.communeId || '') : '')
+    );
 
     const filter = buildVisibilityQuery({
-      communeId,
+      communeId: resolvedCid,
       userRole: role,
       includeLegacy: true,
       includeTimeWindow: false,
@@ -153,8 +179,7 @@ router.get('/', auth, async (req, res) => {
 
     if (period === '7' || period === '30') {
       const days = parseInt(period, 10);
-      const fromDate = new Date();
-      fromDate.setDate(fromDate.getDate() - days);
+      const fromDate = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
       filter.createdAt = Object.assign(filter.createdAt || {}, { $gte: fromDate });
     }
 
@@ -174,81 +199,37 @@ router.get('/', auth, async (req, res) => {
  * GET /api/articles/public
  * Accès sans token.
  * Requiert ?communeId=... ou header x-commune-id: ...
- * ✅ Renvoie:
- *   - les articles 'local' de la commune
- *   - les articles 'custom' dont audienceCommunes contient la commune
- *   - les articles 'global'
- *   - uniquement status='published', dans la fenêtre temporelle, récents (par défaut < 90j)
- *     Fenêtre ajustable via ?days=365
+ * ➜ Retourne UNIQUEMENT les articles "local" de la commune demandée (slug),
+ *    publiés, dans la fenêtre (par défaut 90 jours, param ?days=365 pour élargir).
  */
 router.get('/public', async (req, res) => {
   try {
     const headerCid = (req.header('x-commune-id') || '').trim().toLowerCase();
     const queryCid  = (req.query.communeId || '').trim().toLowerCase();
-    const communeId = headerCid || queryCid;
+    const communeId = await normalizeCommuneId(headerCid || queryCid);
 
     if (!communeId) return res.status(400).json({ message: 'communeId requis' });
 
-    // fenêtre
-    const reqDays = parseInt(req.query.days, 10);
-    const days = Number.isFinite(reqDays) && reqDays > 0 ? reqDays : 90;
-    const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+    const days = Number.isFinite(parseInt(req.query.days, 10)) ? parseInt(req.query.days, 10) : 90;
+    const cutoff = new Date(Date.now() - (days * 24 * 60 * 60 * 1000));
     const now = new Date();
-
-    // match commune robuste (legacy insensible à la casse, et ObjectId éventuel)
-    const communeMatchLocal = [
-      { communeId: communeId },
-      { communeId: new RegExp(`^${communeId}$`, 'i') },
-    ];
-    if (mongoose.Types.ObjectId.isValid(communeId)) {
-      communeMatchLocal.push({ communeId: new mongoose.Types.ObjectId(communeId) });
-    }
 
     const filter = {
       $and: [
-        {
-          $or: [
-            // global visible partout
-            { visibility: 'global' },
-            // local pour la commune
-            { $and: [{ visibility: 'local' }, { $or: communeMatchLocal }] },
-            // custom ciblant explicitement la commune
-            { $and: [{ visibility: 'custom' }, { audienceCommunes: communeId }] },
-          ],
-        },
+        { visibility: 'local' },
+        { communeId }, // stocké en slug
+        { $or: [{ startAt: { $exists: false } }, { startAt: null }, { startAt: { $lte: now } }] },
+        { $or: [{ endAt:   { $exists: false } }, { endAt: null },   { endAt:   { $gte: now } }] },
         { status: 'published' },
-        {
-          $or: [
-            { startAt: { $exists: false } },
-            { startAt: null },
-            { startAt: { $lte: now } },
-          ],
-        },
-        {
-          $or: [
-            { endAt: { $exists: false } },
-            { endAt: null },
-            { endAt: { $gte: now } },
-          ],
-        },
         { publishedAt: { $gte: cutoff } },
-      ],
+      ]
     };
 
     const docs = await Article.find(
       filter,
       {
-        title: 1,
-        content: 1,
-        imageUrl: 1,
-        publishedAt: 1,
-        authorName: 1,
-        publisher: 1,
-        sourceUrl: 1,
-        priority: 1,
-        visibility: 1,
-        communeId: 1,
-        audienceCommunes: 1,
+        title: 1, content: 1, imageUrl: 1, publishedAt: 1,
+        authorName: 1, publisher: 1, sourceUrl: 1, priority: 1,
       }
     )
       .sort({ priority: -1, publishedAt: -1 })
@@ -278,48 +259,25 @@ router.get('/:id', optionalAuth, async (req, res) => {
 
     const role = req.user?.role || null;
     const isPanel = role === 'admin' || role === 'superadmin';
-    if (isPanel) return res.json(doc); // panel peut tout lire
 
-    // Public: appliquer les règles de visibilité + fenêtre
-    const headerCid = (req.header('x-commune-id') || '').trim().toLowerCase();
-    const queryCid  = (req.query.communeId || '').trim().toLowerCase();
-    const communeId = headerCid || queryCid;
+    if (!isPanel) {
+      const rawCid = (req.header('x-commune-id') || req.query.communeId || '').trim().toLowerCase();
+      const cid = await normalizeCommuneId(rawCid);
 
-    const now = new Date();
-    const okStart = !doc.startAt || doc.startAt <= now;
-    const okEnd   = !doc.endAt   || doc.endAt   >= now;
-
-    const isPublished = doc.status === 'published';
-    if (!isPublished || !okStart || !okEnd) {
-      return res.status(404).json({ message: 'Article introuvable' });
-    }
-
-    if (doc.visibility === 'global') {
-      return res.json(doc);
-    }
-
-    if (doc.visibility === 'custom') {
-      if (!communeId) return res.status(404).json({ message: 'Article introuvable' });
-      if ((doc.audienceCommunes || []).map(s => String(s).toLowerCase()).includes(communeId)) {
-        return res.json(doc);
+      if (doc.visibility !== 'local') return res.status(404).json({ message: 'Article introuvable' });
+      if (!cid || String(doc.communeId).toLowerCase() !== cid) {
+        return res.status(404).json({ message: 'Article introuvable' });
       }
-      return res.status(404).json({ message: 'Article introuvable' });
+
+      const now = new Date();
+      const okStart = !doc.startAt || doc.startAt <= now;
+      const okEnd   = !doc.endAt   || doc.endAt   >= now;
+      if (doc.status !== 'published' || !okStart || !okEnd) {
+        return res.status(404).json({ message: 'Article introuvable' });
+      }
     }
 
-    // local
-    if (doc.visibility === 'local') {
-      if (!communeId) return res.status(404).json({ message: 'Article introuvable' });
-      const docCid = (doc.communeId || '').toString().toLowerCase();
-      if (docCid && docCid === communeId) return res.json(doc);
-
-      // tolérance casse et anciens formats
-      if (new RegExp(`^${communeId}$`, 'i').test(docCid)) return res.json(doc);
-
-      return res.status(404).json({ message: 'Article introuvable' });
-    }
-
-    // fallback
-    return res.status(404).json({ message: 'Article introuvable' });
+    res.json(doc);
   } catch (err) {
     console.error('❌ GET /articles/:id', err);
     res.status(500).json({ message: 'Erreur serveur' });
@@ -327,113 +285,104 @@ router.get('/:id', optionalAuth, async (req, res) => {
 });
 
 /* ================== UPDATE (panel) ================== */
-router.put(
-  '/:id',
-  auth,
-  ensureAdminOrSuperadmin,
-  upload.single('image'),
-  async (req, res) => {
-    try {
-      const id = String(req.params.id || '').trim();
-      if (!id || id.length < 12) {
-        return res.status(400).json({ message: 'ID invalide' });
-      }
-
-      const current = await Article.findById(id);
-      if (!current) return res.status(404).json({ message: 'Article introuvable' });
-
-      if (req.user.role === 'admin') {
-        if (String(current.authorId || '') !== String(req.user.id || '')) {
-          return res.status(403).json({ message: 'Interdit : vous ne pouvez modifier que vos articles' });
-        }
-      }
-
-      const payload = {};
-      const setIf = (k, v) => { if (v !== undefined) payload[k] = v; };
-      const toDateOrNull = v => (v ? new Date(v) : null);
-
-      if (req.body.title != null)   setIf('title',   String(req.body.title).trim());
-      if (req.body.content != null) setIf('content', String(req.body.content).trim());
-
-      if (req.file) setIf('imageUrl', req.file.path);
-      if (req.body.imageUrl !== undefined && !req.file) setIf('imageUrl', req.body.imageUrl || null);
-
-      if (req.body.priority && ['normal','pinned','urgent'].includes(req.body.priority)) {
-        setIf('priority', req.body.priority);
-      }
-      if ('startAt' in req.body) setIf('startAt', toDateOrNull(req.body.startAt));
-      if ('endAt'   in req.body) setIf('endAt',   toDateOrNull(req.body.endAt));
-
-      // métadonnées
-      if ('publishedAt' in req.body) setIf('publishedAt', toDateOrNull(req.body.publishedAt) || current.publishedAt || new Date());
-      if ('authorName'  in req.body) setIf('authorName', (req.body.authorName || '').trim());
-      if ('publisher'   in req.body) setIf('publisher', (req.body.publisher || 'Association Bellevue Dembeni').trim());
-      if ('sourceUrl'   in req.body) setIf('sourceUrl', isHttpUrl(req.body.sourceUrl) ? req.body.sourceUrl : '');
-      if ('status'      in req.body) setIf('status', req.body.status === 'draft' ? 'draft' : 'published');
-
-      if (req.user.role === 'superadmin' && req.body.visibility) {
-        const v = req.body.visibility;
-        if (['local','global','custom'].includes(v)) {
-          payload.visibility = v;
-          if (v === 'local') {
-            const cid = String(req.body.communeId || '').trim().toLowerCase();
-            if (!cid) return res.status(400).json({ message: 'communeId requis pour visibility=local' });
-            payload.communeId = cid;
-            payload.audienceCommunes = [];
-          } else if (v === 'custom') {
-            payload.communeId = '';
-            let arr = req.body.audienceCommunes ?? req.body['audienceCommunes[]'] ?? [];
-            if (typeof arr === 'string') {
-              try { const j = JSON.parse(arr); arr = Array.isArray(j) ? j : arr.split(','); }
-              catch { arr = arr.split(','); }
-            }
-            payload.audienceCommunes = Array.isArray(arr)
-              ? arr.map(s => String(s).trim().toLowerCase()).filter(Boolean)
-              : [];
-          } else if (v === 'global') {
-            payload.communeId = '';
-            payload.audienceCommunes = [];
-          }
-        }
-      }
-
-      const updated = await Article.findByIdAndUpdate(id, { $set: payload }, { new: true });
-      res.json(updated);
-    } catch (err) {
-      console.error('❌ PUT /articles/:id', err);
-      res.status(500).json({ message: 'Erreur modification article' });
+router.put('/:id', auth, ensureAdminOrSuperadmin, upload.single('image'), async (req, res) => {
+  try {
+    const id = String(req.params.id || '').trim();
+    if (!id || id.length < 12) {
+      return res.status(400).json({ message: 'ID invalide' });
     }
+
+    const current = await Article.findById(id);
+    if (!current) return res.status(404).json({ message: 'Article introuvable' });
+
+    if (req.user.role === 'admin') {
+      if (String(current.authorId || '') !== String(req.user.id || '')) {
+        return res.status(403).json({ message: 'Interdit : vous ne pouvez modifier que vos articles' });
+      }
+    }
+
+    const payload = {};
+    const setIf = (k, v) => { if (v !== undefined) payload[k] = v; };
+    const toDateOrNull = v => (v ? new Date(v) : null);
+
+    if (req.body.title != null)   setIf('title',   String(req.body.title).trim());
+    if (req.body.content != null) setIf('content', String(req.body.content).trim());
+
+    if (req.file) {
+      setIf('imageUrl', publicUrlFromFile(req.file));
+    } else if (req.body.imageUrl !== undefined) {
+      setIf('imageUrl', req.body.imageUrl || null);
+    }
+
+    if (req.body.priority && ['normal','pinned','urgent'].includes(req.body.priority)) {
+      setIf('priority', req.body.priority);
+    }
+    if ('startAt' in req.body) setIf('startAt', toDateOrNull(req.body.startAt));
+    if ('endAt'   in req.body) setIf('endAt',   toDateOrNull(req.body.endAt));
+
+    if ('publishedAt' in req.body) setIf('publishedAt', toDateOrNull(req.body.publishedAt) || current.publishedAt || new Date());
+    if ('authorName'  in req.body) setIf('authorName', (req.body.authorName || '').trim());
+    if ('publisher'   in req.body) setIf('publisher', (req.body.publisher || 'Association Bellevue Dembeni').trim());
+    if ('sourceUrl'   in req.body) setIf('sourceUrl', isHttpUrl(req.body.sourceUrl) ? req.body.sourceUrl : '');
+    if ('status'      in req.body) setIf('status', req.body.status === 'draft' ? 'draft' : 'published');
+
+    if (req.user.role === 'superadmin' && req.body.visibility) {
+      const v = req.body.visibility;
+      if (['local','global','custom'].includes(v)) {
+        payload.visibility = v;
+        if (v === 'local') {
+          const cid = await normalizeCommuneId(req.body.communeId || '');
+          if (!cid) return res.status(400).json({ message: 'communeId requis pour visibility=local' });
+          payload.communeId = cid;
+          payload.audienceCommunes = [];
+        } else if (v === 'custom') {
+          payload.communeId = '';
+          let arr = req.body.audienceCommunes ?? req.body['audienceCommunes[]'] ?? [];
+          if (typeof arr === 'string') {
+            try { const j = JSON.parse(arr); arr = Array.isArray(j) ? j : arr.split(','); }
+            catch { arr = arr.split(','); }
+          }
+          payload.audienceCommunes = Array.isArray(arr)
+            ? arr.map(s => s.toString().trim().toLowerCase()).filter(Boolean)
+            : [];
+        } else if (v === 'global') {
+          payload.communeId = '';
+          payload.audienceCommunes = [];
+        }
+      }
+    }
+
+    const updated = await Article.findByIdAndUpdate(id, { $set: payload }, { new: true });
+    res.json(updated);
+  } catch (err) {
+    console.error('❌ PUT /articles/:id', err);
+    res.status(500).json({ message: 'Erreur modification article' });
   }
-);
+});
 
 /* ================== DELETE (panel) ================== */
-router.delete(
-  '/:id',
-  auth,
-  ensureAdminOrSuperadmin,
-  async (req, res) => {
-    try {
-      const id = String(req.params.id || '').trim();
-      if (!id || id.length < 12) {
-        return res.status(400).json({ message: 'ID invalide' });
-      }
-
-      const current = await Article.findById(id);
-      if (!current) return res.status(404).json({ message: 'Article introuvable' });
-
-      if (req.user.role === 'admin') {
-        if (String(current.authorId || '') !== String(req.user.id || '')) {
-          return res.status(403).json({ message: 'Interdit : vous ne pouvez supprimer que vos articles' });
-        }
-      }
-
-      await Article.deleteOne({ _id: id });
-      res.json({ message: '✅ Article supprimé' });
-    } catch (err) {
-      console.error('❌ DELETE /articles/:id', err);
-      res.status(500).json({ message: 'Erreur suppression article' });
+router.delete('/:id', auth, ensureAdminOrSuperadmin, async (req, res) => {
+  try {
+    const id = String(req.params.id || '').trim();
+    if (!id || id.length < 12) {
+      return res.status(400).json({ message: 'ID invalide' });
     }
+
+    const current = await Article.findById(id);
+    if (!current) return res.status(404).json({ message: 'Article introuvable' });
+
+    if (req.user.role === 'admin') {
+      if (String(current.authorId || '') !== String(req.user.id || '')) {
+        return res.status(403).json({ message: 'Interdit : vous ne pouvez supprimer que vos articles' });
+      }
+    }
+
+    await Article.deleteOne({ _id: id });
+    res.json({ message: '✅ Article supprimé' });
+  } catch (err) {
+    console.error('❌ DELETE /articles/:id', err);
+    res.status(500).json({ message: 'Erreur suppression article' });
   }
-);
+});
 
 module.exports = router;
