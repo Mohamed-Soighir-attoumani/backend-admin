@@ -4,56 +4,58 @@ const router = express.Router();
 const multer = require('multer');
 const mongoose = require('mongoose');
 const path = require('path');
+const jwt = require('jsonwebtoken');
 
 const Article = require('../models/Article');
 const Commune = require('../models/Commune');
 const auth = require('../middleware/authMiddleware');
-// Gardé si tu l’utilises ailleurs ; pas nécessaire ici mais inoffensif
+// Gardé (même si non utilisé partout) pour compat descendante
 const { buildVisibilityQuery } = require('../utils/visibility');
 
+// ⚙️ Storage conforme à utils/cloudinary.js (Cloudinary ou disque)
 const { storage, hasCloudinary } = require('../utils/cloudinary');
 const upload = multer({ storage, limits: { fileSize: 10 * 1024 * 1024 } });
 
-// --- helpers existants ---
+/* -------------------- Helpers -------------------- */
+
+// Transforme le fichier uploadé en URL publique
 function publicUrlFromFile(file) {
   if (!file) return null;
-  if (hasCloudinary) return file.path;
+  if (hasCloudinary) return file.path; // Cloudinary: déjà une URL https
   const filename = file.filename || path.basename(file.path || '');
-  return filename ? `/uploads/${filename}` : null;
+  return filename ? `/uploads/${filename}` : null; // Disque: /uploads/... (server.js doit servir ce dossier)
 }
 
-// 🔧 NOUVEAUX HELPERS — unifient slug/ObjectId
+// Normalise et rassemble les clés possibles d’une commune (slug <-> ObjectId)
 async function communeKeys(anyId) {
   const raw = (anyId ?? '').toString().trim().toLowerCase();
   if (!raw) return { list: [] };
 
-  const s = new Set([raw]); // garde toujours la valeur brute
-
+  const s = new Set([raw]); // on garde toujours la valeur fournie
   if (mongoose.Types.ObjectId.isValid(raw)) {
-    // on a un ObjectId → récupère le slug
+    // raw est un ObjectId → récupérer le slug
     const c = await Commune.findById(raw).lean();
     if (c?.slug) s.add(String(c.slug).trim().toLowerCase());
   } else {
-    // on a un slug (ou code) → récupère aussi l’_id
+    // raw est un slug → récupérer le _id
     const c = await Commune.findOne({ slug: raw }).lean();
     if (c?._id) s.add(String(c._id).toLowerCase());
   }
   return { list: [...s] };
 }
 
-// Utilitaire: préférer stocker le slug quand on crée/maj un article
+// Préférer stocker le slug quand on crée/maj un article
 async function preferSlug(rawIdOrSlug) {
   const raw = (rawIdOrSlug ?? '').toString().trim().toLowerCase();
   if (!raw) return '';
   if (mongoose.Types.ObjectId.isValid(raw)) {
     const c = await Commune.findById(raw).lean();
-    return (c?.slug ? String(c.slug).trim().toLowerCase() : raw);
+    return c?.slug ? String(c.slug).trim().toLowerCase() : raw;
   }
   return raw; // déjà un slug
 }
 
-// --- auth optionnel pour GET /:id ---
-const jwt = require('jsonwebtoken');
+// Auth optionnelle (lecture publique de /:id)
 function optionalAuth(req, _res, next) {
   const authz = req.header('authorization') || '';
   if (authz.startsWith('Bearer ')) {
@@ -66,7 +68,9 @@ function optionalAuth(req, _res, next) {
         email: payload.email || '',
         id: payload.id ? String(payload.id) : '',
       };
-    } catch (_) {}
+    } catch (_) {
+      // token invalide → ignorer
+    }
   }
   next();
 }
@@ -75,7 +79,7 @@ function optionalAuth(req, _res, next) {
 router.post('/', auth, upload.single('image'), async (req, res) => {
   try {
     if (!req.user) return res.status(401).json({ message: 'Non authentifié' });
-    if (!['admin','superadmin'].includes(req.user.role)) {
+    if (!['admin', 'superadmin'].includes(req.user.role)) {
       return res.status(403).json({ message: 'Accès réservé aux admins' });
     }
 
@@ -91,9 +95,9 @@ router.post('/', auth, upload.single('image'), async (req, res) => {
     let imageUrl = req.body.imageUrl || null;
     if (req.file) imageUrl = publicUrlFromFile(req.file);
 
-    const toDateOrNull = v => (v ? new Date(v) : null);
+    const toDateOrNull = (v) => (v ? new Date(v) : null);
 
-    // 🔁 Toujours stocker un identifiant de commune **canonique (slug si dispo)**
+    // Stockage canonique de la commune (slug si possible)
     const userCidRaw = (req.user?.communeId || '').toString().trim().toLowerCase();
     const bodyCidRaw = (communeId || '').toString().trim().toLowerCase();
     const userCid = await preferSlug(userCidRaw);
@@ -108,7 +112,7 @@ router.post('/', auth, upload.single('image'), async (req, res) => {
       communeId: userCid, // par défaut pour admin
       audienceCommunes: [],
 
-      priority: ['normal','pinned','urgent'].includes(priority) ? priority : 'normal',
+      priority: ['normal', 'pinned', 'urgent'].includes(priority) ? priority : 'normal',
       startAt: toDateOrNull(startAt),
       endAt: toDateOrNull(endAt),
 
@@ -118,12 +122,13 @@ router.post('/', auth, upload.single('image'), async (req, res) => {
       publishedAt: new Date(),
       authorName: (authorName || '').trim(),
       publisher: (publisher && publisher.trim()) || 'Association Bellevue Dembeni',
-      sourceUrl: (typeof sourceUrl === 'string' && /^https?:\/\//i.test(sourceUrl)) ? sourceUrl : '',
+      sourceUrl:
+        typeof sourceUrl === 'string' && /^https?:\/\//i.test(sourceUrl) ? sourceUrl : '',
       status: status === 'draft' ? 'draft' : 'published',
     };
 
     if (req.user.role === 'superadmin') {
-      if (visibility && ['local','global','custom'].includes(visibility)) {
+      if (visibility && ['local', 'global', 'custom'].includes(visibility)) {
         base.visibility = visibility;
       }
       if (base.visibility === 'local') {
@@ -136,18 +141,24 @@ router.post('/', auth, upload.single('image'), async (req, res) => {
         const raw = req.body.audienceCommunes ?? req.body['audienceCommunes[]'] ?? [];
         let arr = raw;
         if (typeof raw === 'string') {
-          try { const j = JSON.parse(raw); arr = Array.isArray(j) ? j : raw.split(','); }
-          catch { arr = raw.split(','); }
+          try {
+            const j = JSON.parse(raw);
+            arr = Array.isArray(j) ? j : raw.split(',');
+          } catch {
+            arr = raw.split(',');
+          }
         }
-        // 🔁 normaliser toutes les communes en slug si possible
         base.audienceCommunes = Array.isArray(arr)
-          ? (await Promise.all(arr.map(preferSlug))).map(s => s.trim().toLowerCase()).filter(Boolean)
+          ? (await Promise.all(arr.map(preferSlug)))
+              .map((s) => s.trim().toLowerCase())
+              .filter(Boolean)
           : [];
       } else if (base.visibility === 'global') {
         base.communeId = '';
         base.audienceCommunes = [];
       }
     } else {
+      // admin simple
       if (!base.communeId) {
         return res.status(403).json({ message: 'Votre compte n’est pas rattaché à une commune' });
       }
@@ -166,49 +177,49 @@ router.post('/', auth, upload.single('image'), async (req, res) => {
 router.get('/', auth, async (req, res) => {
   try {
     if (!req.user) return res.status(401).json({ message: 'Non authentifié' });
-    if (!['admin','superadmin'].includes(req.user.role)) {
+    if (!['admin', 'superadmin'].includes(req.user.role)) {
       return res.status(403).json({ message: 'Accès réservé aux admins' });
     }
 
     const { period } = req.query;
     const role = req.user.role;
 
-    // on accepte la commune depuis header ou query (priorité au header)
+    // commune depuis header ou query (priorité au header)
     const headerCid = (req.header('x-commune-id') || '').trim().toLowerCase();
-    const queryCid  = (req.query.communeId || '').trim().toLowerCase();
+    const queryCid = (req.query.communeId || '').trim().toLowerCase();
 
     let filter = {};
 
     if (role === 'admin') {
-      // admin : filtrer sur SA commune (header/query peuvent éventuellement l’écraser)
+      // admin : filtre sur SA commune (header/query peuvent l’écraser si on le souhaite)
       const baseCid = headerCid || queryCid || (req.user.communeId || '');
       const { list: ids } = await communeKeys(baseCid);
       if (!ids.length) return res.json([]); // pas de commune => pas d’articles
 
       filter = {
         $or: [
-          { visibility: 'local',  communeId:        { $in: ids } },
+          { visibility: 'local', communeId: { $in: ids } },
           { visibility: 'custom', audienceCommunes: { $in: ids } },
           { visibility: 'global' },
         ],
       };
     } else if (role === 'superadmin') {
-      // superadmin : si commune précisée, on filtre pour cette commune ; sinon on renvoie tout
+      // superadmin : si commune précisée => filtrer pour celle-ci ; sinon tout
       if (headerCid || queryCid) {
         const { list: ids } = await communeKeys(headerCid || queryCid);
         filter = {
           $or: [
-            { visibility: 'local',  communeId:        { $in: ids } },
+            { visibility: 'local', communeId: { $in: ids } },
             { visibility: 'custom', audienceCommunes: { $in: ids } },
             { visibility: 'global' },
           ],
         };
       } else {
-        filter = {}; // toutes les communes, toutes les visibilités
+        filter = {}; // toutes les communes
       }
     }
 
-    // filtre période optionnel (sur createdAt)
+    // Période optionnelle (sur createdAt)
     if (period === '7' || period === '30') {
       const days = parseInt(period, 10);
       const fromDate = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
@@ -239,21 +250,23 @@ router.get('/', auth, async (req, res) => {
 router.get('/public', async (req, res) => {
   try {
     const headerCid = (req.header('x-commune-id') || '').trim().toLowerCase();
-    const queryCid  = (req.query.communeId || '').trim().toLowerCase();
+    const queryCid = (req.query.communeId || '').trim().toLowerCase();
     const keys = await communeKeys(headerCid || queryCid);
     const ids = keys.list;
 
     if (!ids.length) return res.status(400).json({ message: 'communeId requis' });
 
-    const days = Number.isFinite(parseInt(req.query.days, 10)) ? parseInt(req.query.days, 10) : 90;
-    const cutoff = new Date(Date.now() - (days * 24 * 60 * 60 * 1000));
+    const days = Number.isFinite(parseInt(req.query.days, 10))
+      ? parseInt(req.query.days, 10)
+      : 90;
+    const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
     const now = new Date();
 
     const timeWindow = {
       $and: [
         { $or: [{ startAt: { $exists: false } }, { startAt: null }, { startAt: { $lte: now } }] },
-        { $or: [{ endAt:   { $exists: false } }, { endAt: null },   { endAt:   { $gte: now } }] },
-      ]
+        { $or: [{ endAt: { $exists: false } }, { endAt: null }, { endAt: { $gte: now } }] },
+      ],
     };
 
     const filter = {
@@ -264,9 +277,9 @@ router.get('/public', async (req, res) => {
         {
           $or: [
             { visibility: 'global' },
-            { visibility: 'local',  communeId:        { $in: ids } },
+            { visibility: 'local', communeId: { $in: ids } },
             { visibility: 'custom', audienceCommunes: { $in: ids } },
-          ]
+          ],
         },
       ],
     };
@@ -274,8 +287,15 @@ router.get('/public', async (req, res) => {
     const docs = await Article.find(
       filter,
       {
-        title: 1, content: 1, imageUrl: 1, publishedAt: 1,
-        authorName: 1, publisher: 1, sourceUrl: 1, priority: 1, visibility: 1,
+        title: 1,
+        content: 1,
+        imageUrl: 1,
+        publishedAt: 1,
+        authorName: 1,
+        publisher: 1,
+        sourceUrl: 1,
+        priority: 1,
+        visibility: 1,
       }
     )
       .sort({ priority: -1, publishedAt: -1 })
@@ -307,11 +327,13 @@ router.get('/:id', optionalAuth, async (req, res) => {
     const isPanel = role === 'admin' || role === 'superadmin';
 
     if (!isPanel) {
-      const rawCid = (req.header('x-commune-id') || req.query.communeId || '').trim().toLowerCase();
+      const rawCid = (req.header('x-commune-id') || req.query.communeId || '')
+        .trim()
+        .toLowerCase();
       const { list: ids } = await communeKeys(rawCid);
       const now = new Date();
       const okStart = !doc.startAt || doc.startAt <= now;
-      const okEnd   = !doc.endAt   || doc.endAt   >= now;
+      const okEnd = !doc.endAt || doc.endAt >= now;
       const okStatus = doc.status === 'published';
 
       let allowed = false;
@@ -320,8 +342,8 @@ router.get('/:id', optionalAuth, async (req, res) => {
       } else if (doc.visibility === 'local') {
         allowed = ids.includes(String(doc.communeId).toLowerCase());
       } else if (doc.visibility === 'custom') {
-        const set = new Set((doc.audienceCommunes || []).map(s => String(s).toLowerCase()));
-        allowed = ids.some(k => set.has(k));
+        const set = new Set((doc.audienceCommunes || []).map((s) => String(s).toLowerCase()));
+        allowed = ids.some((k) => set.has(k));
       }
 
       if (!(allowed && okStatus && okStart && okEnd)) {
@@ -340,7 +362,7 @@ router.get('/:id', optionalAuth, async (req, res) => {
 router.put('/:id', auth, upload.single('image'), async (req, res) => {
   try {
     if (!req.user) return res.status(401).json({ message: 'Non authentifié' });
-    if (!['admin','superadmin'].includes(req.user.role)) {
+    if (!['admin', 'superadmin'].includes(req.user.role)) {
       return res.status(403).json({ message: 'Accès réservé aux admins' });
     }
 
@@ -354,15 +376,19 @@ router.put('/:id', auth, upload.single('image'), async (req, res) => {
 
     if (req.user.role === 'admin') {
       if (String(current.authorId || '') !== String(req.user.id || '')) {
-        return res.status(403).json({ message: 'Interdit : vous ne pouvez modifier que vos articles' });
+        return res
+          .status(403)
+          .json({ message: 'Interdit : vous ne pouvez modifier que vos articles' });
       }
     }
 
     const payload = {};
-    const setIf = (k, v) => { if (v !== undefined) payload[k] = v; };
-    const toDateOrNull = v => (v ? new Date(v) : null);
+    const setIf = (k, v) => {
+      if (v !== undefined) payload[k] = v;
+    };
+    const toDateOrNull = (v) => (v ? new Date(v) : null);
 
-    if (req.body.title != null)   setIf('title',   String(req.body.title).trim());
+    if (req.body.title != null) setIf('title', String(req.body.title).trim());
     if (req.body.content != null) setIf('content', String(req.body.content).trim());
 
     if (req.file) {
@@ -371,21 +397,29 @@ router.put('/:id', auth, upload.single('image'), async (req, res) => {
       setIf('imageUrl', req.body.imageUrl || null);
     }
 
-    if (req.body.priority && ['normal','pinned','urgent'].includes(req.body.priority)) {
+    if (req.body.priority && ['normal', 'pinned', 'urgent'].includes(req.body.priority)) {
       setIf('priority', req.body.priority);
     }
     if ('startAt' in req.body) setIf('startAt', toDateOrNull(req.body.startAt));
-    if ('endAt'   in req.body) setIf('endAt',   toDateOrNull(req.body.endAt));
+    if ('endAt' in req.body) setIf('endAt', toDateOrNull(req.body.endAt));
 
-    if ('publishedAt' in req.body) setIf('publishedAt', toDateOrNull(req.body.publishedAt) || current.publishedAt || new Date());
-    if ('authorName'  in req.body) setIf('authorName', (req.body.authorName || '').trim());
-    if ('publisher'   in req.body) setIf('publisher', (req.body.publisher || 'Association Bellevue Dembeni').trim());
-    if ('sourceUrl'   in req.body) setIf('sourceUrl', (typeof req.body.sourceUrl === 'string' && /^https?:\/\//i.test(req.body.sourceUrl)) ? req.body.sourceUrl : '');
-    if ('status'      in req.body) setIf('status', req.body.status === 'draft' ? 'draft' : 'published');
+    if ('publishedAt' in req.body)
+      setIf('publishedAt', toDateOrNull(req.body.publishedAt) || current.publishedAt || new Date());
+    if ('authorName' in req.body) setIf('authorName', (req.body.authorName || '').trim());
+    if ('publisher' in req.body)
+      setIf('publisher', (req.body.publisher || 'Association Bellevue Dembeni').trim());
+    if ('sourceUrl' in req.body)
+      setIf(
+        'sourceUrl',
+        typeof req.body.sourceUrl === 'string' && /^https?:\/\//i.test(req.body.sourceUrl)
+          ? req.body.sourceUrl
+          : ''
+      );
+    if ('status' in req.body) setIf('status', req.body.status === 'draft' ? 'draft' : 'published');
 
     if (req.user.role === 'superadmin' && req.body.visibility) {
       const v = req.body.visibility;
-      if (['local','global','custom'].includes(v)) {
+      if (['local', 'global', 'custom'].includes(v)) {
         payload.visibility = v;
         if (v === 'local') {
           const cid = await preferSlug(req.body.communeId || '');
@@ -396,11 +430,17 @@ router.put('/:id', auth, upload.single('image'), async (req, res) => {
           payload.communeId = '';
           let arr = req.body.audienceCommunes ?? req.body['audienceCommunes[]'] ?? [];
           if (typeof arr === 'string') {
-            try { const j = JSON.parse(arr); arr = Array.isArray(j) ? j : arr.split(','); }
-            catch { arr = arr.split(','); }
+            try {
+              const j = JSON.parse(arr);
+              arr = Array.isArray(j) ? j : arr.split(',');
+            } catch {
+              arr = arr.split(',');
+            }
           }
           payload.audienceCommunes = Array.isArray(arr)
-            ? (await Promise.all(arr.map(preferSlug))).map(s => s.trim().toLowerCase()).filter(Boolean)
+            ? (await Promise.all(arr.map(preferSlug)))
+                .map((s) => s.trim().toLowerCase())
+                .filter(Boolean)
             : [];
         } else if (v === 'global') {
           payload.communeId = '';
@@ -421,7 +461,7 @@ router.put('/:id', auth, upload.single('image'), async (req, res) => {
 router.delete('/:id', auth, async (req, res) => {
   try {
     if (!req.user) return res.status(401).json({ message: 'Non authentifié' });
-    if (!['admin','superadmin'].includes(req.user.role)) {
+    if (!['admin', 'superadmin'].includes(req.user.role)) {
       return res.status(403).json({ message: 'Accès réservé aux admins' });
     }
 
@@ -435,7 +475,9 @@ router.delete('/:id', auth, async (req, res) => {
 
     if (req.user.role === 'admin') {
       if (String(current.authorId || '') !== String(req.user.id || '')) {
-        return res.status(403).json({ message: 'Interdit : vous ne pouvez supprimer que vos articles' });
+        return res
+          .status(403)
+          .json({ message: 'Interdit : vous ne pouvez supprimer que vos articles' });
       }
     }
 
