@@ -61,6 +61,27 @@ function normalizeLegacy(d) {
   };
 }
 
+// --------- Helpers filtre commune (admin/superadmin) ---------
+function getFilteredCommuneId(req) {
+  // superadmin : peut expliciter x-commune-id (vide => toutes)
+  const hdr = (req.headers['x-commune-id'] || '').toString().trim();
+
+  if (req.user?.role === 'superadmin') {
+    // Si header présent (même chaîne vide), on le respecte ;
+    // chaîne vide => pas de filtre (toutes communes)
+    if (hdr || hdr === '') return hdr;
+    // sinon, pas de filtre par défaut pour superadmin
+    return '';
+  }
+
+  // admin : forcer sa commune, ignorer tout header éventuel
+  if (req.user?.role === 'admin' && req.user?.communeId) {
+    return String(req.user.communeId);
+  }
+
+  return ''; // défaut : pas de filtre
+}
+
 /**
  * POST /api/devices/register  (côté app)
  */
@@ -156,19 +177,26 @@ router.get('/public-count', requireAppKey, async (req, res) => {
 });
 
 /**
- * GET /api/devices/count  (admin)
+ * GET /api/devices/count  (admin/superadmin)
+ * Filtre commune :
+ *  - superadmin : via header x-commune-id (vide => toutes)
+ *  - admin      : commune imposée par son compte
  */
 router.get('/count', auth, requireRole('admin','superadmin'), async (req, res) => {
   try {
     const nd = Math.max(1, parseInt(req.query.activeDays || '30', 10));
     const since = new Date(Date.now() - nd * 24 * 60 * 60 * 1000);
 
+    const communeId = getFilteredCommuneId(req); // '' => toutes
+    const baseFilter = communeId ? { communeId } : {};
+    const activeFilter = { ...baseFilter, lastSeenAt: { $gte: since } };
+
     const [total, active] = await Promise.all([
-      Device.countDocuments({}),
-      Device.countDocuments({ lastSeenAt: { $gte: since } }),
+      Device.countDocuments(baseFilter),
+      Device.countDocuments(activeFilter),
     ]);
 
-    res.json({ count: total, active, activeDays: nd });
+    res.json({ count: total, active, activeDays: nd, communeId: communeId || null });
   } catch (e) {
     console.error('GET /devices/count', e);
     res.status(500).json({ message: 'Erreur serveur' });
@@ -176,21 +204,25 @@ router.get('/count', auth, requireRole('admin','superadmin'), async (req, res) =
 });
 
 /**
- * GET /api/devices (admin)
+ * GET /api/devices (admin/superadmin)
+ * Filtre commune identique à /count
  */
 router.get('/', auth, requireRole('admin','superadmin'), async (req, res) => {
   try {
     const p  = Math.max(1,  parseInt(req.query.page || '1', 10));
     const ps = Math.min(100, Math.max(1, parseInt(req.query.pageSize || '50', 10)));
 
+    const communeId = getFilteredCommuneId(req); // '' => toutes
+    const filter = communeId ? { communeId } : {};
+
     const [list, total] = await Promise.all([
-      Device.find({})
+      Device.find(filter)
         .select('installationId deviceId platform brand model osVersion appVersion lastSeenAt firstSeenAt registeredAt communeId communeName createdAt updatedAt')
         .sort({ lastSeenAt: -1, createdAt: -1 })
         .skip((p-1)*ps)
         .limit(ps)
         .lean(),
-      Device.countDocuments({}),
+      Device.countDocuments(filter),
     ]);
 
     const items = list.map(normalizeLegacy);
