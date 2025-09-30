@@ -8,7 +8,9 @@ const path = require('path');
 const Article = require('../models/Article');
 const Commune = require('../models/Commune');
 const auth = require('../middleware/authMiddleware');
-const { buildVisibilityQuery } = require('../utils/visibility'); // laissé tel quel
+// Gardé si tu l’utilises ailleurs ; pas nécessaire ici mais inoffensif
+const { buildVisibilityQuery } = require('../utils/visibility');
+
 const { storage, hasCloudinary } = require('../utils/cloudinary');
 const upload = multer({ storage, limits: { fileSize: 10 * 1024 * 1024 } });
 
