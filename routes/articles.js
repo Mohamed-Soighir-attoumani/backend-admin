@@ -1,9 +1,12 @@
+// backend/routes/articles.js
 const express = require('express');
 const router = express.Router();
 const multer = require('multer');
 const mongoose = require('mongoose');
+const jwt = require('jsonwebtoken');
 
 const Article = require('../models/Article');
+const Commune = require('../models/Commune'); // 👈 nécessaire pour canoniser
 const auth = require('../middleware/authMiddleware'); // hydrate req.user
 const { storage } = require('../utils/cloudinary');
 const { buildVisibilityQuery } = require('../utils/visibility');
@@ -22,8 +25,7 @@ function ensureAdminOrSuperadmin(req, res, next) {
 const NINETY_DAYS_MS = 90 * 24 * 60 * 60 * 1000;
 const isHttpUrl = (u) => typeof u === 'string' && /^https?:\/\//i.test(u);
 
-/** Auth optionnelle (lecture publique avec token possible) */
-const jwt = require('jsonwebtoken');
+/* -------------------- Auth optionnelle (lecture) -------------------- */
 function optionalAuth(req, _res, next) {
   const authz = req.header('authorization') || '';
   if (authz.startsWith('Bearer ')) {
@@ -32,13 +34,51 @@ function optionalAuth(req, _res, next) {
       const payload = jwt.verify(token, process.env.JWT_SECRET);
       req.user = {
         role: payload.role,
-        communeId: payload.communeId || '',
+        communeId: (payload.communeId || '').toString(),
         email: payload.email || '',
         id: payload.id ? String(payload.id) : '',
       };
     } catch (_) {}
   }
   next();
+}
+
+/* -------------------- Canonisation de commune -------------------- */
+/**
+ * Retourne une clé commune canonique (slug) depuis :
+ *  - slug direct ("dembeni")
+ *  - id "technique" (ex: "dembeni")
+ *  - ObjectId Mongo
+ * Si rien n’est trouvé, renvoie la valeur normalisée (lowercase).
+ */
+async function canonCommuneKey(input) {
+  const raw = String(input || '').trim().toLowerCase();
+  if (!raw) return '';
+
+  // 1) _id
+  if (mongoose.Types.ObjectId.isValid(raw)) {
+    const doc = await Commune.findById(raw).select('slug id').lean();
+    if (doc) return (doc.slug || doc.id || String(doc._id)).toLowerCase();
+  }
+  // 2) slug | id
+  const doc = await Commune.findOne({ $or: [{ slug: raw }, { id: raw }] })
+    .select('slug id')
+    .lean();
+  if (doc) return (doc.slug || doc.id).toLowerCase();
+
+  // fallback: on utilise tel quel
+  return raw;
+}
+
+/** Canonise un tableau de communes vers des slugs uniques. */
+async function canonCommuneArray(arr) {
+  if (!Array.isArray(arr)) return [];
+  const out = [];
+  for (const v of arr) {
+    const k = await canonCommuneKey(v);
+    if (k) out.push(k);
+  }
+  return Array.from(new Set(out));
 }
 
 /* ================== CREATE (panel) ================== */
@@ -51,7 +91,7 @@ router.post(
     try {
       let {
         title, content, visibility, communeId, priority, startAt, endAt,
-        authorName, publisher, sourceUrl, status
+        authorName, publisher, sourceUrl, status,
       } = req.body || {};
 
       if (!title || !content) {
@@ -61,17 +101,14 @@ router.post(
       const toDateOrNull = v => (v ? new Date(v) : null);
       const imageUrl = req.file ? req.file.path : (req.body.imageUrl || null);
 
-      // normalisations utiles
-      const normCommuneFromUser = (req.user.communeId ? String(req.user.communeId) : '').trim().toLowerCase();
-      const normCommuneFromBody = (communeId ? String(communeId) : '').trim().toLowerCase();
-
+      // ---- Base
       const base = {
         title: String(title).trim(),
         content: String(content).trim(),
         imageUrl: imageUrl || null,
 
-        visibility: 'local', // par défaut
-        communeId: normCommuneFromUser, // si admin
+        visibility: 'local', // défaut
+        communeId: '',       // sera canonisé plus bas
         audienceCommunes: [],
 
         priority: ['normal','pinned','urgent'].includes(priority) ? priority : 'normal',
@@ -81,7 +118,7 @@ router.post(
         authorId: req.user.id,
         authorEmail: req.user.email,
 
-        // métadonnées Play / affichage
+        // Métadonnées affichage
         publishedAt: new Date(),
         authorName: (authorName || '').trim(),
         publisher: (publisher && publisher.trim()) || 'Association Bellevue Dembeni',
@@ -89,13 +126,18 @@ router.post(
         status: status === 'draft' ? 'draft' : 'published',
       };
 
+      // ---- Choix visibilité + commune (canonisée)
       if (req.user.role === 'superadmin') {
+        // superadmin : on respecte la demande
         if (visibility && ['local','global','custom'].includes(visibility)) {
           base.visibility = visibility;
         }
+
         if (base.visibility === 'local') {
-          base.communeId = normCommuneFromBody;
-          if (!base.communeId) return res.status(400).json({ message: 'communeId requis pour visibility=local' });
+          const src = (communeId || req.header('x-commune-id') || '').toString();
+          const canon = await canonCommuneKey(src);
+          if (!canon) return res.status(400).json({ message: 'communeId requis pour visibility=local' });
+          base.communeId = canon;
         } else if (base.visibility === 'custom') {
           base.communeId = '';
           const raw = req.body.audienceCommunes ?? req.body['audienceCommunes[]'] ?? [];
@@ -104,22 +146,25 @@ router.post(
             try { const j = JSON.parse(raw); arr = Array.isArray(j) ? j : raw.split(','); }
             catch { arr = raw.split(','); }
           }
-          base.audienceCommunes = Array.isArray(arr)
-            ? arr.map(s => String(s).trim().toLowerCase()).filter(Boolean)
-            : [];
-        } else if (base.visibility === 'global') {
+          base.audienceCommunes = await canonCommuneArray(arr);
+        } else { // global
           base.communeId = '';
           base.audienceCommunes = [];
         }
       } else {
-        if (!base.communeId) {
+        // admin : on force local + commune rattachée (mais on accepte un header/body pour corriger un compte mal renseigné)
+        const src = (communeId || req.header('x-commune-id') || req.user.communeId || '').toString();
+        const canon = await canonCommuneKey(src);
+        if (!canon) {
           return res.status(403).json({ message: 'Votre compte n’est pas rattaché à une commune' });
         }
         base.visibility = 'local';
+        base.communeId = canon;
+        base.audienceCommunes = [];
       }
 
       const doc = await Article.create(base);
-      res.status(201).json(doc);
+      return res.status(201).json(doc);
     } catch (err) {
       console.error('❌ POST /articles', err);
       res.status(500).json({ message: 'Erreur serveur' });
@@ -134,17 +179,16 @@ router.get('/', auth, async (req, res) => {
 
     const headerCid = (req.header('x-commune-id') || '').trim().toLowerCase();
     const queryCid  = (req.query.communeId || '').trim().toLowerCase();
-
     const role = req.user?.role || null;
     const isPanel = role === 'admin' || role === 'superadmin';
 
-    const communeId =
-      headerCid ||
-      queryCid ||
-      (isPanel && req.user.role !== 'superadmin' ? (req.user?.communeId || '').toLowerCase() : '');
+    // canonise ce qui arrive
+    const resolvedCid =
+      (await canonCommuneKey(headerCid || queryCid)) ||
+      (isPanel && req.user.role !== 'superadmin' ? await canonCommuneKey(req.user?.communeId || '') : '');
 
     const filter = buildVisibilityQuery({
-      communeId,
+      communeId: resolvedCid,
       userRole: role,
       includeLegacy: true,
       includeTimeWindow: false,
@@ -152,8 +196,7 @@ router.get('/', auth, async (req, res) => {
 
     if (period === '7' || period === '30') {
       const days = parseInt(period, 10);
-      const fromDate = new Date();
-      fromDate.setDate(fromDate.getDate() - days);
+      const fromDate = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
       filter.createdAt = Object.assign(filter.createdAt || {}, { $gte: fromDate });
     }
 
@@ -171,52 +214,32 @@ router.get('/', auth, async (req, res) => {
 /* ================== LIST PUBLIQUE (app/mobile) ================== */
 /**
  * GET /api/articles/public
- * Accès sans token.
- * Requiert ?communeId=... ou header x-commune-id: ...
- * 🔒 Renvoie UNIQUEMENT les articles locaux de la commune demandée,
- *     dans la fenêtre temporelle, publiés, et récents (par défaut < 90j).
- *     Tu peux desserrer la fenêtre via ?days=365 (exemple).
+ * - Sans token
+ * - Requiert ?communeId=... ou header x-commune-id
+ * - Renvoie ONLY: visibility=local, status=published, dans fenêtre, récents (par défaut 90j)
  */
 router.get('/public', async (req, res) => {
   try {
     const headerCid = (req.header('x-commune-id') || '').trim().toLowerCase();
     const queryCid  = (req.query.communeId || '').trim().toLowerCase();
-    const communeId = headerCid || queryCid;
+    const communeRaw = headerCid || queryCid;
 
-    if (!communeId) return res.status(400).json({ message: 'communeId requis' });
+    const communeKey = await canonCommuneKey(communeRaw);
+    if (!communeKey) return res.status(400).json({ message: 'communeId requis' });
 
-    // Permet de configurer la fenêtre (par ex. ?days=365 pour tester de vieux articles)
     const days = Number.isFinite(parseInt(req.query.days, 10)) ? parseInt(req.query.days, 10) : 90;
     const cutoff = new Date(Date.now() - (days * 24 * 60 * 60 * 1000));
     const now = new Date();
 
-    // Match robuste (anciens docs ObjectId éventuels)
-    const communeMatch = [{ communeId: String(communeId) }];
-    if (mongoose.Types.ObjectId.isValid(communeId)) {
-      communeMatch.push({ communeId: new mongoose.Types.ObjectId(communeId) });
-    }
-
     const filter = {
+      visibility: 'local',
+      communeId: communeKey, // 👈 match canonique
+      status: 'published',
+      publishedAt: { $gte: cutoff },
       $and: [
-        { visibility: 'local' },
-        { $or: communeMatch },
-        {
-          $or: [
-            { startAt: { $exists: false } },
-            { startAt: null },
-            { startAt: { $lte: now } },
-          ]
-        },
-        {
-          $or: [
-            { endAt: { $exists: false } },
-            { endAt: null },
-            { endAt: { $gte: now } },
-          ]
-        },
-        { status: 'published' },
-        { publishedAt: { $gte: cutoff } },
-      ]
+        { $or: [{ startAt: null }, { startAt: { $exists: false } }, { startAt: { $lte: now } }] },
+        { $or: [{ endAt: null },   { endAt:   { $exists: false } }, { endAt:   { $gte: now } }] },
+      ],
     };
 
     const docs = await Article.find(
@@ -239,7 +262,7 @@ router.get('/public', async (req, res) => {
     res.set('Cache-Control', 'no-store');
     res.set('Pragma', 'no-cache');
     res.set('Expires', '0');
-    res.json(docs);
+    return res.json(docs);
   } catch (err) {
     console.error('❌ GET /articles/public', err);
     res.status(500).json({ message: 'Erreur serveur' });
@@ -261,22 +284,22 @@ router.get('/:id', optionalAuth, async (req, res) => {
     const isPanel = role === 'admin' || role === 'superadmin';
 
     if (!isPanel) {
-      const cid = (req.header('x-commune-id') || req.query.communeId || '').trim().toLowerCase();
+      const raw = (req.header('x-commune-id') || req.query.communeId || '').toString();
+      const cid = await canonCommuneKey(raw);
+      const now = new Date();
+      const okStart = !doc.startAt || doc.startAt <= now;
+      const okEnd   = !doc.endAt   || doc.endAt   >= now;
 
       if (doc.visibility !== 'local') return res.status(404).json({ message: 'Article introuvable' });
       if (!cid || String(doc.communeId).toLowerCase() !== cid) {
         return res.status(404).json({ message: 'Article introuvable' });
       }
-
-      const now = new Date();
-      const okStart = !doc.startAt || doc.startAt <= now;
-      const okEnd   = !doc.endAt   || doc.endAt   >= now;
       if (doc.status !== 'published' || !okStart || !okEnd) {
         return res.status(404).json({ message: 'Article introuvable' });
       }
     }
 
-    res.json(doc);
+    return res.json(doc);
   } catch (err) {
     console.error('❌ GET /articles/:id', err);
     res.status(500).json({ message: 'Erreur serveur' });
@@ -321,7 +344,6 @@ router.put(
       if ('startAt' in req.body) setIf('startAt', toDateOrNull(req.body.startAt));
       if ('endAt'   in req.body) setIf('endAt',   toDateOrNull(req.body.endAt));
 
-      // métadonnées Play
       if ('publishedAt' in req.body) setIf('publishedAt', toDateOrNull(req.body.publishedAt) || current.publishedAt || new Date());
       if ('authorName'  in req.body) setIf('authorName', (req.body.authorName || '').trim());
       if ('publisher'   in req.body) setIf('publisher', (req.body.publisher || 'Association Bellevue Dembeni').trim());
@@ -333,9 +355,9 @@ router.put(
         if (['local','global','custom'].includes(v)) {
           payload.visibility = v;
           if (v === 'local') {
-            const cid = String(req.body.communeId || '').trim().toLowerCase();
-            if (!cid) return res.status(400).json({ message: 'communeId requis pour visibility=local' });
-            payload.communeId = cid;
+            const canon = await canonCommuneKey(req.body.communeId || '');
+            if (!canon) return res.status(400).json({ message: 'communeId requis pour visibility=local' });
+            payload.communeId = canon;
             payload.audienceCommunes = [];
           } else if (v === 'custom') {
             payload.communeId = '';
@@ -344,9 +366,7 @@ router.put(
               try { const j = JSON.parse(arr); arr = Array.isArray(j) ? j : arr.split(','); }
               catch { arr = arr.split(','); }
             }
-            payload.audienceCommunes = Array.isArray(arr)
-              ? arr.map(s => String(s).trim().toLowerCase()).filter(Boolean)
-              : [];
+            payload.audienceCommunes = await canonCommuneArray(arr);
           } else if (v === 'global') {
             payload.communeId = '';
             payload.audienceCommunes = [];
