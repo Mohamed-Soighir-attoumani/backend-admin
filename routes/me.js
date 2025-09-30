@@ -1,3 +1,4 @@
+// backend/routes/me.js
 const express = require('express');
 const mongoose = require('mongoose');
 const fs = require('fs');
@@ -48,8 +49,23 @@ async function deleteIfExists(filePath) {
 }
 
 // --------- GET /api/me ----------
+// ⚠️ Ne renvoie jamais 404 : s’appuie sur req.user (JWT) et enrichit avec la base si dispo.
 router.get('/me', auth, async (req, res) => {
   try {
+    const payload = {
+      id: req.user.id,
+      email: req.user.email,
+      role: req.user.role,
+      communeId: req.user.communeId || '',
+      communeName: req.user.communeName || '',
+      tv: typeof req.user.tv === 'number' ? req.user.tv : 0,
+      impersonated: !!req.user.impersonated,
+      origUserId: req.user.origUserId || null,
+      name: null,
+      photo: null,
+    };
+
+    // Tente d’enrichir avec la base (name, photo, éventuelles infos à jour)
     const { id, email } = req.user || {};
     let doc = null;
 
@@ -62,8 +78,16 @@ router.get('/me', auth, async (req, res) => {
       if (!doc && Admin) doc = await Admin.findOne({ email }).select('email role name communeId communeName photo');
     }
 
-    if (!doc) return res.status(404).json({ message: 'Utilisateur non trouvé' });
-    return res.json({ user: doc });
+    if (doc) {
+      payload.name = doc.name ?? payload.name;
+      payload.photo = doc.photo ?? payload.photo;
+      // Si la base a des valeurs plus fraîches pour la commune, on les prend
+      if (doc.communeId)   payload.communeId = String(doc.communeId);
+      if (doc.communeName) payload.communeName = String(doc.communeName);
+      if (doc.role)        payload.role = doc.role;
+    }
+
+    return res.json({ user: payload });
   } catch (e) {
     console.error('GET /api/me error', e);
     return res.status(500).json({ message: 'Erreur interne du serveur' });
@@ -71,6 +95,7 @@ router.get('/me', auth, async (req, res) => {
 });
 
 // --------- PATCH /api/me ----------
+// Met à jour des champs simples côté base. Réponse: user enrichi (même forme que GET /me)
 router.patch('/me', auth, async (req, res) => {
   try {
     const updatable = ['name', 'communeName', 'photo'];
@@ -89,8 +114,26 @@ router.patch('/me', auth, async (req, res) => {
       if (!doc && Admin) doc = await Admin.findOneAndUpdate({ email }, updates, { new: true, select: 'email role name communeId communeName photo' });
     }
 
-    if (!doc) return res.status(404).json({ message: 'Utilisateur non trouvé' });
-    return res.json({ user: doc });
+    // On renvoie le même shape que GET /me (jamais 404)
+    const payload = {
+      id: req.user.id,
+      email: req.user.email,
+      role: req.user.role,
+      communeId: req.user.communeId || '',
+      communeName: req.user.communeName || '',
+      tv: typeof req.user.tv === 'number' ? req.user.tv : 0,
+      impersonated: !!req.user.impersonated,
+      origUserId: req.user.origUserId || null,
+      name: doc?.name ?? null,
+      photo: doc?.photo ?? null,
+    };
+
+    // Si la base a des valeurs plus fraîches pour la commune/role
+    if (doc?.communeId)   payload.communeId = String(doc.communeId);
+    if (doc?.communeName) payload.communeName = String(doc.communeName);
+    if (doc?.role)        payload.role = doc.role;
+
+    return res.json({ user: payload });
   } catch (e) {
     console.error('PATCH /api/me:', e);
     return res.status(500).json({ message: 'Erreur interne du serveur' });
@@ -125,21 +168,41 @@ router.post('/me/photo', auth, upload.single('photo'), async (req, res) => {
       doc = await User.findOne({ email }).select('email role name communeId communeName photo');
       if (!doc && Admin) doc = await Admin.findOne({ email }).select('email role name communeId communeName photo');
     }
-    if (!doc) return res.status(404).json({ message: 'Utilisateur non trouvé' });
 
-    if (doc.photo) {
-      const localOld = localPathFromPublicUrl(doc.photo);
-      await deleteIfExists(localOld);
+    // On ne renvoie pas 404 si pas de doc : on mettra juste l’URL dans la réponse
+    if (doc) {
+      if (doc.photo) {
+        const localOld = localPathFromPublicUrl(doc.photo);
+        await deleteIfExists(localOld);
+      }
+
+      // Mettre à jour la photo dans le bon modèle
+      if (doc.constructor.modelName === 'User') {
+        doc = await User.findByIdAndUpdate(doc._id, { photo: url }, { new: true, select: 'email role name communeId communeName photo' });
+      } else {
+        doc = await Admin.findByIdAndUpdate(doc._id, { photo: url }, { new: true, select: 'email role name communeId communeName photo' });
+      }
     }
 
-    // Mettre à jour la photo dans le bon modèle
-    if (doc.constructor.modelName === 'User') {
-      doc = await User.findByIdAndUpdate(doc._id, { photo: url }, { new: true, select: 'email role name communeId communeName photo' });
-    } else {
-      doc = await Admin.findByIdAndUpdate(doc._id, { photo: url }, { new: true, select: 'email role name communeId communeName photo' });
-    }
+    // Shape de réponse cohérente avec GET/PATCH
+    const payload = {
+      id: req.user.id,
+      email: req.user.email,
+      role: req.user.role,
+      communeId: req.user.communeId || '',
+      communeName: req.user.communeName || '',
+      tv: typeof req.user.tv === 'number' ? req.user.tv : 0,
+      impersonated: !!req.user.impersonated,
+      origUserId: req.user.origUserId || null,
+      name: doc?.name ?? null,
+      photo: doc?.photo ?? url, // au minimum, la nouvelle URL
+    };
 
-    return res.json({ message: 'Photo mise à jour', url, user: doc });
+    if (doc?.communeId)   payload.communeId = String(doc.communeId);
+    if (doc?.communeName) payload.communeName = String(doc.communeName);
+    if (doc?.role)        payload.role = doc.role;
+
+    return res.json({ message: 'Photo mise à jour', url: payload.photo, user: payload });
   } catch (e) {
     console.error('POST /api/me/photo:', e);
     const msg = e.message?.includes('File too large')
