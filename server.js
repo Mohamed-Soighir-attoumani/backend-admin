@@ -16,6 +16,9 @@ const { secretFingerprint } = require('./utils/jwt');
 const Commune = require('./models/Commune');
 const communesRouter = require('./routes/communes');
 
+// ✅ Auth middleware pour /api/me pare-balles
+const auth = require('./middleware/authMiddleware');
+
 const app = express();
 
 const PORT = process.env.PORT || 4000;
@@ -63,10 +66,30 @@ app.use(promBundle({
 
 app.get('/api/health', (_, res) => res.json({ status: 'ok', timestamp: Date.now() }));
 
+// ✅ Pare-balles: expose /api/me ici pour éviter tout 404 (même si routes/me.js bug)
+//    -> Si ton routes/me.js répond aussi sur /me, celui-ci garantit un fallback sain.
+app.get('/api/me', auth, (req, res) => {
+  res.json({
+    user: {
+      id: req.user.id,
+      email: req.user.email,
+      role: req.user.role,
+      communeId: req.user.communeId || '',
+      communeName: req.user.communeName || '',
+      tv: typeof req.user.tv === 'number' ? req.user.tv : 0,
+      impersonated: !!req.user.impersonated,
+      origUserId: req.user.origUserId || null,
+      // champs facultatifs (la route dédiée peut enrichir)
+      name: null,
+      photo: null,
+    },
+  });
+});
+
 /* Routes API */
 app.use('/api', require('./routes/setup-admin'));
 app.use('/api', require('./routes/auth'));
-app.use('/api', require('./routes/me'));
+app.use('/api', require('./routes/me')); // garde la version enrichie (name/photo...), pare-balles couvre le 404
 app.use('/api/change-password', (req, _res, next) => { console.log('[HIT] /api/change-password', req.method, req.path || '/'); next(); }, require('./routes/changePassword'));
 app.use('/api/incidents', require('./routes/incidents'));
 app.use('/api/articles', require('./routes/articles'));
@@ -103,7 +126,7 @@ app.use((err, req, res, _next) => {
   res.status(500).json({ message: 'Erreur interne du serveur' });
 });
 
-// 404 API
+// 404 API (après toutes les routes)
 app.use('/api/*', (req, res) => {
   res.status(404).json({ message: `Route API introuvable ❌ (${req.method} ${req.originalUrl})` });
 });
