@@ -10,15 +10,7 @@ const lc = (v) => String(v ?? '').trim().toLowerCase();
 
 const APP_KEY = process.env.MOBILE_APP_KEY || null;
 
-// --------- Protection côté app (clé) ---------
-function requireAppKey(req, res, next) {
-  if (!APP_KEY) return res.status(500).json({ message: 'MOBILE_APP_KEY manquante côté serveur' });
-  const k = req.header('x-app-key');
-  if (k !== APP_KEY) return res.status(403).json({ message: 'Clé app invalide' });
-  next();
-}
-
-// --------- Helpers commune: slug <-> ObjectId (toutes formes) ---------
+/* ---------- Commune helpers ---------- */
 async function communeKeys(anyId) {
   const raw = lc(anyId);
   if (!raw) return { list: [] };
@@ -41,7 +33,41 @@ async function communeKeys(anyId) {
   return { list: Array.from(out) };
 }
 
-// --------- Utils affichage legacy ---------
+function escapeRegExp(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+function buildCommuneClause(ids) {
+  if (!Array.isArray(ids) || !ids.length) return null;
+
+  const exact = [];
+  const strings = new Set();
+
+  for (const id of ids) {
+    if (typeof id === 'string') strings.add(id);
+    else exact.push(id);
+  }
+  ids.forEach((x) => {
+    const s = (x && x.toString) ? x.toString() : null;
+    if (s) strings.add(s);
+  });
+
+  const regexes = Array.from(strings).map((s) => new RegExp(`^${escapeRegExp(s)}$`, 'i'));
+  const ors = [];
+  if (exact.length || strings.size) ors.push({ communeId: { $in: [...exact, ...Array.from(strings)] } });
+  if (regexes.length) ors.push({ communeId: { $in: regexes } });
+
+  return ors.length ? { $or: ors } : null;
+}
+
+/* --------- Protection côté app (clé) --------- */
+function requireAppKey(req, res, next) {
+  if (!APP_KEY) return res.status(500).json({ message: 'MOBILE_APP_KEY manquante côté serveur' });
+  const k = req.header('x-app-key');
+  if (k !== APP_KEY) return res.status(403).json({ message: 'Clé app invalide' });
+  next();
+}
+
+/* --------- Utils affichage legacy --------- */
 function normalizeLegacy(d) {
   const installationId = d.installationId || d.deviceId || '';
 
@@ -81,22 +107,11 @@ function normalizeLegacy(d) {
   };
 }
 
-// --------- Helper filtrage commune pour panel ---------
-function getPanelCommuneRaw(req) {
-  return lc(req.headers['x-commune-id'] || req.query.communeId || '');
-}
+/* ====================================
+ *        App mobile
+ * ==================================== */
 
-/* Petit log (facultatif)
-router.use((req, _res, next) => { console.log(`[devices] ${req.method} ${req.originalUrl}`); next(); });
-*/
-
-// =====================================
-//  App mobile
-// =====================================
-
-/**
- * POST /api/devices/register  (côté app)
- */
+/** POST /api/devices/register */
 router.post('/register', requireAppKey, async (req, res) => {
   try {
     let {
@@ -116,7 +131,7 @@ router.post('/register', requireAppKey, async (req, res) => {
       lastSeenAt: new Date(),
     };
     if (userId && isObjectId(userId)) update.userId = userId;
-    if (communeId)   update.communeId = String(communeId);
+    if (communeId)   update.communeId = lc(communeId);     // ✅ normalise
     if (communeName) update.communeName = String(communeName);
 
     const doc = await Device.findOneAndUpdate(
@@ -125,7 +140,6 @@ router.post('/register', requireAppKey, async (req, res) => {
       { upsert: true, new: true }
     );
 
-    // 201 si tout juste créé (approximatif)
     const created = doc && doc.firstSeenAt && Math.abs(doc.firstSeenAt.getTime() - Date.now()) < 2000;
     return res.status(created ? 201 : 200).json({ ok: true, created: !!created, updated: !created });
   } catch (e) {
@@ -134,9 +148,7 @@ router.post('/register', requireAppKey, async (req, res) => {
   }
 });
 
-/**
- * POST /api/devices/ping  (côté app)
- */
+/** POST /api/devices/ping */
 router.post('/ping', requireAppKey, async (req, res) => {
   try {
     const { installationId } = req.body || {};
@@ -144,7 +156,9 @@ router.post('/ping', requireAppKey, async (req, res) => {
 
     const set = { lastSeenAt: new Date() };
     ['appVersion','osVersion','brand','model','platform','pushToken','communeId','communeName'].forEach(k => {
-      if (req.body[k] !== undefined && req.body[k] !== null) set[k] = String(req.body[k]);
+      if (req.body[k] !== undefined && req.body[k] !== null) {
+        set[k] = (k === 'communeId') ? lc(req.body[k]) : String(req.body[k]); // ✅ normalise communeId
+      }
     });
 
     await Device.findOneAndUpdate(
@@ -160,27 +174,29 @@ router.post('/ping', requireAppKey, async (req, res) => {
   }
 });
 
-/**
- * GET /api/devices/public-count  (public app, sécurisée par x-app-key)
- * ?activeDays=30 (par défaut)
- * ?communeId=<id> (optionnel) -> filtre par commune (slug ou ObjectId)
- */
+/** GET /api/devices/public-count */
 router.get('/public-count', requireAppKey, async (req, res) => {
   try {
     const nd = Math.max(1, parseInt(req.query.activeDays || '30', 10));
     const since = new Date(Date.now() - nd * 24 * 60 * 60 * 1000);
 
-    const baseFilter = {};
-    const activeAndFilter = [{ lastSeenAt: { $gte: since } }, { lastActiveAt: { $gte: since } }, { updatedAt: { $gte: since } }, { createdAt: { $gte: since } }];
+    const andActive = [
+      { lastSeenAt:  { $gte: since } },
+      { lastActiveAt:{ $gte: since } },
+      { updatedAt:   { $gte: since } },
+      { createdAt:   { $gte: since } },
+    ];
 
+    const andBase = [];
     if (req.query.communeId) {
-      const { list: ids } = await communeKeys(req.query.communeId);
-      if (!ids.length) return res.json({ count: 0, active: 0, activeDays: nd });
-      baseFilter.communeId = { $in: ids };
+      const { list } = await communeKeys(req.query.communeId);
+      const clause = buildCommuneClause(list);
+      if (!clause) return res.json({ count: 0, active: 0, activeDays: nd });
+      andBase.push(clause);
     }
 
-    const activeFilter = baseFilter.communeId ? { $and: [ { communeId: baseFilter.communeId }, { $or: activeAndFilter } ] }
-                                             : { $or: activeAndFilter };
+    const baseFilter   = andBase.length ? { $and: andBase } : {};
+    const activeFilter = andBase.length ? { $and: [...andBase, { $or: andActive }] } : { $or: andActive };
 
     const [total, active] = await Promise.all([
       Device.countDocuments(baseFilter),
@@ -194,16 +210,15 @@ router.get('/public-count', requireAppKey, async (req, res) => {
   }
 });
 
-// =====================================
-//  Panel (admin/superadmin)
-// =====================================
+/* ====================================
+ *        Panel admin / superadmin
+ * ==================================== */
 
-/**
- * GET /api/devices/count
- * Filtre commune :
- *  - admin      : forcer sa commune
- *  - superadmin : x-commune-id ou ?communeId (vide => toutes)
- */
+function getPanelCommuneRaw(req) {
+  return lc(req.headers['x-commune-id'] || req.query.communeId || '');
+}
+
+/** GET /api/devices/count */
 router.get('/count', auth, async (req, res) => {
   try {
     if (!req.user) return res.status(401).json({ message: 'Non connecté' });
@@ -214,17 +229,19 @@ router.get('/count', auth, async (req, res) => {
     const nd = Math.max(1, parseInt(req.query.activeDays || '30', 10));
     const since = new Date(Date.now() - nd * 24 * 60 * 60 * 1000);
 
-    let baseFilter = {};
+    const and = [];
     if (req.user.role === 'admin') {
-      const { list: ids } = await communeKeys(req.user.communeId || '');
-      if (!ids.length) return res.json({ count: 0, active: 0, activeDays: nd, communeId: null });
-      baseFilter.communeId = { $in: ids };
-    } else if (req.user.role === 'superadmin') {
-      const raw = lc(req.headers['x-commune-id'] || req.query.communeId || '');
+      const { list } = await communeKeys(req.user.communeId || '');
+      const clause = buildCommuneClause(list);
+      if (!clause) return res.json({ count: 0, active: 0, activeDays: nd, communeId: null });
+      and.push(clause);
+    } else {
+      const raw = getPanelCommuneRaw(req);
       if (raw) {
-        const { list: ids } = await communeKeys(raw);
-        if (!ids.length) return res.json({ count: 0, active: 0, activeDays: nd, communeId: raw });
-        baseFilter.communeId = { $in: ids };
+        const { list } = await communeKeys(raw);
+        const clause = buildCommuneClause(list);
+        if (!clause) return res.json({ count: 0, active: 0, activeDays: nd, communeId: raw });
+        and.push(clause);
       }
     }
 
@@ -234,9 +251,9 @@ router.get('/count', auth, async (req, res) => {
       { updatedAt:   { $gte: since } },
       { createdAt:   { $gte: since } },
     ];
-    const activeFilter = Object.keys(baseFilter).length
-      ? { $and: [ baseFilter, { $or: activeOr } ] }
-      : { $or: activeOr };
+
+    const baseFilter   = and.length ? { $and: and } : {};
+    const activeFilter = and.length ? { $and: [...and, { $or: activeOr }] } : { $or: activeOr };
 
     const [total, active] = await Promise.all([
       Device.countDocuments(baseFilter),
@@ -247,8 +264,9 @@ router.get('/count', auth, async (req, res) => {
       count: total,
       active,
       activeDays: nd,
-      communeId: req.user.role === 'admin' ? (req.user.communeId || null)
-                : (lc(req.headers['x-commune-id'] || req.query.communeId || '') || null),
+      communeId: req.user.role === 'admin'
+        ? (req.user.communeId || null)
+        : (getPanelCommuneRaw(req) || null),
     });
   } catch (e) {
     console.error('GET /devices/count', e);
@@ -256,10 +274,7 @@ router.get('/count', auth, async (req, res) => {
   }
 });
 
-/**
- * GET /api/devices
- * Filtre commune identique à /count
- */
+/** GET /api/devices */
 router.get('/', auth, async (req, res) => {
   try {
     if (!req.user) return res.status(401).json({ message: 'Non connecté' });
@@ -270,28 +285,32 @@ router.get('/', auth, async (req, res) => {
     const p  = Math.max(1,  parseInt(req.query.page || '1', 10));
     const ps = Math.min(100, Math.max(1, parseInt(req.query.pageSize || '50', 10)));
 
-    let baseFilter = {};
+    const and = [];
     if (req.user.role === 'admin') {
-      const { list: ids } = await communeKeys(req.user.communeId || '');
-      if (!ids.length) return res.json({ items: [], page: p, pageSize: ps, total: 0 });
-      baseFilter.communeId = { $in: ids };
-    } else if (req.user.role === 'superadmin') {
-      const raw = lc(req.headers['x-commune-id'] || req.query.communeId || '');
+      const { list } = await communeKeys(req.user.communeId || '');
+      const clause = buildCommuneClause(list);
+      if (!clause) return res.json({ items: [], page: p, pageSize: ps, total: 0 });
+      and.push(clause);
+    } else {
+      const raw = getPanelCommuneRaw(req);
       if (raw) {
-        const { list: ids } = await communeKeys(raw);
-        if (!ids.length) return res.json({ items: [], page: p, pageSize: ps, total: 0 });
-        baseFilter.communeId = { $in: ids };
+        const { list } = await communeKeys(raw);
+        const clause = buildCommuneClause(list);
+        if (!clause) return res.json({ items: [], page: p, pageSize: ps, total: 0 });
+        and.push(clause);
       }
     }
 
+    const filter = and.length ? { $and: and } : {};
+
     const [list, total] = await Promise.all([
-      Device.find(baseFilter)
+      Device.find(filter)
         .select('installationId deviceId platform brand model osVersion appVersion lastSeenAt lastActiveAt firstSeenAt registeredAt communeId communeName createdAt updatedAt')
         .sort({ lastSeenAt: -1, lastActiveAt: -1, updatedAt: -1, createdAt: -1 })
         .skip((p-1)*ps)
         .limit(ps)
         .lean(),
-      Device.countDocuments(baseFilter),
+      Device.countDocuments(filter),
     ]);
 
     const items = list.map(normalizeLegacy);
