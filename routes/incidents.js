@@ -11,123 +11,129 @@ const upload = multer({ storage });
 
 const auth = require('../middleware/authMiddleware');
 
-// 🔐 même valeur que MOBILE_APP_KEY dans .env serveur
 const APP_KEY = process.env.MOBILE_APP_KEY || null;
 const isMobile = (req) => APP_KEY && req.header('x-app-key') === APP_KEY;
 
 const isObjectId = (id) => mongoose.Types.ObjectId.isValid(id || '');
-const getDeviceIdFromReq = (req) =>
-  String(req.query.deviceId || req.body?.deviceId || '').trim();
-
 const lc = (v) => String(v ?? '').trim().toLowerCase();
 
-/* ------------------------------------------------------------------ */
-/* Helpers commune : accepte slug ET ObjectId, et renvoie toutes formes
-   (slug, string(ObjectId), ObjectId natif) pour matcher tous schémas  */
+/* ---------- Commune helpers ---------- */
 async function communeKeys(anyId) {
   const raw = lc(anyId);
   if (!raw) return { list: [] };
 
   const out = new Set();
-
-  // Toujours garder la valeur brute en string minuscule
   out.add(raw);
 
   if (isObjectId(raw)) {
-    // Ajouter l'ObjectId natif + sa string
     try { out.add(new mongoose.Types.ObjectId(raw)); } catch {}
     out.add(String(raw));
-
-    // Tenter de récupérer le slug relié
     const c = await Commune.findById(raw).lean();
     if (c?.slug) out.add(lc(c.slug));
   } else {
-    // raw semble être un slug -> récupérer l'_id
     const c = await Commune.findOne({ slug: raw }).lean();
     if (c?._id) {
       out.add(String(c._id));
       try { out.add(new mongoose.Types.ObjectId(String(c._id))); } catch {}
     }
   }
-
   return { list: Array.from(out) };
 }
 
-/* Utilitaire: récupère la commune côté panel depuis header OU query */
+function escapeRegExp(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/** Construit un clause de filtre commune tolérante (ObjectId + String + casse) */
+function buildCommuneClause(ids) {
+  if (!Array.isArray(ids) || !ids.length) return null;
+
+  const exact = [];
+  const strings = new Set();
+
+  for (const id of ids) {
+    if (typeof id === 'string') strings.add(id);
+    else exact.push(id);
+  }
+  // Ajoute aussi toutes les versions string (toString) pour exact match
+  ids.forEach((x) => {
+    const s = (x && x.toString) ? x.toString() : null;
+    if (s) strings.add(s);
+  });
+
+  const regexes = Array.from(strings).map((s) => new RegExp(`^${escapeRegExp(s)}$`, 'i'));
+  const ors = [];
+  if (exact.length || strings.size) ors.push({ communeId: { $in: [...exact, ...Array.from(strings)] } });
+  if (regexes.length) ors.push({ communeId: { $in: regexes } });
+
+  return ors.length ? { $or: ors } : null;
+}
+
 function getPanelCommuneRaw(req) {
   return lc(req.header('x-commune-id') || req.query.communeId || '');
 }
 
-/* ===== helper pour autoriser anonyme (mobile) ou connecté (panel) ===== */
+/* ===== auth optional ===== */
 function authOptional(req, res, next) {
-  if (isMobile(req)) return next(); // mobile → pas d’auth JWT
-  return auth(req, res, next);      // panel → JWT requis
+  if (isMobile(req)) return next();
+  return auth(req, res, next);
 }
-/* ------------------------------------------------------------------ */
 
-/* ──────────────── GET /api/incidents ────────────────
-   - MOBILE : deviceId obligatoire (communeId optionnel)
-   - PANEL  : 
-       * admin      -> force sa commune
-       * superadmin -> communeId facultatif (toutes si absent)
-*/
+/* ─────────────── GET /api/incidents ─────────────── */
 router.get('/', authOptional, async (req, res) => {
   try {
-    const filter = {};
+    const and = [];
 
     if (isMobile(req)) {
-      const deviceId = getDeviceIdFromReq(req);
-      if (!deviceId) {
-        return res.status(400).json({ message: 'deviceId requis (mobile)' });
-      }
-      filter.deviceId = deviceId;
+      const deviceId = String(req.query.deviceId || req.body?.deviceId || '').trim();
+      if (!deviceId) return res.status(400).json({ message: 'deviceId requis (mobile)' });
+      and.push({ deviceId });
 
-      // (optionnel) filtre commune envoyé par l’app
       if (req.query.communeId) {
-        const { list: ids } = await communeKeys(req.query.communeId);
-        if (ids.length) filter.communeId = { $in: ids };
+        const { list } = await communeKeys(req.query.communeId);
+        const clause = buildCommuneClause(list);
+        if (clause) and.push(clause);
       }
     } else {
-      // PANEL
       if (!req.user) return res.status(401).json({ message: 'Non connecté' });
 
       if (req.user.role === 'admin') {
-        // ✅ toujours forcer la commune de l’admin (pas d’erreur si header diffère)
-        const { list: ids } = await communeKeys(req.user.communeId || '');
-        if (!ids.length) return res.json([]); // admin sans commune rattachée
-        filter.communeId = { $in: ids };
+        const { list } = await communeKeys(req.user.communeId || '');
+        const clause = buildCommuneClause(list);
+        if (!clause) return res.json([]);
+        and.push(clause);
       } else if (req.user.role === 'superadmin') {
         const raw = getPanelCommuneRaw(req);
         if (raw) {
-          const { list: ids } = await communeKeys(raw);
-          if (!ids.length) return res.json([]);
-          filter.communeId = { $in: ids };
+          const { list } = await communeKeys(raw);
+          const clause = buildCommuneClause(list);
+          if (!clause) return res.json([]);
+          and.push(clause);
         }
       } else {
         return res.status(403).json({ message: 'Accès interdit' });
       }
 
-      // Période (optionnelle)
       const { period } = req.query;
       if (period === '7' || period === '30') {
         const days = parseInt(period, 10);
-        const fromDate = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
-        filter.createdAt = { $gte: fromDate };
+        and.push({ createdAt: { $gte: new Date(Date.now() - days * 86400000) } });
       }
 
-      // (optionnel) filtre deviceId depuis le panel
-      if (req.query.deviceId) filter.deviceId = String(req.query.deviceId);
+      if (req.query.deviceId) and.push({ deviceId: String(req.query.deviceId) });
     }
 
+    const filter = and.length ? { $and: and } : {};
     const incidents = await Incident.find(filter).sort({ createdAt: -1 }).lean();
+
     res.json(incidents);
   } catch (err) {
-    console.error('❌ Erreur récupération incidents:', err);
+    console.error('❌ GET /incidents', err);
     res.status(500).json({ message: 'Erreur serveur' });
   }
 });
 
-/* ──────────────── GET /api/incidents/count ──────────────── */
+/* ─────────────── GET /api/incidents/count ─────────────── */
 router.get('/count', auth, async (req, res) => {
   try {
     if (!req.user) return res.status(401).json({ message: 'Non connecté' });
@@ -135,40 +141,38 @@ router.get('/count', auth, async (req, res) => {
       return res.status(403).json({ message: 'Accès interdit' });
     }
 
-    const filter = {};
-
+    const and = [];
     if (req.user.role === 'admin') {
-      const { list: ids } = await communeKeys(req.user.communeId || '');
-      if (!ids.length) return res.json({ total: 0 });
-      filter.communeId = { $in: ids };
-    } else if (req.user.role === 'superadmin') {
+      const { list } = await communeKeys(req.user.communeId || '');
+      const clause = buildCommuneClause(list);
+      if (!clause) return res.json({ total: 0 });
+      and.push(clause);
+    } else {
       const raw = getPanelCommuneRaw(req);
       if (raw) {
-        const { list: ids } = await communeKeys(raw);
-        if (!ids.length) return res.json({ total: 0 });
-        filter.communeId = { $in: ids };
+        const { list } = await communeKeys(raw);
+        const clause = buildCommuneClause(list);
+        if (!clause) return res.json({ total: 0 });
+        and.push(clause);
       }
     }
 
     const { period } = req.query;
     if (period === '7' || period === '30') {
       const days = parseInt(period, 10);
-      const fromDate = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
-      filter.createdAt = { $gte: fromDate };
+      and.push({ createdAt: { $gte: new Date(Date.now() - days * 86400000) } });
     }
 
+    const filter = and.length ? { $and: and } : {};
     const total = await Incident.countDocuments(filter);
     res.json({ total });
   } catch (err) {
-    console.error('❌ Erreur récupération count incidents:', err);
+    console.error('❌ GET /incidents/count', err);
     res.status(500).json({ message: 'Erreur serveur' });
   }
 });
 
-/* ──────────────── POST /api/incidents ────────────────
-   - Mobile (clé app) : multipart/form-data, communeId OBLIGATOIRE
-   - Panel : passe aussi
-*/
+/* ─────────────── POST /api/incidents ─────────────── */
 router.post('/', upload.single('media'), async (req, res) => {
   try {
     const {
@@ -205,26 +209,24 @@ router.post('/', upload.single('media'), async (req, res) => {
       createdAt: new Date(),
     });
 
-    if (communeId) newIncident.communeId = String(communeId);
+    if (communeId) newIncident.communeId = lc(communeId); // ✅ on normalise
 
     const saved = await newIncident.save();
     res.status(201).json(saved);
   } catch (err) {
-    console.error("❌ Erreur serveur (POST /incidents) :", err);
+    console.error("❌ POST /incidents", err);
     res.status(500).json({ message: "Erreur lors de l'enregistrement." });
   }
 });
 
-/* ──────────────── PUT /api/incidents/:id ──────────────── */
+/* ─────────────── PUT /api/incidents/:id ─────────────── */
 router.put('/:id', authOptional, async (req, res) => {
   const { id } = req.params;
-  if (!isObjectId(id)) {
-    return res.status(400).json({ message: '❌ ID invalide' });
-  }
+  if (!isObjectId(id)) return res.status(400).json({ message: '❌ ID invalide' });
 
   try {
     if (isMobile(req)) {
-      const deviceId = getDeviceIdFromReq(req);
+      const deviceId = String(req.query.deviceId || req.body?.deviceId || '').trim();
       if (!deviceId) return res.status(400).json({ message: 'deviceId requis (mobile)' });
 
       const incident = await Incident.findOne({ _id: id, deviceId });
@@ -238,118 +240,115 @@ router.put('/:id', authOptional, async (req, res) => {
       return res.json(updatedIncident);
     }
 
-    // PANEL
     if (!req.user) return res.status(401).json({ message: 'Non connecté' });
 
-    const filter = { _id: id };
+    const and = [{ _id: id }];
     if (req.user.role === 'admin') {
-      const { list: ids } = await communeKeys(req.user.communeId || '');
-      if (!ids.length) return res.status(403).json({ message: 'Accès interdit' });
-      filter.communeId = { $in: ids };
+      const { list } = await communeKeys(req.user.communeId || '');
+      const clause = buildCommuneClause(list);
+      if (!clause) return res.status(403).json({ message: 'Accès interdit' });
+      and.push(clause);
     } else if (req.user.role === 'superadmin') {
       const raw = getPanelCommuneRaw(req);
       if (raw) {
-        const { list: ids } = await communeKeys(raw);
-        if (!ids.length) return res.status(404).json({ message: '⚠️ Incident non trouvé' });
-        filter.communeId = { $in: ids };
+        const { list } = await communeKeys(raw);
+        const clause = buildCommuneClause(list);
+        if (!clause) return res.status(404).json({ message: '⚠️ Incident non trouvé' });
+        and.push(clause);
       }
     } else {
       return res.status(403).json({ message: 'Accès interdit' });
     }
 
     const body = { ...req.body, updated: true };
-    const updatedIncident = await Incident.findOneAndUpdate(filter, body, {
+    if (body.communeId) body.communeId = lc(body.communeId); // normalise si on change
+
+    const updatedIncident = await Incident.findOneAndUpdate({ $and: and }, body, {
       new: true,
       runValidators: true,
     });
-    if (!updatedIncident) {
-      return res.status(404).json({ message: '⚠️ Incident non trouvé' });
-    }
+    if (!updatedIncident) return res.status(404).json({ message: '⚠️ Incident non trouvé' });
     res.json(updatedIncident);
   } catch (error) {
-    console.error('❌ Erreur modification :', error);
+    console.error('❌ PUT /incidents/:id', error);
     res.status(500).json({ message: 'Erreur lors de la mise à jour' });
   }
 });
 
-/* ──────────────── DELETE /api/incidents/:id ──────────────── */
+/* ─────────────── DELETE /api/incidents/:id ─────────────── */
 router.delete('/:id', auth, async (req, res) => {
   const { id } = req.params;
-  if (!isObjectId(id)) {
-    return res.status(400).json({ message: '❌ ID invalide' });
-  }
+  if (!isObjectId(id)) return res.status(400).json({ message: '❌ ID invalide' });
 
   try {
     if (!req.user) return res.status(401).json({ message: 'Non connecté' });
 
-    const filter = { _id: id };
+    const and = [{ _id: id }];
     if (req.user.role === 'admin') {
-      const { list: ids } = await communeKeys(req.user.communeId || '');
-      if (!ids.length) return res.status(403).json({ message: 'Accès interdit' });
-      filter.communeId = { $in: ids };
+      const { list } = await communeKeys(req.user.communeId || '');
+      const clause = buildCommuneClause(list);
+      if (!clause) return res.status(403).json({ message: 'Accès interdit' });
+      and.push(clause);
     } else if (req.user.role === 'superadmin') {
       const raw = getPanelCommuneRaw(req);
       if (raw) {
-        const { list: ids } = await communeKeys(raw);
-        if (!ids.length) return res.status(404).json({ message: '⚠️ Incident non trouvé' });
-        filter.communeId = { $in: ids };
+        const { list } = await communeKeys(raw);
+        const clause = buildCommuneClause(list);
+        if (!clause) return res.status(404).json({ message: '⚠️ Incident non trouvé' });
+        and.push(clause);
       }
     } else {
       return res.status(403).json({ message: 'Accès interdit' });
     }
 
-    const deleted = await Incident.findOneAndDelete(filter);
-    if (!deleted) {
-      return res.status(404).json({ message: '⚠️ Incident non trouvé' });
-    }
+    const deleted = await Incident.findOneAndDelete({ $and: and });
+    if (!deleted) return res.status(404).json({ message: '⚠️ Incident non trouvé' });
     res.json({ message: '✅ Incident supprimé' });
   } catch (error) {
-    console.error('❌ Erreur suppression :', error);
+    console.error('❌ DELETE /incidents/:id', error);
     res.status(500).json({ message: 'Erreur serveur' });
   }
 });
 
-/* ──────────────── GET /api/incidents/:id ──────────────── */
+/* ─────────────── GET /api/incidents/:id ─────────────── */
 router.get('/:id', authOptional, async (req, res) => {
   const { id } = req.params;
-  if (!isObjectId(id)) {
-    return res.status(400).json({ message: 'ID invalide' });
-  }
+  if (!isObjectId(id)) return res.status(400).json({ message: 'ID invalide' });
 
   try {
     let incident;
     if (isMobile(req)) {
-      const deviceId = getDeviceIdFromReq(req);
+      const deviceId = String(req.query.deviceId || req.body?.deviceId || '').trim();
       if (!deviceId) return res.status(400).json({ message: 'deviceId requis (mobile)' });
       incident = await Incident.findOne({ _id: id, deviceId }).lean();
     } else {
       if (!req.user) return res.status(401).json({ message: 'Non connecté' });
 
-      const filter = { _id: id };
+      const and = [{ _id: id }];
       if (req.user.role === 'admin') {
-        const { list: ids } = await communeKeys(req.user.communeId || '');
-        if (!ids.length) return res.status(403).json({ message: 'Accès interdit' });
-        filter.communeId = { $in: ids };
+        const { list } = await communeKeys(req.user.communeId || '');
+        const clause = buildCommuneClause(list);
+        if (!clause) return res.status(403).json({ message: 'Accès interdit' });
+        and.push(clause);
       } else if (req.user.role === 'superadmin') {
         const raw = getPanelCommuneRaw(req);
         if (raw) {
-          const { list: ids } = await communeKeys(raw);
-          if (!ids.length) return res.status(404).json({ message: 'Incident non trouvé' });
-          filter.communeId = { $in: ids };
+          const { list } = await communeKeys(raw);
+          const clause = buildCommuneClause(list);
+          if (!clause) return res.status(404).json({ message: 'Incident non trouvé' });
+          and.push(clause);
         }
       } else {
         return res.status(403).json({ message: 'Accès interdit' });
       }
 
-      incident = await Incident.findOne(filter).lean();
+      incident = await Incident.findOne({ $and: and }).lean();
     }
 
-    if (!incident) {
-      return res.status(404).json({ message: 'Incident non trouvé' });
-    }
+    if (!incident) return res.status(404).json({ message: 'Incident non trouvé' });
     res.json(incident);
   } catch (error) {
-    console.error('❌ Erreur récupération incident par ID :', error);
+    console.error('❌ GET /incidents/:id', error);
     res.status(500).json({ message: 'Erreur serveur' });
   }
 });
