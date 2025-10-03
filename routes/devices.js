@@ -1,7 +1,9 @@
+// backend/routes/devices.js
 const express = require('express');
 const mongoose = require('mongoose');
 const auth = require('../middleware/authMiddleware');
 const Device = require('../models/Device');
+const Incident = require('../models/Incident');
 const Commune = require('../models/Commune');
 
 const router = express.Router();
@@ -218,6 +220,30 @@ function getPanelCommuneRaw(req) {
   return lc(req.headers['x-commune-id'] || req.query.communeId || '');
 }
 
+/**
+ * Construit un filtre Device pour une commune, avec **fallback** :
+ *  - match Device.communeId (tolérant)
+ *  - OU installationId présent dans des Incidents de la commune
+ */
+async function buildDeviceFilterWithFallbackForCommune(rawCommune) {
+  if (!rawCommune) return { filter: {}, usedFallback: false };
+
+  const { list } = await communeKeys(rawCommune);
+  const clause = buildCommuneClause(list);
+  if (!clause) return { filter: { _id: { $exists: false } }, usedFallback: false }; // vide
+
+  // 🔁 Récupère tous les deviceIds qui ont posté un incident dans cette commune
+  const incidentDeviceIds = await Incident.distinct('deviceId', clause);
+
+  const orParts = [];
+  if (clause.$or && clause.$or.length) orParts.push(...clause.$or);
+  if (incidentDeviceIds.length) orParts.push({ installationId: { $in: incidentDeviceIds } });
+
+  if (!orParts.length) return { filter: { _id: { $exists: false } }, usedFallback: false };
+
+  return { filter: { $or: orParts }, usedFallback: incidentDeviceIds.length > 0 };
+}
+
 /** GET /api/devices/count */
 router.get('/count', auth, async (req, res) => {
   try {
@@ -229,19 +255,18 @@ router.get('/count', auth, async (req, res) => {
     const nd = Math.max(1, parseInt(req.query.activeDays || '30', 10));
     const since = new Date(Date.now() - nd * 24 * 60 * 60 * 1000);
 
-    const and = [];
+    let baseFilter = {};
     if (req.user.role === 'admin') {
-      const { list } = await communeKeys(req.user.communeId || '');
-      const clause = buildCommuneClause(list);
-      if (!clause) return res.json({ count: 0, active: 0, activeDays: nd, communeId: null });
-      and.push(clause);
+      const raw = req.user.communeId || '';
+      const built = await buildDeviceFilterWithFallbackForCommune(raw);
+      baseFilter = built.filter;
     } else {
-      const raw = getPanelCommuneRaw(req);
+      const raw = getPanelCommuneRaw(req); // vide => toutes
       if (raw) {
-        const { list } = await communeKeys(raw);
-        const clause = buildCommuneClause(list);
-        if (!clause) return res.json({ count: 0, active: 0, activeDays: nd, communeId: raw });
-        and.push(clause);
+        const built = await buildDeviceFilterWithFallbackForCommune(raw);
+        baseFilter = built.filter;
+      } else {
+        baseFilter = {}; // toutes communes
       }
     }
 
@@ -252,8 +277,9 @@ router.get('/count', auth, async (req, res) => {
       { createdAt:   { $gte: since } },
     ];
 
-    const baseFilter   = and.length ? { $and: and } : {};
-    const activeFilter = and.length ? { $and: [...and, { $or: activeOr }] } : { $or: activeOr };
+    const activeFilter = Object.keys(baseFilter).length
+      ? { $and: [baseFilter, { $or: activeOr }] }
+      : { $or: activeOr };
 
     const [total, active] = await Promise.all([
       Device.countDocuments(baseFilter),
@@ -285,23 +311,20 @@ router.get('/', auth, async (req, res) => {
     const p  = Math.max(1,  parseInt(req.query.page || '1', 10));
     const ps = Math.min(100, Math.max(1, parseInt(req.query.pageSize || '50', 10)));
 
-    const and = [];
+    let filter = {};
     if (req.user.role === 'admin') {
-      const { list } = await communeKeys(req.user.communeId || '');
-      const clause = buildCommuneClause(list);
-      if (!clause) return res.json({ items: [], page: p, pageSize: ps, total: 0 });
-      and.push(clause);
+      const raw = req.user.communeId || '';
+      const built = await buildDeviceFilterWithFallbackForCommune(raw);
+      filter = built.filter;
     } else {
-      const raw = getPanelCommuneRaw(req);
+      const raw = getPanelCommuneRaw(req); // vide => toutes
       if (raw) {
-        const { list } = await communeKeys(raw);
-        const clause = buildCommuneClause(list);
-        if (!clause) return res.json({ items: [], page: p, pageSize: ps, total: 0 });
-        and.push(clause);
+        const built = await buildDeviceFilterWithFallbackForCommune(raw);
+        filter = built.filter;
+      } else {
+        filter = {};
       }
     }
-
-    const filter = and.length ? { $and: and } : {};
 
     const [list, total] = await Promise.all([
       Device.find(filter)
