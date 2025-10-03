@@ -69,15 +69,11 @@ async function communeKeys(anyId) {
   out.add(raw);
 
   if (isObjectId(raw)) {
-    // garde la string de l’ObjectId
     out.add(String(raw));
-    // et l’instance ObjectId (au cas où)
     try { out.add(new mongoose.Types.ObjectId(raw)); } catch {}
-    // slug correspondant
     const c = await Commune.findById(raw).lean();
     if (c?.slug) out.add(lc(c.slug));
   } else {
-    // raw est un slug → récupérer _id
     const c = await Commune.findOne({ slug: raw }).lean();
     if (c?._id) {
       out.add(String(c._id));
@@ -91,12 +87,7 @@ function escapeRegExp(s) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-/**
- * Device.communeId est stocké en **string** (slug ou id).
- * On construit une **clause tolérante** qui matche :
- *  - les valeurs exactes (string)
- *  - et insensible à la casse via RegExp ^...$ (i)
- */
+/** Clause tolérante pour Device.communeId (string, slug OU ObjectId) */
 function buildCommuneClauseForStringField(ids) {
   if (!Array.isArray(ids) || !ids.length) return null;
 
@@ -109,11 +100,9 @@ function buildCommuneClauseForStringField(ids) {
   return { $or: [{ communeId: { $in: exact } }, { communeId: { $in: regexes } }] };
 }
 
-/**
- * Renvoie la clause de filtre par commune “côté panel” :
- *  - admin      : toujours sa commune (on ne lit PAS le header)
- *  - superadmin : si header x-commune-id → filtre ; sinon → pas de filtre
- *  - autres     : null (non autorisé)
+/** Filtre panneau :
+ *  - admin      : filtre imposé à sa commune (tolérant)
+ *  - superadmin : x-commune-id facultatif ; vide => pas de filtre
  */
 async function panelCommuneFilter(req) {
   if (!req.user) return { error: { status: 401, message: 'Non connecté' } };
@@ -127,7 +116,7 @@ async function panelCommuneFilter(req) {
 
   if (req.user.role === 'superadmin') {
     const raw = lc(req.headers['x-commune-id'] || req.query.communeId || '');
-    if (!raw) return { clause: {} }; // pas de filtre → toutes communes
+    if (!raw) return { clause: {} }; // pas de filtre
     const { list } = await communeKeys(raw);
     const clause = buildCommuneClauseForStringField(list);
     if (!clause) return { empty: true };
@@ -142,7 +131,6 @@ router.use((req, _res, next) => { console.log(`[devices] ${req.method} ${req.ori
 
 /* ===================== CÔTÉ APP ===================== */
 
-/** POST /api/devices/register */
 router.post('/register', requireAppKey, async (req, res) => {
   try {
     let {
@@ -179,7 +167,6 @@ router.post('/register', requireAppKey, async (req, res) => {
   }
 });
 
-/** POST /api/devices/ping */
 router.post('/ping', requireAppKey, async (req, res) => {
   try {
     const { installationId } = req.body || {};
@@ -203,9 +190,9 @@ router.post('/ping', requireAppKey, async (req, res) => {
   }
 });
 
-/** GET /api/devices/public-count  (protégé par x-app-key)
+/** GET /api/devices/public-count (x-app-key)
  *  ?activeDays=30
- *  ?communeId=<slug|ObjectId>  ← tolérant slug/ObjectId
+ *  ?communeId=<slug|ObjectId>
  */
 router.get('/public-count', requireAppKey, async (req, res) => {
   try {
@@ -237,11 +224,11 @@ router.get('/public-count', requireAppKey, async (req, res) => {
   }
 });
 
-/* ===================== CÔTÉ PANEL (admin/superadmin) ===================== */
+/* ===================== CÔTÉ PANEL ===================== */
 
 /** GET /api/devices/count
- *  Admin : sa commune forcée (tolérance slug/ObjectId)
- *  Superadmin : header x-commune-id facultatif (tolérant)
+ *  Admin : filtre = sa commune (tolérant) + renvoie AUSSI les compteurs globaux
+ *  Superadmin : filtre via x-commune-id (ou global si vide) + renvoie AUSSI les compteurs globaux
  */
 router.get('/count', auth, requireRole('admin','superadmin'), async (req, res) => {
   try {
@@ -250,26 +237,42 @@ router.get('/count', auth, requireRole('admin','superadmin'), async (req, res) =
 
     const { clause, empty, error } = await panelCommuneFilter(req);
     if (error) return res.status(error.status).json({ message: error.message });
-    if (empty)  return res.json({ count: 0, active: 0, activeDays: nd, communeId: null });
 
-    const baseFilter   = clause || {};
-    const activeFilter = { ...(clause || {}), lastSeenAt: { $gte: since } };
+    // Filtres “scopés” (commune imposée/admin OU x-commune-id/superadmin)
+    const scopedFilter   = empty ? { _never: true } : (clause || {});
+    const scopedActive   = empty ? { _never: true } : { ...(clause || {}), lastSeenAt: { $gte: since } };
 
-    const [total, active] = await Promise.all([
-      Device.countDocuments(baseFilter),
-      Device.countDocuments(activeFilter),
+    // Filtres globaux (toutes communes)
+    const globalFilter   = {};
+    const globalActive   = { lastSeenAt: { $gte: since } };
+
+    const [
+      scopedTotal, scopedActiveCount,
+      globalTotal, globalActiveCount
+    ] = await Promise.all([
+      Device.countDocuments(scopedFilter),
+      Device.countDocuments(scopedActive),
+      Device.countDocuments(globalFilter),
+      Device.countDocuments(globalActive),
     ]);
 
-    res.json({ count: total, active, activeDays: nd, communeId: clause ? true : null });
+    res.json({
+      // valeurs “scopées” (historique, inchangé)
+      count: scopedTotal,
+      active: scopedActiveCount,
+      activeDays: nd,
+
+      // NOUVEAU : valeurs globales (toutes communes)
+      countAll: globalTotal,
+      activeAll: globalActiveCount,
+    });
   } catch (e) {
     console.error('GET /devices/count', e);
     res.status(500).json({ message: 'Erreur serveur' });
   }
 });
 
-/** GET /api/devices (liste paginée)
- *  Même logique de filtre que /count
- */
+/** GET /api/devices (liste paginée) — filtre identique à /count */
 router.get('/', auth, requireRole('admin','superadmin'), async (req, res) => {
   try {
     const p  = Math.max(1,  parseInt(req.query.page || '1', 10));
