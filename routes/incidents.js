@@ -1,3 +1,4 @@
+// backend/routes/incidents.js
 const express = require('express');
 const router = express.Router();
 const mongoose = require('mongoose');
@@ -55,7 +56,6 @@ function buildCommuneClause(ids) {
     if (typeof id === 'string') strings.add(id);
     else exact.push(id);
   }
-  // Ajoute aussi toutes les versions string (toString) pour exact match
   ids.forEach((x) => {
     const s = (x && x.toString) ? x.toString() : null;
     if (s) strings.add(s);
@@ -98,9 +98,11 @@ router.get('/', authOptional, async (req, res) => {
       if (!req.user) return res.status(401).json({ message: 'Non connecté' });
 
       if (req.user.role === 'admin') {
-        const { list } = await communeKeys(req.user.communeId || '');
+        // ✅ admin : utilise d’abord le communeId du token, sinon fallback header/query
+        const adminRaw = lc(req.user.communeId || getPanelCommuneRaw(req));
+        const { list } = await communeKeys(adminRaw);
         const clause = buildCommuneClause(list);
-        if (!clause) return res.json([]);
+        if (!clause) return res.json([]); // pas de commune définie => rien
         and.push(clause);
       } else if (req.user.role === 'superadmin') {
         const raw = getPanelCommuneRaw(req);
@@ -143,7 +145,8 @@ router.get('/count', auth, async (req, res) => {
 
     const and = [];
     if (req.user.role === 'admin') {
-      const { list } = await communeKeys(req.user.communeId || '');
+      const adminRaw = lc(req.user.communeId || getPanelCommuneRaw(req));
+      const { list } = await communeKeys(adminRaw);
       const clause = buildCommuneClause(list);
       if (!clause) return res.json({ total: 0 });
       and.push(clause);
@@ -209,7 +212,7 @@ router.post('/', upload.single('media'), async (req, res) => {
       createdAt: new Date(),
     });
 
-    if (communeId) newIncident.communeId = lc(communeId); // ✅ on normalise
+    if (communeId) newIncident.communeId = lc(communeId); // normalise
 
     const saved = await newIncident.save();
     res.status(201).json(saved);
@@ -244,7 +247,8 @@ router.put('/:id', authOptional, async (req, res) => {
 
     const and = [{ _id: id }];
     if (req.user.role === 'admin') {
-      const { list } = await communeKeys(req.user.communeId || '');
+      const adminRaw = lc(req.user.communeId || getPanelCommuneRaw(req));
+      const { list } = await communeKeys(adminRaw);
       const clause = buildCommuneClause(list);
       if (!clause) return res.status(403).json({ message: 'Accès interdit' });
       and.push(clause);
@@ -261,7 +265,7 @@ router.put('/:id', authOptional, async (req, res) => {
     }
 
     const body = { ...req.body, updated: true };
-    if (body.communeId) body.communeId = lc(body.communeId); // normalise si on change
+    if (body.communeId) body.communeId = lc(body.communeId);
 
     const updatedIncident = await Incident.findOneAndUpdate({ $and: and }, body, {
       new: true,
@@ -285,7 +289,8 @@ router.delete('/:id', auth, async (req, res) => {
 
     const and = [{ _id: id }];
     if (req.user.role === 'admin') {
-      const { list } = await communeKeys(req.user.communeId || '');
+      const adminRaw = lc(req.user.communeId || getPanelCommuneRaw(req));
+      const { list } = await communeKeys(adminRaw);
       const clause = buildCommuneClause(list);
       if (!clause) return res.status(403).json({ message: 'Accès interdit' });
       and.push(clause);
@@ -326,7 +331,8 @@ router.get('/:id', authOptional, async (req, res) => {
 
       const and = [{ _id: id }];
       if (req.user.role === 'admin') {
-        const { list } = await communeKeys(req.user.communeId || '');
+        const adminRaw = lc(req.user.communeId || getPanelCommuneRaw(req));
+        const { list } = await communeKeys(adminRaw);
         const clause = buildCommuneClause(list);
         if (!clause) return res.status(403).json({ message: 'Accès interdit' });
         and.push(clause);
