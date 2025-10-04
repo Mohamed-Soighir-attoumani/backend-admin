@@ -1,3 +1,4 @@
+// backend/routes/incidents.js
 const express = require('express');
 const router = express.Router();
 const mongoose = require('mongoose');
@@ -75,14 +76,11 @@ async function buildCommuneClauseFrom(anyId) {
 
   const known = await resolveCommuneStrict(raw);
   if (known) {
-    // Incidents stockent la clé canonique (slug minuscule recommandé)
-    // Compat : on accepte aussi l'_id string au cas où (historique)
     const idStr = String(known.commune._id);
-    const or = [{ communeId: known.key }, { communeId: idStr }];
-    return { $or: or };
+    return { $or: [{ communeId: known.key }, { communeId: idStr }] };
   }
 
-  // Fallback "tolérant" (rarement utilisé si on a normalisé partout)
+  // Fallback "tolérant" (si aucun match direct en base commune)
   const regex = new RegExp(`^${escapeRegExp(raw)}$`, 'i');
   return { $or: [{ communeId: raw }, { communeId: regex }] };
 }
@@ -132,7 +130,7 @@ router.get('/', authOptional, async (req, res) => {
         // priorité au header/query ; sinon sa commune
         let raw = getPanelCommuneRaw(req) || lc(req.user.communeId || '');
 
-        // ⛑️ filet de sécurité : si vide, recharger l'utilisateur
+        // filet de sécurité : si vide, recharger l'utilisateur
         if (!raw && req.user?.id) {
           const u = await User.findById(req.user.id).select('communeId').lean();
           raw = lc(u?.communeId || '');
@@ -270,7 +268,7 @@ router.post('/', upload.single('media'), async (req, res) => {
       createdAt: new Date(),
     });
 
-    // 🔒 Détermine la commune de façon STRICTE (pas de fallback arbitraire)
+    // 🔒 Commune STRICTE (slug minuscule ou _id string)
     const rawFromReq =
       communeId ||
       req.header('x-commune-id') ||
@@ -280,7 +278,7 @@ router.post('/', upload.single('media'), async (req, res) => {
     if (!resolved) {
       return res.status(400).json({ message: "communeId inconnu : fournissez un slug/_id/nom/code d'une commune existante" });
     }
-    newIncident.communeId = resolved.key; // slug minuscule (ou _id string)
+    newIncident.communeId = resolved.key;
 
     const saved = await newIncident.save();
     res.status(201).json(saved);
