@@ -1,3 +1,4 @@
+// backend/routes/devices.js
 const express = require('express');
 const mongoose = require('mongoose');
 const auth = require('../middleware/authMiddleware');
@@ -173,6 +174,7 @@ router.get('/public-count', requireAppKey, async (req, res) => {
  * GET /api/devices/count  (panel)
  * Superadmin : sans header => global ; avec x-commune-id => filtre
  * Admin      : force sa commune
+ * TOUJOURS renvoyer countAll (total global) en plus.
  */
 router.get('/count', auth, async (req, res) => {
   try {
@@ -188,12 +190,21 @@ router.get('/count', auth, async (req, res) => {
     const baseFilter = communeId ? { communeId } : {};
     const activeFilter = { ...baseFilter, lastSeenAt: { $gte: since } };
 
-    const [total, active] = await Promise.all([
+    const [totalScoped, activeScoped, totalAll, activeAll] = await Promise.all([
       Device.countDocuments(baseFilter),
       Device.countDocuments(activeFilter),
+      Device.countDocuments({}),                                // 🔑 GLOBAL
+      Device.countDocuments({ lastSeenAt: { $gte: since } }),   // 🔑 GLOBAL ACTIF
     ]);
 
-    res.json({ count: total, active, activeDays: nd, communeId: communeId || null });
+    res.json({
+      count: totalScoped,        // filtré (utile si vous l’affichez ailleurs)
+      active: activeScoped,
+      countAll: totalAll,        // 🔑 total global (à utiliser pour le KPI)
+      activeAll: activeAll,      // (optionnel si besoin)
+      activeDays: nd,
+      communeId: communeId || null,
+    });
   } catch (e) {
     console.error('GET /devices/count', e);
     res.status(500).json({ message: 'Erreur serveur' });
