@@ -19,9 +19,21 @@ const isObjectId = (id) => mongoose.Types.ObjectId.isValid(id || '');
 const lc = (v) => String(v ?? '').trim().toLowerCase();
 
 /* ------------------------ Helpers communes ------------------------ */
-
 function escapeRegExp(s) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/** Récupère la commune depuis l'objet user, quels que soient les noms de champs utilisés */
+function pickUserCommuneRaw(user) {
+  return lc(
+    user?.communeId ??
+    user?.commune ??
+    user?.communeSlug ??
+    user?.commune_code ??
+    user?.communeCode ??
+    user?.communeName ??
+    ''
+  );
 }
 
 /**
@@ -59,9 +71,7 @@ async function findCommuneByAny(anyId) {
   return null;
 }
 
-/**
- * Retourne une **clé canonique** pour stockage (préférence au slug, sinon _id string, sinon la valeur lowercased)
- */
+/** Retourne une clé canonique (slug si possible, sinon _id string, sinon valeur lowercased) */
 async function toCanonicalCommuneKey(anyId) {
   const raw = lc(anyId);
   if (!raw) return null;
@@ -70,9 +80,7 @@ async function toCanonicalCommuneKey(anyId) {
   return lc(c.slug || String(c._id));
 }
 
-/**
- * Construit une clause $or tolérante pour filtrer communeId (slug / _id / nom / code + regex)
- */
+/** Construit une clause $or tolérante pour filtrer communeId */
 async function buildCommuneClauseFrom(anyId) {
   const raw = lc(anyId);
   if (!raw) return null;
@@ -87,13 +95,11 @@ async function buildCommuneClauseFrom(anyId) {
       variants.add(String(c._id));
       try { variants.add(new mongoose.Types.ObjectId(String(c._id))); } catch {}
     }
-    // On ajoute aussi les variantes textuelles connues si présentes
     ['name', 'label', 'communeName', 'nom', 'code'].forEach((f) => {
       if (c[f]) variants.add(lc(String(c[f])));
     });
   }
 
-  // Si raw ressemble à un ObjectId, ajoute aussi l’ObjectId natif
   if (isObjectId(raw)) {
     try { variants.add(new mongoose.Types.ObjectId(raw)); } catch {}
     variants.add(String(raw));
@@ -131,8 +137,8 @@ function authOptional(req, res, next) {
  * GET /api/incidents
  *  - MOBILE : deviceId requis ; communeId optionnel (si fourni → filtre)
  *  - PANEL  :
- *      * admin      -> filtre sur x-commune-id/query si présent, sinon req.user.communeId ; sinon retourne []
- *      * superadmin -> filtre sur x-commune-id/query si présent, sinon global (toutes communes)
+ *      * admin      -> filtre sur x-commune-id/query si présent, sinon commune de l'admin ; sinon []
+ *      * superadmin -> filtre sur x-commune-id/query si présent, sinon global
  *  - period=7|30 pour limiter par date de création
  */
 router.get('/', authOptional, async (req, res) => {
@@ -145,7 +151,6 @@ router.get('/', authOptional, async (req, res) => {
       if (!deviceId) return res.status(400).json({ message: 'deviceId requis (mobile)' });
       and.push({ deviceId });
 
-      // Filtre commune (optionnel côté app)
       const raw = lc(req.query.communeId || req.header('x-commune-id') || '');
       if (raw) {
         const clause = await buildCommuneClauseFrom(raw);
@@ -156,14 +161,14 @@ router.get('/', authOptional, async (req, res) => {
       if (!req.user) return res.status(401).json({ message: 'Non connecté' });
 
       if (req.user.role === 'admin') {
-        // priorité au header/query ; sinon sa commune
-        const raw = getPanelCommuneRaw(req) || lc(req.user.communeId || '');
+        // priorité au header/query ; sinon commune de l'admin (quel que soit le nom du champ)
+        const raw = getPanelCommuneRaw(req) || pickUserCommuneRaw(req.user);
         if (raw) {
           const clause = await buildCommuneClauseFrom(raw);
           if (clause) and.push(clause);
-          else return res.json([]); // admin sans commune reconnue → 200 []
+          else return res.json([]); // admin sans commune reconnue → vide
         } else {
-          return res.json([]); // admin sans commune → 200 []
+          return res.json([]); // admin sans commune → vide
         }
       } else if (req.user.role === 'superadmin') {
         const raw = getPanelCommuneRaw(req);
@@ -198,7 +203,7 @@ router.get('/', authOptional, async (req, res) => {
 
 /**
  * GET /api/incidents/count
- * Compte les incidents (mêmes règles de filtre que GET /api/incidents, sans deviceId obligatoire).
+ * Compte les incidents (mêmes règles de filtre que GET /api/incidents).
  */
 router.get('/count', auth, async (req, res) => {
   try {
@@ -209,7 +214,7 @@ router.get('/count', auth, async (req, res) => {
 
     const and = [];
     if (req.user.role === 'admin') {
-      const raw = getPanelCommuneRaw(req) || lc(req.user.communeId || '');
+      const raw = getPanelCommuneRaw(req) || pickUserCommuneRaw(req.user);
       if (raw) {
         const clause = await buildCommuneClauseFrom(raw);
         if (clause) and.push(clause);
@@ -262,7 +267,6 @@ router.post('/', upload.single('media'), async (req, res) => {
     // Contraintes mobile
     if (isMobile(req)) {
       if (!deviceId)  return res.status(400).json({ message: 'deviceId requis (mobile)' });
-      // il faut absolument une commune (corps ou header)
       if (!communeId && !req.header('x-commune-id')) {
         return res.status(400).json({ message: 'communeId requis (mobile)' });
       }
@@ -287,13 +291,18 @@ router.post('/', upload.single('media'), async (req, res) => {
       createdAt: new Date(),
     });
 
-    // Détermine la commune et stocke la **clé canonique**
+    // Détermine la commune et stocke la clé canonique
     const rawFromReq =
       communeId ||
       req.header('x-commune-id') ||
-      (req.user?.role === 'admin' ? req.user.communeId : '');
+      (req.user?.role === 'admin' ? pickUserCommuneRaw(req.user) : '');
 
     const canonicalKey = await toCanonicalCommuneKey(rawFromReq);
+
+    // si mobile → refuse une commune inconnue (évite des valeurs impossibles à filtrer)
+    if (isMobile(req) && !canonicalKey) {
+      return res.status(400).json({ message: 'communeId inconnu (mobile)' });
+    }
     if (canonicalKey) newIncident.communeId = canonicalKey;
 
     const saved = await newIncident.save();
@@ -333,7 +342,7 @@ router.put('/:id', authOptional, async (req, res) => {
 
     const and = [{ _id: id }];
     if (req.user.role === 'admin') {
-      const raw = getPanelCommuneRaw(req) || lc(req.user.communeId || '');
+      const raw = getPanelCommuneRaw(req) || pickUserCommuneRaw(req.user);
       if (!raw) return res.status(403).json({ message: 'Accès interdit' });
       const clause = await buildCommuneClauseFrom(raw);
       if (!clause) return res.status(403).json({ message: 'Accès interdit' });
@@ -377,7 +386,7 @@ router.delete('/:id', auth, async (req, res) => {
 
     const and = [{ _id: id }];
     if (req.user.role === 'admin') {
-      const raw = getPanelCommuneRaw(req) || lc(req.user.communeId || '');
+      const raw = getPanelCommuneRaw(req) || pickUserCommuneRaw(req.user);
       if (!raw) return res.status(403).json({ message: 'Accès interdit' });
       const clause = await buildCommuneClauseFrom(raw);
       if (!clause) return res.status(403).json({ message: 'Accès interdit' });
@@ -422,7 +431,7 @@ router.get('/:id', authOptional, async (req, res) => {
 
       const and = [{ _id: id }];
       if (req.user.role === 'admin') {
-        const raw = getPanelCommuneRaw(req) || lc(req.user.communeId || '');
+        const raw = getPanelCommuneRaw(req) || pickUserCommuneRaw(req.user);
         if (!raw) return res.status(403).json({ message: 'Accès interdit' });
         const clause = await buildCommuneClauseFrom(raw);
         if (!clause) return res.status(403).json({ message: 'Accès interdit' });
