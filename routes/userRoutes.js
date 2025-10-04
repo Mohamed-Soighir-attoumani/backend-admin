@@ -11,12 +11,11 @@ const auth = require('../middleware/authMiddleware');
 const requireRole = require('../middleware/requireRole');
 const User = require('../models/User');
 const Invoice = require('../models/Invoice');
-const Commune = require('../models/Commune'); // ⬅️ ajouté
+const Commune = require('../models/Commune');
 const { sign } = require('../utils/jwt');
 
 /* Utils */
 const isValidHex24 = (s) => typeof s === 'string' && /^[a-f0-9]{24}$/i.test(s);
-const isValidId = (id) => isValidHex24(String(id || ''));
 const norm = (v) => String(v || '').trim().toLowerCase();
 const decode = (v) => { try { return decodeURIComponent(String(v)); } catch { return String(v || ''); } };
 const pickHexFromAny = (v) => {
@@ -34,7 +33,7 @@ const pickHexFromAny = (v) => {
 };
 function formatDateFR(d) { try { return new Date(d).toLocaleDateString('fr-FR'); } catch { return ''; } }
 
-/* ---------- Canonicalisation commune (comme côté incidents) ---------- */
+/* ---------- Helpers communes (mêmes règles que incidents) ---------- */
 function escapeRegExp(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
 
 async function findCommuneByAny(anyId) {
@@ -60,26 +59,18 @@ async function findCommuneByAny(anyId) {
   return null;
 }
 
-/** Retourne { key, name } :
- *  - key = slug (minuscule) si dispo, sinon _id string, sinon valeur lowercased
- *  - name = nom humain si dispo
- */
-async function toCanonicalCommune(anyId) {
-  const raw = norm(anyId);
+/** Retourne { key, name } — key = slug (minuscule) si possible, sinon _id string, sinon '' */
+async function toCanonicalCommune(anyIdOrName) {
+  const raw = norm(anyIdOrName);
   if (!raw) return { key: '', name: '' };
   const c = await findCommuneByAny(raw);
-  if (!c) return { key: raw, name: '' };
+  if (!c) return { key: '', name: '' }; // ⚠️ si fournie mais inconnue → on signalera 400 là où on l’utilise
   const key = norm(c.slug || String(c._id));
   const name = String(c.name ?? c.label ?? c.communeName ?? c.nom ?? '').trim();
   return { key, name };
 }
 
-/**
- * 🔍 Résout un utilisateur à partir de :
- * - req.params.id (ObjectId, $oid, ObjectId("..."), email, userId)
- * - req.body.id / req.body.userId / req.body.email
- * - req.query.id / req.query.email
- */
+/* ---------- Résolution utilisateur ---------- */
 async function findUserByAnyId(primary, body = {}, query = {}) {
   const candidatesRaw = [
     primary,
@@ -99,19 +90,14 @@ async function findUserByAnyId(primary, body = {}, query = {}) {
     const maybeEmail = typeof raw === 'string' && raw.includes('@');
     const hex = pickHexFromAny(raw);
 
-    // 1) ObjectId prioritaire
     if (hex) {
       const byId = await User.findById(hex);
       if (byId) return byId;
     }
-
-    // 2) email
     if (maybeEmail) {
       const byEmail = await User.findOne({ email: norm(raw) });
       if (byEmail) return byEmail;
     }
-
-    // 3) userId personnalisé
     const rawStr = decode(raw).trim();
     if (rawStr) {
       const byUserId = await User.findOne({ userId: rawStr });
@@ -142,9 +128,8 @@ router.get('/admins', auth, requireRole('superadmin'), async (req, res) => {
     }
 
     if (communeId) {
-      // on accepte un filtre “souple” : slug/id/code/nom
-      const { key } = await toCanonicalCommune(communeId);
-      find.communeId = key || communeId;
+      const canon = await toCanonicalCommune(communeId);
+      find.communeId = canon.key || communeId; // on reste tolérant pour la liste
     }
 
     if (status === 'active')   find.isActive = { $ne: false };
@@ -169,7 +154,6 @@ router.get('/admins', auth, requireRole('superadmin'), async (req, res) => {
       .limit(ps)
       .lean();
 
-    // ✅ standardiser _idString
     items = items.map(u => ({
       ...u,
       _idString: (u._id && String(u._id)) || '',
@@ -196,21 +180,24 @@ router.post('/admins', auth, requireRole('superadmin'), async (req, res) => {
     const exists = await User.findOne({ email });
     if (exists) return res.status(409).json({ message: 'Email déjà utilisé' });
 
-    // ⬇️ Canonicalise la commune à l’enregistrement
+    // Canonise la commune si fournie ; si inconnue -> 400
     let canon = { key: '', name: '' };
-    if (communeId || communeName) {
+    if ((communeId && communeId.trim()) || (communeName && communeName.trim())) {
       canon = await toCanonicalCommune(communeId || communeName);
+      if (!canon.key) {
+        return res.status(400).json({ message: "Commune inconnue (utilise slug/_id/nom/code d'une commune existante)" });
+      }
     }
 
     const passwordHash = await bcrypt.hash(String(password), 10);
 
     const doc = await User.create({
       email,
-      password: passwordHash, // ✅ correspond au schéma
+      password: passwordHash,
       name: name || '',
       role: 'admin',
-      communeId: canon.key,                   // ⬅️ clé canonique
-      communeName: canon.name || communeName || '',
+      communeId: canon.key,
+      communeName: canon.name || (communeName || ''),
       photo: photo || '',
       createdBy: createdBy ? String(createdBy) : '',
       isActive: true,
@@ -244,10 +231,12 @@ router.post('/users', auth, requireRole('superadmin'), async (req, res) => {
     const exists = await User.findOne({ email });
     if (exists) return res.status(409).json({ message: 'Email déjà utilisé' });
 
-    // ⬇️ Canonicalise la commune ici aussi
     let canon = { key: '', name: '' };
-    if (communeId || communeName) {
+    if ((communeId && communeId.trim()) || (communeName && communeName.trim())) {
       canon = await toCanonicalCommune(communeId || communeName);
+      if (!canon.key) {
+        return res.status(400).json({ message: "Commune inconnue (utilise slug/_id/nom/code d'une commune existante)" });
+      }
     }
 
     const passwordHash = await bcrypt.hash(String(password), 10);
@@ -258,7 +247,7 @@ router.post('/users', auth, requireRole('superadmin'), async (req, res) => {
       name: name || '',
       role,
       communeId: canon.key,
-      communeName: canon.name || communeName || '',
+      communeName: canon.name || (communeName || ''),
       photo: photo || '',
       createdBy: createdBy ? String(createdBy) : '',
       isActive: true,
@@ -292,11 +281,18 @@ router.put('/users/:id', auth, requireRole('superadmin'), async (req, res) => {
     if (typeof req.body.email === 'string') payload.email = norm(req.body.email);
     if (typeof req.body.name === 'string')  payload.name = req.body.name;
 
-    // ⬇️ si on change la commune, la remettre au format canonique
+    // si on change la commune → canoniser ; si inconnue mais fournie → 400
     if (typeof req.body.communeId === 'string' || typeof req.body.communeName === 'string') {
-      const canon = await toCanonicalCommune(req.body.communeId || req.body.communeName);
-      payload.communeId = canon.key;
-      payload.communeName = canon.name || req.body.communeName || '';
+      const raw = (req.body.communeId || req.body.communeName || '').trim();
+      if (raw) {
+        const canon = await toCanonicalCommune(raw);
+        if (!canon.key) return res.status(400).json({ message: 'Commune inconnue' });
+        payload.communeId = canon.key;
+        payload.communeName = canon.name;
+      } else {
+        payload.communeId = '';
+        payload.communeName = '';
+      }
     }
 
     if (typeof req.body.isActive === 'boolean') payload.isActive = req.body.isActive;
@@ -508,7 +504,6 @@ router.post('/admins/:id/impersonate', auth, requireRole('superadmin'), async (r
       return res.status(403).json({ message: 'Compte cible désactivé' });
     }
 
-    // ⬇️ AJOUT : inclure la commune dans le JWT d’impersonation
     const payload = {
       id: String(target._id),
       email: target.email,
@@ -550,8 +545,8 @@ router.get('/users', auth, requireRole('superadmin'), async (req, res) => {
     }
 
     if (communeId) {
-      const { key } = await toCanonicalCommune(communeId);
-      find.communeId = key || communeId;
+      const canon = await toCanonicalCommune(communeId);
+      find.communeId = canon.key || communeId;
     }
 
     if (status === 'active')   find.isActive = { $ne: false };
