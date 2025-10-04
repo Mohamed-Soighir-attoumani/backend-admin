@@ -2,55 +2,43 @@
 const express = require('express');
 const bcrypt = require('bcryptjs');
 const User = require('../models/User');
-const Commune = require('../models/Commune'); // ⬅️ nécessaire pour canoniser la commune
+const Commune = require('../models/Commune');
 
 const router = express.Router();
 
 /* ---------- helpers ---------- */
 const norm = (v) => String(v || '').trim().toLowerCase();
 const isHex24 = (s) => typeof s === 'string' && /^[a-f0-9]{24}$/i.test(s);
-
 function escapeRegExp(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
 
 async function findCommuneByAny(anyId) {
   const raw = String(anyId ?? '').trim();
   if (!raw) return null;
-
-  // 1) _id
   if (isHex24(raw)) {
     const c = await Commune.findById(raw).lean();
     if (c) return c;
   }
-  // 2) slug exact
   let c = await Commune.findOne({ slug: new RegExp(`^${escapeRegExp(raw)}$`, 'i') }).lean();
   if (c) return c;
-
-  // 3) noms possibles
   const nameFields = ['name', 'label', 'communeName', 'nom'];
   for (const f of nameFields) {
     c = await Commune.findOne({ [f]: new RegExp(`^${escapeRegExp(raw)}$`, 'i') }).lean();
     if (c) return c;
   }
-
-  // 4) code
   c = await Commune.findOne({ code: new RegExp(`^${escapeRegExp(raw)}$`, 'i') }).lean();
   if (c) return c;
-
   return null;
 }
-
-/** retourne { key, name } — key = slug (minuscule) si possible, sinon _id string, sinon valeur lowercased */
 async function toCanonicalCommune(anyId) {
   const raw = norm(anyId);
   if (!raw) return { key: '', name: '' };
   const c = await findCommuneByAny(raw);
-  if (!c) return { key: raw, name: '' };
+  if (!c) return { key: '', name: '' };
   const key = norm(c.slug || String(c._id));
   const name = String(c.name ?? c.label ?? c.communeName ?? c.nom ?? '').trim();
   return { key, name };
 }
 
-/* ---------- route ---------- */
 router.get('/setup-admin', async (req, res) => {
   try {
     /* ===== Superadmin ===== */
@@ -71,12 +59,12 @@ router.get('/setup-admin', async (req, res) => {
       await superU.save();
     }
 
-    /* ===== Admin par défaut (avec commune canonique) ===== */
+    /* ===== Admin par défaut (avec commune canonique + fallback) ===== */
     const adminEmail = norm(process.env.ADMIN_EMAIL || 'admin@mairie.fr');
     const adminPlain = process.env.ADMIN_PASSWORD || 'ChangeMoi!2025';
 
-    // On récupère la commune depuis plusieurs variables possibles
-    const adminCommuneRaw =
+    // 1) on lit l’intention depuis env
+    let adminCommuneRaw =
       process.env.ADMIN_COMMUNE_ID ||
       process.env.ADMIN_COMMUNE ||
       process.env.ADMIN_COMMUNE_SLUG ||
@@ -84,7 +72,22 @@ router.get('/setup-admin', async (req, res) => {
       process.env.ADMIN_COMMUNE_CODE ||
       '';
 
-    const canon = await toCanonicalCommune(adminCommuneRaw); // { key, name }
+    // 2) fallback explicite : DEFAULT_COMMUNE (ex: "Dembeni")
+    if (!adminCommuneRaw) {
+      adminCommuneRaw = process.env.DEFAULT_COMMUNE || 'Dembeni';
+    }
+
+    // 3) canonise ; si toujours introuvable → dernière chance : prendre la 1ère commune existante
+    let canon = await toCanonicalCommune(adminCommuneRaw);
+    if (!canon.key) {
+      const any = await Commune.findOne().lean();
+      if (any) {
+        canon = {
+          key: norm(any.slug || String(any._id)),
+          name: String(any.name ?? any.label ?? any.communeName ?? any.nom ?? '').trim()
+        };
+      }
+    }
 
     let adminU = await User.findOne({ email: adminEmail }).select('_id email role communeId communeName');
 
@@ -98,7 +101,7 @@ router.get('/setup-admin', async (req, res) => {
             password: hash,
             role: 'admin',
             name: 'Administrateur',
-            communeId: canon.key,           // ⬅️ on pose la commune canonique dès la création
+            communeId: canon.key || '',
             communeName: canon.name || '',
           }
         },
@@ -106,12 +109,11 @@ router.get('/setup-admin', async (req, res) => {
       );
       adminU = await User.findOne({ email: adminEmail }).select('_id email role communeId communeName');
     } else {
-      // s'assure que le rôle est "admin"
       if (adminU.role !== 'admin') {
         adminU.role = 'admin';
         await adminU.save();
       }
-      // si on a une commune fournie et que l'admin n'en a pas (ou différente), on met à jour
+      // Si l'admin n'a pas de commune ou que l'on souhaite l'aligner, on met à jour
       if (canon.key && adminU.communeId !== canon.key) {
         await User.updateOne(
           { _id: adminU._id },
@@ -138,11 +140,11 @@ router.get('/setup-admin', async (req, res) => {
         } : null,
       },
       hint: [
-        'Connecte-toi avec SUPERADMIN_EMAIL/SUPERADMIN_PASSWORD pour le menu superadmin.',
-        'Connecte-toi avec ADMIN_EMAIL/ADMIN_PASSWORD pour voir uniquement les incidents de sa commune.',
+        'SUPERADMIN: connecte-toi avec SUPERADMIN_EMAIL/SUPERADMIN_PASSWORD.',
+        'ADMIN: connecte-toi avec ADMIN_EMAIL/ADMIN_PASSWORD (ne verra QUE sa commune).',
         canon.key
-          ? `Commune admin (canonique) = "${canon.key}"${canon.name ? ` (${canon.name})` : ''}`
-          : '⚠️ Aucune commune fournie pour l’admin (définis ADMIN_COMMUNE_*).',
+          ? `Commune admin fixée à "${canon.key}"${canon.name ? ` (${canon.name})` : ''}`
+          : '⚠️ Aucune commune trouvée en base : l’admin restera sans commune et ne verra rien.',
       ].join(' ')
     });
   } catch (e) {
