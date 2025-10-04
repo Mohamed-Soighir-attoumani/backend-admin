@@ -17,53 +17,81 @@ const isMobile = (req) => APP_KEY && req.header('x-app-key') === APP_KEY;
 const isObjectId = (id) => mongoose.Types.ObjectId.isValid(id || '');
 const lc = (v) => String(v ?? '').trim().toLowerCase();
 
-/* ---------- Commune helpers ---------- */
-async function communeKeys(anyId) {
-  const raw = lc(anyId);
-  if (!raw) return { list: [] };
-
-  const out = new Set();
-  out.add(raw);
-
-  // Ajoute variantes ObjectId et slug
-  if (isObjectId(raw)) {
-    try { out.add(new mongoose.Types.ObjectId(raw)); } catch {}
-    out.add(String(raw));
-    const c = await Commune.findById(raw).lean();
-    if (c?.slug) out.add(lc(c.slug));
-  } else {
-    const c = await Commune.findOne({ slug: raw }).lean();
-    if (c?._id) {
-      out.add(String(c._id));
-      try { out.add(new mongoose.Types.ObjectId(String(c._id))); } catch {}
-    }
-  }
-  return { list: Array.from(out) };
-}
-
+/* ---------- helpers communes ---------- */
 function escapeRegExp(s) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-/** Clause tolérante (string/ObjectId/casse) */
-function buildCommuneClause(ids) {
-  if (!Array.isArray(ids) || !ids.length) return null;
+// Cherche une commune par (slug | _id | name | code), insensible à la casse
+async function findCommuneByAny(anyId) {
+  const raw = String(anyId ?? '').trim();
+  if (!raw) return null;
 
-  const exact = [];
-  const strings = new Set();
-
-  for (const id of ids) {
-    if (typeof id === 'string') strings.add(id);
-    else exact.push(id);
+  // 1) _id
+  if (isObjectId(raw)) {
+    const c = await Commune.findById(raw).lean();
+    if (c) return c;
   }
-  ids.forEach((x) => {
-    const s = (x && x.toString) ? x.toString() : null;
-    if (s) strings.add(s);
-  });
 
-  const regexes = Array.from(strings).map((s) => new RegExp(`^${escapeRegExp(s)}$`, 'i'));
+  // 2) slug exact (case-insensitive)
+  let c = await Commune.findOne({ slug: new RegExp(`^${escapeRegExp(raw)}$`, 'i') }).lean();
+  if (c) return c;
+
+  // 3) name exact (case-insensitive) — si ton modèle a "name" ou "label", ajuste ici
+  c = await Commune.findOne({ name: new RegExp(`^${escapeRegExp(raw)}$`, 'i') }).lean();
+  if (c) return c;
+
+  // 4) code exact (case-insensitive) — optionnel selon ton schéma
+  c = await Commune.findOne({ code: new RegExp(`^${escapeRegExp(raw)}$`, 'i') }).lean();
+  if (c) return c;
+
+  return null;
+}
+
+// Retourne une **clé canonique** (slug si dispo, sinon _id string, sinon la valeur lowercased)
+async function toCanonicalCommuneKey(anyId) {
+  const raw = lc(anyId);
+  if (!raw) return null;
+  const c = await findCommuneByAny(raw);
+  if (!c) return raw; // fallback: on garde la valeur telle qu’envoyée en minuscule
+  return lc(c.slug || String(c._id));
+}
+
+/** Construit une clause $or tolérante pour filtrer communeId */
+async function buildCommuneClauseFrom(anyId) {
+  const raw = lc(anyId);
+  if (!raw) return null;
+
+  const variants = new Set();
+  variants.add(raw);
+
+  // Ajoute les infos de la commune trouvée (slug + _id)
+  const c = await findCommuneByAny(raw);
+  if (c) {
+    if (c.slug) variants.add(lc(c.slug));
+    if (c._id) {
+      variants.add(String(c._id));
+      try { variants.add(new mongoose.Types.ObjectId(String(c._id))); } catch {}
+    }
+  }
+
+  // Si raw ressemble à un ObjectId, ajoute aussi l’ObjectId
+  if (isObjectId(raw)) {
+    try { variants.add(new mongoose.Types.ObjectId(raw)); } catch {}
+    variants.add(String(raw));
+  }
+
+  // Construire la clause (match exact strings/ids + regex insensible à la casse)
+  const strings = [];
+  const objectIds = [];
+  for (const v of variants) {
+    if (typeof v === 'string') strings.push(v);
+    else objectIds.push(v); // ObjectId
+  }
+  const regexes = strings.map((s) => new RegExp(`^${escapeRegExp(s)}$`, 'i'));
+
   const ors = [];
-  if (exact.length || strings.size) ors.push({ communeId: { $in: [...exact, ...Array.from(strings)] } });
+  if (objectIds.length || strings.length) ors.push({ communeId: { $in: [...strings, ...objectIds] } });
   if (regexes.length) ors.push({ communeId: { $in: regexes } });
 
   return ors.length ? { $or: ors } : null;
@@ -74,54 +102,53 @@ function getPanelCommuneRaw(req) {
   return lc(req.header('x-commune-id') || req.query.communeId || '');
 }
 
-/* ===== auth optionnelle pour laisser passer l’app mobile ===== */
+/* ===== auth optionnelle (mobile passe avec x-app-key) ===== */
 function authOptional(req, res, next) {
   if (isMobile(req)) return next();
   return auth(req, res, next);
 }
 
 /* ─────────────── GET /api/incidents ───────────────
-   - MOBILE : deviceId oblig., communeId optionnel (filtre si fourni)
+   - MOBILE : deviceId obligé ; communeId optionnelle (filtre si fourni)
    - PANEL  :
-       * admin      -> x-commune-id/query si présent, sinon req.user.communeId ; si rien => []
-       * superadmin -> x-commune-id/query facultatif (sinon toutes communes)
+       * admin      -> x-commune-id/query si présent, sinon req.user.communeId ; sinon → []
+       * superadmin -> x-commune-id/query facultatif (sinon toutes)
 */
 router.get('/', authOptional, async (req, res) => {
   try {
     const and = [];
 
+    // ====== Mobile
     if (isMobile(req)) {
       const deviceId = String(req.query.deviceId || req.body?.deviceId || '').trim();
       if (!deviceId) return res.status(400).json({ message: 'deviceId requis (mobile)' });
       and.push({ deviceId });
 
-      if (req.query.communeId || req.header('x-commune-id')) {
-        const raw = lc(req.query.communeId || req.header('x-commune-id'));
-        const { list } = await communeKeys(raw);
-        const clause = buildCommuneClause(list);
+      const raw = lc(req.query.communeId || req.header('x-commune-id') || '');
+      if (raw) {
+        const clause = await buildCommuneClauseFrom(raw);
         if (clause) and.push(clause);
       }
     } else {
+      // ====== Panel
       if (!req.user) return res.status(401).json({ message: 'Non connecté' });
 
       if (req.user.role === 'admin') {
         const raw = getPanelCommuneRaw(req) || lc(req.user.communeId || '');
         if (raw) {
-          const { list } = await communeKeys(raw);
-          const clause = buildCommuneClause(list);
-          if (!clause) return res.json([]); // pas d’erreur HTTP → pas de "clignotement"
-          and.push(clause);
+          const clause = await buildCommuneClauseFrom(raw);
+          if (clause) and.push(clause);
+          else return res.json([]); // admin sans commune reconnue → 200 []
         } else {
-          return res.json([]); // admin sans commune : 200 avec liste vide
+          return res.json([]); // admin sans commune → 200 []
         }
       } else if (req.user.role === 'superadmin') {
         const raw = getPanelCommuneRaw(req);
         if (raw) {
-          const { list } = await communeKeys(raw);
-          const clause = buildCommuneClause(list);
-          if (!clause) return res.json([]);
-          and.push(clause);
+          const clause = await buildCommuneClauseFrom(raw);
+          if (clause) and.push(clause);
         }
+        // sinon : pas de filtre → voit tout
       } else {
         return res.status(403).json({ message: 'Accès interdit' });
       }
@@ -137,7 +164,7 @@ router.get('/', authOptional, async (req, res) => {
 
     const filter = and.length ? { $and: and } : {};
     const incidents = await Incident.find(filter).sort({ createdAt: -1 }).lean();
-    res.json(incidents);
+    return res.json(incidents);
   } catch (err) {
     console.error('❌ GET /incidents', err);
     res.status(500).json({ message: 'Erreur serveur' });
@@ -148,7 +175,7 @@ router.get('/', authOptional, async (req, res) => {
 router.get('/count', auth, async (req, res) => {
   try {
     if (!req.user) return res.status(401).json({ message: 'Non connecté' });
-    if (!['admin','superadmin'].includes(req.user.role)) {
+    if (!['admin', 'superadmin'].includes(req.user.role)) {
       return res.status(403).json({ message: 'Accès interdit' });
     }
 
@@ -156,21 +183,19 @@ router.get('/count', auth, async (req, res) => {
     if (req.user.role === 'admin') {
       const raw = getPanelCommuneRaw(req) || lc(req.user.communeId || '');
       if (raw) {
-        const { list } = await communeKeys(raw);
-        const clause = buildCommuneClause(list);
-        if (!clause) return res.json({ total: 0 });
-        and.push(clause);
+        const clause = await buildCommuneClauseFrom(raw);
+        if (clause) and.push(clause);
+        else return res.json({ total: 0 });
       } else {
         return res.json({ total: 0 });
       }
     } else {
       const raw = getPanelCommuneRaw(req);
       if (raw) {
-        const { list } = await communeKeys(raw);
-        const clause = buildCommuneClause(list);
-        if (!clause) return res.json({ total: 0 });
-        and.push(clause);
+        const clause = await buildCommuneClauseFrom(raw);
+        if (clause) and.push(clause);
       }
+      // sinon global
     }
 
     const { period } = req.query;
@@ -199,7 +224,10 @@ router.post('/', upload.single('media'), async (req, res) => {
 
     if (isMobile(req)) {
       if (!deviceId)  return res.status(400).json({ message: 'deviceId requis (mobile)' });
-      if (!communeId) return res.status(400).json({ message: 'communeId requis (mobile)' });
+      // On **exige** une commune pour correctement rattacher côté multi-commune
+      if (!communeId && !req.header('x-commune-id')) {
+        return res.status(400).json({ message: 'communeId requis (mobile)' });
+      }
     }
 
     if (!title || !description || !lieu || !latitude || !longitude || !deviceId) {
@@ -225,10 +253,14 @@ router.post('/', upload.single('media'), async (req, res) => {
       createdAt: new Date(),
     });
 
-    if (communeId) newIncident.communeId = lc(communeId); // normalise
-    else if (!isMobile(req) && req.user?.role === 'admin' && req.user?.communeId) {
-      newIncident.communeId = lc(req.user.communeId);
-    }
+    // Normalisation robuste de la commune
+    const rawFromReq =
+      communeId ||
+      req.header('x-commune-id') || // app mobile peut aussi le mettre en header
+      (req.user?.role === 'admin' ? req.user.communeId : '');
+
+    const canonicalKey = await toCanonicalCommuneKey(rawFromReq);
+    if (canonicalKey) newIncident.communeId = canonicalKey;
 
     const saved = await newIncident.save();
     res.status(201).json(saved);
@@ -265,15 +297,13 @@ router.put('/:id', authOptional, async (req, res) => {
     if (req.user.role === 'admin') {
       const raw = getPanelCommuneRaw(req) || lc(req.user.communeId || '');
       if (!raw) return res.status(403).json({ message: 'Accès interdit' });
-      const { list } = await communeKeys(raw);
-      const clause = buildCommuneClause(list);
+      const clause = await buildCommuneClauseFrom(raw);
       if (!clause) return res.status(403).json({ message: 'Accès interdit' });
       and.push(clause);
     } else if (req.user.role === 'superadmin') {
       const raw = getPanelCommuneRaw(req);
       if (raw) {
-        const { list } = await communeKeys(raw);
-        const clause = buildCommuneClause(list);
+        const clause = await buildCommuneClauseFrom(raw);
         if (!clause) return res.status(404).json({ message: '⚠️ Incident non trouvé' });
         and.push(clause);
       }
@@ -282,7 +312,7 @@ router.put('/:id', authOptional, async (req, res) => {
     }
 
     const body = { ...req.body, updated: true };
-    if (body.communeId) body.communeId = lc(body.communeId);
+    if (body.communeId) body.communeId = await toCanonicalCommuneKey(body.communeId);
 
     const updatedIncident = await Incident.findOneAndUpdate({ $and: and }, body, {
       new: true,
@@ -308,15 +338,13 @@ router.delete('/:id', auth, async (req, res) => {
     if (req.user.role === 'admin') {
       const raw = getPanelCommuneRaw(req) || lc(req.user.communeId || '');
       if (!raw) return res.status(403).json({ message: 'Accès interdit' });
-      const { list } = await communeKeys(raw);
-      const clause = buildCommuneClause(list);
+      const clause = await buildCommuneClauseFrom(raw);
       if (!clause) return res.status(403).json({ message: 'Accès interdit' });
       and.push(clause);
     } else if (req.user.role === 'superadmin') {
       const raw = getPanelCommuneRaw(req);
       if (raw) {
-        const { list } = await communeKeys(raw);
-        const clause = buildCommuneClause(list);
+        const clause = await buildCommuneClauseFrom(raw);
         if (!clause) return res.status(404).json({ message: '⚠️ Incident non trouvé' });
         and.push(clause);
       }
@@ -351,15 +379,13 @@ router.get('/:id', authOptional, async (req, res) => {
       if (req.user.role === 'admin') {
         const raw = getPanelCommuneRaw(req) || lc(req.user.communeId || '');
         if (!raw) return res.status(403).json({ message: 'Accès interdit' });
-        const { list } = await communeKeys(raw);
-        const clause = buildCommuneClause(list);
+        const clause = await buildCommuneClauseFrom(raw);
         if (!clause) return res.status(403).json({ message: 'Accès interdit' });
         and.push(clause);
       } else if (req.user.role === 'superadmin') {
         const raw = getPanelCommuneRaw(req);
         if (raw) {
-          const { list } = await communeKeys(raw);
-          const clause = buildCommuneClause(list);
+          const clause = await buildCommuneClauseFrom(raw);
           if (!clause) return res.status(404).json({ message: 'Incident non trouvé' });
           and.push(clause);
         }
