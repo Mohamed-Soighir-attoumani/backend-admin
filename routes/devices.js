@@ -1,4 +1,3 @@
-// backend/routes/devices.js
 const express = require('express');
 const mongoose = require('mongoose');
 const auth = require('../middleware/authMiddleware');
@@ -66,7 +65,7 @@ function getFilteredCommuneId(req) {
 
   if (req.user?.role === 'superadmin') {
     // superadmin : header présent => l’utiliser ; sinon => toutes communes
-    if (hdr || hdr === '') return hdr; // '' => pas de filtre
+    if (hdr || hdr === '') return hdr; // '' => pas de filtre (global)
     return '';
   }
 
@@ -172,9 +171,8 @@ router.get('/public-count', requireAppKey, async (req, res) => {
 
 /**
  * GET /api/devices/count  (panel)
- * Superadmin : sans header => global ; avec x-commune-id => filtre
- * Admin      : force sa commune
- * TOUJOURS renvoyer countAll (total global) en plus.
+ * - Admin      : réponse inclut "count" (sa commune) ET "countAll" (global)
+ * - Superadmin : "count" = selon x-commune-id (ou global si vide) + "countAll" global
  */
 router.get('/count', auth, async (req, res) => {
   try {
@@ -186,22 +184,27 @@ router.get('/count', auth, async (req, res) => {
     const nd = Math.max(1, parseInt(req.query.activeDays || '30', 10));
     const since = new Date(Date.now() - nd * 24 * 60 * 60 * 1000);
 
-    const communeId = getFilteredCommuneId(req); // '' => toutes (superadmin)
+    const communeId = getFilteredCommuneId(req); // '' => toutes (global)
     const baseFilter = communeId ? { communeId } : {};
     const activeFilter = { ...baseFilter, lastSeenAt: { $gte: since } };
 
-    const [totalScoped, activeScoped, totalAll, activeAll] = await Promise.all([
+    // Totaux globaux (toutes communes)
+    const globalFilter = {};
+    const globalActive = { lastSeenAt: { $gte: since } };
+
+    const [total, active, countAll, activeAll] = await Promise.all([
       Device.countDocuments(baseFilter),
       Device.countDocuments(activeFilter),
-      Device.countDocuments({}),                                // 🔑 GLOBAL
-      Device.countDocuments({ lastSeenAt: { $gte: since } }),   // 🔑 GLOBAL ACTIF
+      Device.countDocuments(globalFilter),
+      Device.countDocuments(globalActive),
     ]);
 
+    // 🔧 FIX: renvoyer count = total (et pas une variable inexistante)
     res.json({
-      count: totalScoped,        // filtré (utile si vous l’affichez ailleurs)
-      active: activeScoped,
-      countAll: totalAll,        // 🔑 total global (à utiliser pour le KPI)
-      activeAll: activeAll,      // (optionnel si besoin)
+      count: total,   // scopé selon rôle/header
+      active,         // scopé
+      countAll,       // global (utilisé par le front)
+      activeAll,      // global actifs sur n jours
       activeDays: nd,
       communeId: communeId || null,
     });
@@ -212,7 +215,7 @@ router.get('/count', auth, async (req, res) => {
 });
 
 /**
- * GET /api/devices (panel, listing)
+ * GET /api/devices (panel)
  */
 router.get('/', auth, async (req, res) => {
   try {
