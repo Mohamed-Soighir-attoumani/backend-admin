@@ -22,7 +22,10 @@ function escapeRegExp(s) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-// Cherche une commune par (slug | _id | name | code), insensible à la casse
+/**
+ * Cherche une commune par (slug | _id | name | label | communeName | nom | code), insensible à la casse.
+ * ⚠️ C’est ici que ça coinçait avant : seuls slug/_id/name étaient testés.
+ */
 async function findCommuneByAny(anyId) {
   const raw = String(anyId ?? '').trim();
   if (!raw) return null;
@@ -33,27 +36,41 @@ async function findCommuneByAny(anyId) {
     if (c) return c;
   }
 
-  // 2) slug exact (case-insensitive)
-  let c = await Commune.findOne({ slug: new RegExp(`^${escapeRegExp(raw)}$`, 'i') }).lean();
+  const rx = new RegExp(`^${escapeRegExp(raw)}$`, 'i');
+
+  // 2) slug
+  let c = await Commune.findOne({ slug: rx }).lean();
   if (c) return c;
 
-  // 3) name exact (case-insensitive) — si ton modèle a "name" ou "label", ajuste ici
-  c = await Commune.findOne({ name: new RegExp(`^${escapeRegExp(raw)}$`, 'i') }).lean();
+  // 3) name (si présent dans ton schéma)
+  c = await Commune.findOne({ name: rx }).lean();
   if (c) return c;
 
-  // 4) code exact (case-insensitive) — optionnel selon ton schéma
-  c = await Commune.findOne({ code: new RegExp(`^${escapeRegExp(raw)}$`, 'i') }).lean();
+  // 4) label (← souvent utilisé)
+  c = await Commune.findOne({ label: rx }).lean();
+  if (c) return c;
+
+  // 5) communeName (← parfois utilisé)
+  c = await Commune.findOne({ communeName: rx }).lean();
+  if (c) return c;
+
+  // 6) nom (si ton modèle utilise "nom")
+  c = await Commune.findOne({ nom: rx }).lean();
+  if (c) return c;
+
+  // 7) code (si tu as un code INSEE ou interne)
+  c = await Commune.findOne({ code: rx }).lean();
   if (c) return c;
 
   return null;
 }
 
-// Retourne une **clé canonique** (slug si dispo, sinon _id string, sinon la valeur lowercased)
+/** Retourne une clé canonique : slug si dispo, sinon _id string, sinon valeur lowercased */
 async function toCanonicalCommuneKey(anyId) {
   const raw = lc(anyId);
   if (!raw) return null;
   const c = await findCommuneByAny(raw);
-  if (!c) return raw; // fallback: on garde la valeur telle qu’envoyée en minuscule
+  if (!c) return raw; // fallback (au moins stable/case-insensitive)
   return lc(c.slug || String(c._id));
 }
 
@@ -73,6 +90,12 @@ async function buildCommuneClauseFrom(anyId) {
       variants.add(String(c._id));
       try { variants.add(new mongoose.Types.ObjectId(String(c._id))); } catch {}
     }
+    // Bonus : si la commune a des alias textuels
+    if (c.name) variants.add(lc(String(c.name)));
+    if (c.label) variants.add(lc(String(c.label)));
+    if (c.communeName) variants.add(lc(String(c.communeName)));
+    if (c.nom) variants.add(lc(String(c.nom)));
+    if (c.code) variants.add(lc(String(c.code)));
   }
 
   // Si raw ressemble à un ObjectId, ajoute aussi l’ObjectId
@@ -253,10 +276,10 @@ router.post('/', upload.single('media'), async (req, res) => {
       createdAt: new Date(),
     });
 
-    // Normalisation robuste de la commune
+    // Normalisation robuste de la commune pour stockage cohérent
     const rawFromReq =
       communeId ||
-      req.header('x-commune-id') || // app mobile peut aussi le mettre en header
+      req.header('x-commune-id') || // l’app peut l’envoyer ici
       (req.user?.role === 'admin' ? req.user.communeId : '');
 
     const canonicalKey = await toCanonicalCommuneKey(rawFromReq);
