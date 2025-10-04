@@ -109,10 +109,10 @@ router.get('/', authOptional, async (req, res) => {
         if (raw) {
           const { list } = await communeKeys(raw);
           const clause = buildCommuneClause(list);
-          if (!clause) return res.json([]); // évite 400/clignotement
+          if (!clause) return res.json([]); // pas d’erreur HTTP → pas de "clignotement"
           and.push(clause);
         } else {
-          return res.json([]); // admin sans commune → pas d’erreur HTTP
+          return res.json([]); // admin sans commune : 200 avec liste vide
         }
       } else if (req.user.role === 'superadmin') {
         const raw = getPanelCommuneRaw(req);
