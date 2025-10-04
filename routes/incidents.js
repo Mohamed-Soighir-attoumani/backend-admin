@@ -1,3 +1,4 @@
+// backend/routes/incidents.js
 const express = require('express');
 const router = express.Router();
 const mongoose = require('mongoose');
@@ -17,64 +18,61 @@ const isMobile = (req) => APP_KEY && req.header('x-app-key') === APP_KEY;
 const isObjectId = (id) => mongoose.Types.ObjectId.isValid(id || '');
 const lc = (v) => String(v ?? '').trim().toLowerCase();
 
-/* ---------- helpers communes ---------- */
+/* ------------------------ Helpers communes ------------------------ */
+
 function escapeRegExp(s) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 /**
- * Cherche une commune par (slug | _id | name | label | communeName | nom | code), insensible à la casse.
- * ⚠️ C’est ici que ça coinçait avant : seuls slug/_id/name étaient testés.
+ * Recherche d'une commune par plusieurs champs (tolérant et insensible à la casse) :
+ *  - _id
+ *  - slug
+ *  - name / label / communeName / nom
+ *  - code
  */
 async function findCommuneByAny(anyId) {
   const raw = String(anyId ?? '').trim();
   if (!raw) return null;
 
-  // 1) _id
+  // 1) par _id direct
   if (isObjectId(raw)) {
     const c = await Commune.findById(raw).lean();
     if (c) return c;
   }
 
-  const rx = new RegExp(`^${escapeRegExp(raw)}$`, 'i');
-
-  // 2) slug
-  let c = await Commune.findOne({ slug: rx }).lean();
+  // 2) par slug exact (case-insensitive)
+  let c = await Commune.findOne({ slug: new RegExp(`^${escapeRegExp(raw)}$`, 'i') }).lean();
   if (c) return c;
 
-  // 3) name (si présent dans ton schéma)
-  c = await Commune.findOne({ name: rx }).lean();
-  if (c) return c;
+  // 3) par noms possibles
+  const nameFields = ['name', 'label', 'communeName', 'nom'];
+  for (const f of nameFields) {
+    c = await Commune.findOne({ [f]: new RegExp(`^${escapeRegExp(raw)}$`, 'i') }).lean();
+    if (c) return c;
+  }
 
-  // 4) label (← souvent utilisé)
-  c = await Commune.findOne({ label: rx }).lean();
-  if (c) return c;
-
-  // 5) communeName (← parfois utilisé)
-  c = await Commune.findOne({ communeName: rx }).lean();
-  if (c) return c;
-
-  // 6) nom (si ton modèle utilise "nom")
-  c = await Commune.findOne({ nom: rx }).lean();
-  if (c) return c;
-
-  // 7) code (si tu as un code INSEE ou interne)
-  c = await Commune.findOne({ code: rx }).lean();
+  // 4) par code exact
+  c = await Commune.findOne({ code: new RegExp(`^${escapeRegExp(raw)}$`, 'i') }).lean();
   if (c) return c;
 
   return null;
 }
 
-/** Retourne une clé canonique : slug si dispo, sinon _id string, sinon valeur lowercased */
+/**
+ * Retourne une **clé canonique** pour stockage (préférence au slug, sinon _id string, sinon la valeur lowercased)
+ */
 async function toCanonicalCommuneKey(anyId) {
   const raw = lc(anyId);
   if (!raw) return null;
   const c = await findCommuneByAny(raw);
-  if (!c) return raw; // fallback (au moins stable/case-insensitive)
+  if (!c) return raw; // fallback : garde la valeur fournie (en minuscule)
   return lc(c.slug || String(c._id));
 }
 
-/** Construit une clause $or tolérante pour filtrer communeId */
+/**
+ * Construit une clause $or tolérante pour filtrer communeId (slug / _id / nom / code + regex)
+ */
 async function buildCommuneClauseFrom(anyId) {
   const raw = lc(anyId);
   if (!raw) return null;
@@ -82,7 +80,6 @@ async function buildCommuneClauseFrom(anyId) {
   const variants = new Set();
   variants.add(raw);
 
-  // Ajoute les infos de la commune trouvée (slug + _id)
   const c = await findCommuneByAny(raw);
   if (c) {
     if (c.slug) variants.add(lc(c.slug));
@@ -90,26 +87,23 @@ async function buildCommuneClauseFrom(anyId) {
       variants.add(String(c._id));
       try { variants.add(new mongoose.Types.ObjectId(String(c._id))); } catch {}
     }
-    // Bonus : si la commune a des alias textuels
-    if (c.name) variants.add(lc(String(c.name)));
-    if (c.label) variants.add(lc(String(c.label)));
-    if (c.communeName) variants.add(lc(String(c.communeName)));
-    if (c.nom) variants.add(lc(String(c.nom)));
-    if (c.code) variants.add(lc(String(c.code)));
+    // On ajoute aussi les variantes textuelles connues si présentes
+    ['name', 'label', 'communeName', 'nom', 'code'].forEach((f) => {
+      if (c[f]) variants.add(lc(String(c[f])));
+    });
   }
 
-  // Si raw ressemble à un ObjectId, ajoute aussi l’ObjectId
+  // Si raw ressemble à un ObjectId, ajoute aussi l’ObjectId natif
   if (isObjectId(raw)) {
     try { variants.add(new mongoose.Types.ObjectId(raw)); } catch {}
     variants.add(String(raw));
   }
 
-  // Construire la clause (match exact strings/ids + regex insensible à la casse)
   const strings = [];
   const objectIds = [];
   for (const v of variants) {
     if (typeof v === 'string') strings.push(v);
-    else objectIds.push(v); // ObjectId
+    else objectIds.push(v);
   }
   const regexes = strings.map((s) => new RegExp(`^${escapeRegExp(s)}$`, 'i'));
 
@@ -125,38 +119,44 @@ function getPanelCommuneRaw(req) {
   return lc(req.header('x-commune-id') || req.query.communeId || '');
 }
 
-/* ===== auth optionnelle (mobile passe avec x-app-key) ===== */
+/* ===== Auth optionnelle : l’app mobile passe avec x-app-key, le panel avec JWT ===== */
 function authOptional(req, res, next) {
   if (isMobile(req)) return next();
   return auth(req, res, next);
 }
 
-/* ─────────────── GET /api/incidents ───────────────
-   - MOBILE : deviceId obligé ; communeId optionnelle (filtre si fourni)
-   - PANEL  :
-       * admin      -> x-commune-id/query si présent, sinon req.user.communeId ; sinon → []
-       * superadmin -> x-commune-id/query facultatif (sinon toutes)
-*/
+/* ========================== ROUTES ========================== */
+
+/**
+ * GET /api/incidents
+ *  - MOBILE : deviceId requis ; communeId optionnel (si fourni → filtre)
+ *  - PANEL  :
+ *      * admin      -> filtre sur x-commune-id/query si présent, sinon req.user.communeId ; sinon retourne []
+ *      * superadmin -> filtre sur x-commune-id/query si présent, sinon global (toutes communes)
+ *  - period=7|30 pour limiter par date de création
+ */
 router.get('/', authOptional, async (req, res) => {
   try {
     const and = [];
 
-    // ====== Mobile
     if (isMobile(req)) {
+      // ---- Mobile
       const deviceId = String(req.query.deviceId || req.body?.deviceId || '').trim();
       if (!deviceId) return res.status(400).json({ message: 'deviceId requis (mobile)' });
       and.push({ deviceId });
 
+      // Filtre commune (optionnel côté app)
       const raw = lc(req.query.communeId || req.header('x-commune-id') || '');
       if (raw) {
         const clause = await buildCommuneClauseFrom(raw);
         if (clause) and.push(clause);
       }
     } else {
-      // ====== Panel
+      // ---- Panel
       if (!req.user) return res.status(401).json({ message: 'Non connecté' });
 
       if (req.user.role === 'admin') {
+        // priorité au header/query ; sinon sa commune
         const raw = getPanelCommuneRaw(req) || lc(req.user.communeId || '');
         if (raw) {
           const clause = await buildCommuneClauseFrom(raw);
@@ -171,17 +171,19 @@ router.get('/', authOptional, async (req, res) => {
           const clause = await buildCommuneClauseFrom(raw);
           if (clause) and.push(clause);
         }
-        // sinon : pas de filtre → voit tout
+        // sinon pas de filtre → superadmin voit tout
       } else {
         return res.status(403).json({ message: 'Accès interdit' });
       }
 
+      // période (facultatif)
       const { period } = req.query;
       if (period === '7' || period === '30') {
         const days = parseInt(period, 10);
         and.push({ createdAt: { $gte: new Date(Date.now() - days * 86400000) } });
       }
 
+      // filtre device (facultatif panel)
       if (req.query.deviceId) and.push({ deviceId: String(req.query.deviceId) });
     }
 
@@ -194,7 +196,10 @@ router.get('/', authOptional, async (req, res) => {
   }
 });
 
-/* ─────────────── GET /api/incidents/count ─────────────── */
+/**
+ * GET /api/incidents/count
+ * Compte les incidents (mêmes règles de filtre que GET /api/incidents, sans deviceId obligatoire).
+ */
 router.get('/count', auth, async (req, res) => {
   try {
     if (!req.user) return res.status(401).json({ message: 'Non connecté' });
@@ -218,7 +223,7 @@ router.get('/count', auth, async (req, res) => {
         const clause = await buildCommuneClauseFrom(raw);
         if (clause) and.push(clause);
       }
-      // sinon global
+      // sinon global pour superadmin
     }
 
     const { period } = req.query;
@@ -236,7 +241,11 @@ router.get('/count', auth, async (req, res) => {
   }
 });
 
-/* ─────────────── POST /api/incidents (mobile + panel) ─────────────── */
+/**
+ * POST /api/incidents  (mobile + panel)
+ * Mobile : deviceId requis + communeId (corps ou header) requis → on stocke en clé canonique.
+ * Panel  : si admin sans commune dans le body → on rattache automatiquement à sa commune (clé canonique).
+ */
 router.post('/', upload.single('media'), async (req, res) => {
   try {
     const {
@@ -245,16 +254,18 @@ router.post('/', upload.single('media'), async (req, res) => {
       adminComment, deviceId, communeId,
     } = req.body || {};
 
+    // Exigences champs de base
+    if (!title || !description || !lieu || !latitude || !longitude || !deviceId) {
+      return res.status(400).json({ message: '❌ Champs requis manquants.' });
+    }
+
+    // Contraintes mobile
     if (isMobile(req)) {
       if (!deviceId)  return res.status(400).json({ message: 'deviceId requis (mobile)' });
-      // On **exige** une commune pour correctement rattacher côté multi-commune
+      // il faut absolument une commune (corps ou header)
       if (!communeId && !req.header('x-commune-id')) {
         return res.status(400).json({ message: 'communeId requis (mobile)' });
       }
-    }
-
-    if (!title || !description || !lieu || !latitude || !longitude || !deviceId) {
-      return res.status(400).json({ message: '❌ Champs requis manquants.' });
     }
 
     const mediaUrl  = req.file ? (req.file.path || req.file.secure_url || req.file.url) : null;
@@ -276,10 +287,10 @@ router.post('/', upload.single('media'), async (req, res) => {
       createdAt: new Date(),
     });
 
-    // Normalisation robuste de la commune pour stockage cohérent
+    // Détermine la commune et stocke la **clé canonique**
     const rawFromReq =
       communeId ||
-      req.header('x-commune-id') || // l’app peut l’envoyer ici
+      req.header('x-commune-id') ||
       (req.user?.role === 'admin' ? req.user.communeId : '');
 
     const canonicalKey = await toCanonicalCommuneKey(rawFromReq);
@@ -293,7 +304,11 @@ router.post('/', upload.single('media'), async (req, res) => {
   }
 });
 
-/* ─────────────── PUT /api/incidents/:id ─────────────── */
+/**
+ * PUT /api/incidents/:id
+ * Mobile : deviceId requis, remet updated=false (acquittement)
+ * Panel  : filtre d’accès par commune tolérant
+ */
 router.put('/:id', authOptional, async (req, res) => {
   const { id } = req.params;
   if (!isObjectId(id)) return res.status(400).json({ message: '❌ ID invalide' });
@@ -349,7 +364,10 @@ router.put('/:id', authOptional, async (req, res) => {
   }
 });
 
-/* ─────────────── DELETE /api/incidents/:id ─────────────── */
+/**
+ * DELETE /api/incidents/:id
+ * Panel : filtre d’accès par commune tolérant
+ */
 router.delete('/:id', auth, async (req, res) => {
   const { id } = req.params;
   if (!isObjectId(id)) return res.status(400).json({ message: '❌ ID invalide' });
@@ -384,7 +402,11 @@ router.delete('/:id', auth, async (req, res) => {
   }
 });
 
-/* ─────────────── GET /api/incidents/:id ─────────────── */
+/**
+ * GET /api/incidents/:id
+ * Mobile : deviceId requis
+ * Panel  : filtre d’accès par commune tolérant
+ */
 router.get('/:id', authOptional, async (req, res) => {
   const { id } = req.params;
   if (!isObjectId(id)) return res.status(400).json({ message: 'ID invalide' });
