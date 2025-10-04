@@ -1,3 +1,4 @@
+// backend/models/Incident.js
 const mongoose = require('mongoose');
 
 const incidentSchema = new mongoose.Schema({
@@ -23,7 +24,7 @@ const incidentSchema = new mongoose.Schema({
   deviceId: { type: String, required: true, index: true },
   userId: { type: String, default: null },
 
-  // 🔑 multi-commune
+  // 🔑 multi-commune (slug canonique conseillé)
   communeId: { type: String, index: true },
 
   // 🔁 flag de notification côté app
