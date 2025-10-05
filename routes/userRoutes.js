@@ -3,8 +3,6 @@ const express = require('express');
 const router = express.Router();
 const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
-const fs = require('fs');
-const path = require('path');
 const PDFDocument = require('pdfkit');
 
 const auth = require('../middleware/authMiddleware');
@@ -49,24 +47,20 @@ async function findCommuneByAny(anyId) {
   const raw = String(anyId ?? '').trim();
   if (!raw) return null;
 
-  // ID Mongo ?
   if (isValidHex24(raw)) {
     const c = await Commune.findById(raw).lean();
     if (c) return c;
   }
 
-  // slug (case-insensitive)
   let c = await Commune.findOne({ slug: new RegExp(`^${escapeRegExp(raw)}$`, 'i') }).lean();
   if (c) return c;
 
-  // noms exacts (case-insensitive)
   const nameFields = ['name', 'label', 'communeName', 'nom'];
   for (const f of nameFields) {
     c = await Commune.findOne({ [f]: new RegExp(`^${escapeRegExp(raw)}$`, 'i') }).lean();
     if (c) return c;
   }
 
-  // code exact
   c = await Commune.findOne({ code: new RegExp(`^${escapeRegExp(raw)}$`, 'i') }).lean();
   if (c) return c;
 
@@ -88,15 +82,12 @@ async function ensureCanonicalCommune(anyIdOrName) {
   const raw = String(anyIdOrName || '').trim();
   if (!raw) return { key: '', name: '' };
 
-  // Existe déjà ?
   const canon = await toCanonicalCommune(raw);
   if (canon.key) return canon;
 
-  // Sinon créer avec active:true pour l’exposer aux endpoints publics
   const baseSlug = slugify(raw) || `commune-${Date.now()}`;
   let finalSlug = baseSlug;
   let i = 1;
-  // unicité du slug
   while (await Commune.findOne({ slug: finalSlug }).lean()) {
     i += 1;
     finalSlug = `${baseSlug}-${i}`;
@@ -110,13 +101,13 @@ async function ensureCanonicalCommune(anyIdOrName) {
     region: '',
     imageUrl: '',
     slug: finalSlug,
-    active: true, // ✅ IMPORTANT pour affichage côté mobile /communes
+    active: true, // ✅ visible dans /communes côté mobile
   });
 
   return { key: doc.slug, name: doc.name || raw };
 }
 
-/* ===================== Trouver un utilisateur par “n’importe quoi” ===================== */
+/* ===================== Users helper ===================== */
 async function findUserByAnyId(primary, body = {}, query = {}) {
   const candidatesRaw = [
     primary,
@@ -152,6 +143,25 @@ async function findUserByAnyId(primary, body = {}, query = {}) {
   }
 
   return null;
+}
+
+/* ===================== Email alias en cas de collision ===================== */
+async function buildUniqueAliasEmail(baseEmail, slug) {
+  const s = String(baseEmail || '').trim();
+  const at = s.lastIndexOf('@');
+  if (at < 0) return ''; // pas d'alias possible
+  const local = s.slice(0, at);
+  const domain = s.slice(at + 1);
+  const base = `${local}+${slug}`;
+  let candidate = `${base}@${domain}`;
+  let i = 1;
+
+  // on normalise au stockage
+  while (await User.findOne({ email: norm(candidate) })) {
+    i += 1;
+    candidate = `${base}-${i}@${domain}`;
+  }
+  return candidate.toLowerCase();
 }
 
 /* ===================== LISTE ADMINS ===================== */
@@ -216,7 +226,7 @@ router.get('/admins', auth, requireRole('superadmin'), async (req, res) => {
   }
 });
 
-/* ===================== CRÉATION / MISE À JOUR ADMIN (idempotent) ===================== */
+/* ===================== CRÉATION / MISE À JOUR ADMIN (idempotent + auto-commune + alias email) ===================== */
 router.post('/admins', auth, requireRole('superadmin'), async (req, res) => {
   try {
     let { email, password, name, communeId, communeName, photo, createdBy } = req.body || {};
@@ -225,7 +235,7 @@ router.post('/admins', auth, requireRole('superadmin'), async (req, res) => {
       return res.status(400).json({ message: 'Email et mot de passe requis' });
     }
 
-    // 1) S’assurer que la commune existe et obtenir la clé canonique (slug)
+    // 1) S’assurer que la commune existe (création auto + active:true)
     const rawCommuneInput = communeId || communeName;
     if (!rawCommuneInput) {
       return res.status(400).json({ message: 'Commune obligatoire pour un compte admin.' });
@@ -236,48 +246,52 @@ router.post('/admins', auth, requireRole('superadmin'), async (req, res) => {
     }
 
     // 2) L’admin existe déjà ?
-    const existing = await User.findOne({ email });
+    let existing = await User.findOne({ email });
     const passwordHash = await bcrypt.hash(String(password), 10);
 
-    if (existing) {
-      // Si c’est un admin → on le met à jour au lieu d’erreur 409
-      if (String(existing.role).toLowerCase() === 'admin') {
-        const update = {
-          communeId: canon.key,
-          communeName: canon.name || communeName || '',
-          isActive: true,
-        };
-        if (name)  update.name  = name;
-        if (photo) update.photo = photo;
+    // 2a) si déjà admin → mise à jour (commune + mdp + infos)
+    if (existing && String(existing.role).toLowerCase() === 'admin') {
+      const update = {
+        communeId: canon.key,
+        communeName: canon.name || communeName || '',
+        isActive: true,
+      };
+      if (name)  update.name  = name;
+      if (photo) update.photo = photo;
+      update.password = passwordHash;
 
-        // Réinitialiser le mot de passe si fourni
-        update.password = passwordHash;
+      const updated = await User.findByIdAndUpdate(
+        existing._id,
+        { $set: update, $inc: { tokenVersion: 1 } },
+        { new: true }
+      );
 
-        const updated = await User.findByIdAndUpdate(
-          existing._id,
-          { $set: update, $inc: { tokenVersion: 1 } },
-          { new: true }
-        );
-
-        const plain = updated.toObject();
-        plain._idString = String(updated._id);
-        res.setHeader('Cache-Control', 'no-store');
-        return res.json({ ...plain, upserted: true, mode: 'updated' });
-      }
-
-      // Email déjà pris par un non-admin → renvoyer un message clair
-      return res.status(409).json({
-        message: "Email déjà utilisé par un compte qui n'est pas un administrateur.",
-      });
+      const plain = updated.toObject();
+      plain._idString = String(updated._id);
+      res.setHeader('Cache-Control', 'no-store');
+      return res.json({ ...plain, upserted: true, mode: 'updated' });
     }
 
-    // 3) Sinon, créer l’admin
+    // 2b) si email pris par un autre rôle (ex: superadmin) → créer un alias et créer l’admin
+    let finalEmail = email;
+    if (existing && String(existing.role).toLowerCase() !== 'admin') {
+      const alias = await buildUniqueAliasEmail(email, canon.key);
+      if (!alias) {
+        // si on ne peut pas aliaser (email sans @), on renvoie un message explicite
+        return res.status(400).json({
+          message: "L'email est déjà utilisé par un compte non-admin et ne peut pas être aliasé. Utilisez un autre email."
+        });
+      }
+      finalEmail = alias;
+    }
+
+    // 3) créer l’admin
     const doc = await User.create({
-      email,
+      email: finalEmail,
       password: passwordHash,
       name: name || '',
       role: 'admin',
-      communeId: canon.key,                              // 🔑 slug
+      communeId: canon.key,
       communeName: canon.name || communeName || '',
       photo: photo || '',
       createdBy: createdBy ? String(createdBy) : '',
@@ -293,16 +307,22 @@ router.post('/admins', auth, requireRole('superadmin'), async (req, res) => {
     plain._idString = String(doc._id);
 
     res.setHeader('Cache-Control', 'no-store');
-    return res.status(201).json({ ...plain, upserted: true, mode: 'created' });
+    return res.status(201).json({
+      ...plain,
+      upserted: true,
+      mode: 'created',
+      // si alias utilisé, on l’indique pour que le front puisse afficher l’email final
+      emailAliased: finalEmail !== email,
+      originalEmail: email,
+    });
   } catch (err) {
     console.error('❌ POST /api/admins', err);
     return res.status(500).json({ message: 'Erreur serveur' });
   }
 });
 
-/* ===================== (compat) CRÉATION via /users — alias de /admins ===================== */
+/* ===================== (compat) CRÉATION via /users — redirige vers /admins ===================== */
 router.post('/users', auth, requireRole('superadmin'), async (req, res) => {
-  // on délègue à la même logique pour garder un comportement identique
   req.url = '/admins';
   return router.handle(req, res);
 });
@@ -316,7 +336,7 @@ router.put('/users/:id', auth, requireRole('superadmin'), async (req, res) => {
       return res.status(400).json({ message: 'Changement de rôle interdit ici' });
     }
 
-    // Commune : s’il y a un changement, on s’assure qu’elle existe (création auto si besoin)
+    // commune : création auto si elle n’existe pas
     let nextCommuneId = user.communeId || '';
     let nextCommuneName = user.communeName || '';
 
@@ -425,7 +445,6 @@ router.post('/admins/:id/impersonate', auth, requireRole('superadmin'), async (r
       return res.status(403).json({ message: 'Compte cible désactivé' });
     }
 
-    // token d’impersonation — on embarque la commune
     const payload = {
       id: String(target._id),
       email: target.email,
@@ -446,7 +465,7 @@ router.post('/admins/:id/impersonate', auth, requireRole('superadmin'), async (r
   }
 });
 
-/* ===================== LISTE /api/users (fallback admin/superadmin) ===================== */
+/* ===================== LISTE /api/users (fallback) ===================== */
 router.get('/users', auth, requireRole('superadmin'), async (req, res) => {
   try {
     const {
@@ -552,12 +571,9 @@ router.get('/users/:id/invoices/:num/pdf', auth, requireRole('superadmin'), asyn
     res.setHeader('Content-Disposition', `inline; filename="${invoice.number}.pdf"`);
     res.setHeader('Cache-Control', 'no-store');
 
-    const logoPath = process.env.ASSO_LOGO_PATH || 'assets/logo-bellevue.png';
-
     const doc = new PDFDocument({ size: 'A4', margin: 50 });
     doc.pipe(res);
 
-    // rendu minimal
     doc.fontSize(20).text('Licence Securidem', 50, 50);
     doc.fontSize(10).text(`N°: ${invoice.number} — Date: ${formatDateFR(invoice.issuedAt)}`);
     doc.moveDown().text(`Client: ${invoice.customerName || invoice.userEmail}`);
