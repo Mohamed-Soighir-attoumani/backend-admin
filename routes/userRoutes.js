@@ -11,7 +11,7 @@ const auth = require('../middleware/authMiddleware');
 const requireRole = require('../middleware/requireRole');
 const User = require('../models/User');
 const Invoice = require('../models/Invoice');
-const Commune = require('../models/Commune'); // ⬅️ pour canoniser la commune
+const Commune = require('../models/Commune');
 const { sign } = require('../utils/jwt');
 
 /* Utils */
@@ -34,6 +34,16 @@ const pickHexFromAny = (v) => {
 };
 function formatDateFR(d) { try { return new Date(d).toLocaleDateString('fr-FR'); } catch { return ''; } }
 function escapeRegExp(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+
+/* ---------- Slug ---------- */
+function slugify(input) {
+  return String(input || '')
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .replace(/--+/g, '-');
+}
 
 /* ---------- Canonicalisation commune ---------- */
 async function findCommuneByAny(anyId) {
@@ -59,18 +69,51 @@ async function findCommuneByAny(anyId) {
   return null;
 }
 
-/** Retourne { key, name } :
- *  - key = slug (minuscule) si dispo, sinon _id string
- *  - name = nom humain si dispo
- */
+/** Retourne { key, name } si connue, sinon { key:'', name:'' } */
 async function toCanonicalCommune(anyId) {
   const raw = norm(anyId);
   if (!raw) return { key: '', name: '' };
   const c = await findCommuneByAny(raw);
-  if (!c) return { key: '', name: '' }; // ⬅️ désormais on ne retourne PLUS raw si inconnu
+  if (!c) return { key: '', name: '' };
   const key = norm(c.slug || String(c._id));
   const name = String(c.name ?? c.label ?? c.communeName ?? c.nom ?? '').trim();
   return { key, name };
+}
+
+/** 
+ * Assure qu’une commune existe :
+ * - si elle existe → retourne { key, name }
+ * - sinon → la crée (slugifié) et retourne { key, name }
+ */
+async function ensureCanonicalCommune(anyIdOrName) {
+  const raw = String(anyIdOrName || '').trim();
+  if (!raw) return { key: '', name: '' };
+
+  // 1) existe déjà ?
+  const canon = await toCanonicalCommune(raw);
+  if (canon.key) return canon;
+
+  // 2) créer à la volée (uniquement pour les routes superadmin qui appellent cette fonction)
+  const slug = slugify(raw);
+  // si collision de slug, on suffixe
+  let finalSlug = slug || `commune-${Date.now()}`;
+  let i = 1;
+  while (await Commune.findOne({ slug: finalSlug }).lean()) {
+    i += 1;
+    finalSlug = `${slug}-${i}`;
+  }
+
+  const doc = await Commune.create({
+    name: raw,
+    label: raw,
+    communeName: raw,
+    code: '',
+    region: '',
+    imageUrl: '',
+    slug: finalSlug,
+  });
+
+  return { key: doc.slug, name: doc.name || raw };
 }
 
 /**
@@ -186,13 +229,14 @@ router.post('/admins', auth, requireRole('superadmin'), async (req, res) => {
     const exists = await User.findOne({ email });
     if (exists) return res.status(409).json({ message: 'Email déjà utilisé' });
 
-    // ⬇️ COMMUNE OBLIGATOIRE et VALIDE
-    if (!communeId && !communeName) {
+    // ⬇️ COMMUNE OBLIGATOIRE — et si inconnue, on la crée (slugifié)
+    const rawCommuneInput = communeId || communeName;
+    if (!rawCommuneInput) {
       return res.status(400).json({ message: 'Commune obligatoire pour un compte admin.' });
     }
-    const canon = await toCanonicalCommune(communeId || communeName);
+    const canon = await ensureCanonicalCommune(rawCommuneInput);
     if (!canon.key) {
-      return res.status(400).json({ message: "Commune inconnue. Utilise le slug, l'_id, le nom exact ou le code." });
+      return res.status(400).json({ message: "Commune invalide." });
     }
 
     const passwordHash = await bcrypt.hash(String(password), 10);
@@ -237,13 +281,13 @@ router.post('/users', auth, requireRole('superadmin'), async (req, res) => {
     const exists = await User.findOne({ email });
     if (exists) return res.status(409).json({ message: 'Email déjà utilisé' });
 
-    // ⬇️ COMMUNE OBLIGATOIRE et VALIDE
-    if (!communeId && !communeName) {
+    const rawCommuneInput = communeId || communeName;
+    if (!rawCommuneInput) {
       return res.status(400).json({ message: 'Commune obligatoire pour un compte admin.' });
     }
-    const canon = await toCanonicalCommune(communeId || communeName);
+    const canon = await ensureCanonicalCommune(rawCommuneInput);
     if (!canon.key) {
-      return res.status(400).json({ message: "Commune inconnue. Utilise le slug, l'_id, le nom exact ou le code." });
+      return res.status(400).json({ message: "Commune invalide." });
     }
 
     const passwordHash = await bcrypt.hash(String(password), 10);
@@ -281,25 +325,25 @@ router.put('/users/:id', auth, requireRole('superadmin'), async (req, res) => {
     const user = await findUserByAnyId(req.params.id, req.body, req.query);
     if (!user) return res.status(404).json({ message: 'Utilisateur introuvable' });
 
-    // On interdit le changement de rôle hors "admin" via cette route (comme avant)
     if (req.body.role && req.body.role !== 'admin') {
       return res.status(400).json({ message: 'Changement de rôle interdit ici' });
     }
 
-    // Si le compte est (ou reste) admin, imposer une commune valide si une commune est fournie
+    // Commune : si fournie → s’assurer qu’elle existe (création à la volée si besoin)
     let nextCommuneId = user.communeId || '';
     let nextCommuneName = user.communeName || '';
 
     if (typeof req.body.communeId === 'string' || typeof req.body.communeName === 'string') {
-      const canon = await toCanonicalCommune(req.body.communeId || req.body.communeName);
+      const raw = req.body.communeId || req.body.communeName;
+      const canon = await ensureCanonicalCommune(raw);
       if (!canon.key) {
-        return res.status(400).json({ message: "Commune inconnue. Utilise le slug, l'_id, le nom exact ou le code." });
+        return res.status(400).json({ message: "Commune invalide." });
       }
       nextCommuneId = canon.key;
       nextCommuneName = canon.name || req.body.communeName || '';
     }
 
-    // Si on a un admin **sans** commune et qu'aucune commune n'est fournie → refuser
+    // Si le compte est (ou reste) admin, il doit avoir une commune
     const becomesAdmin = (req.body.role || user.role) === 'admin';
     if (becomesAdmin && !nextCommuneId) {
       return res.status(400).json({ message: "Un compte admin doit être rattaché à une commune valide." });
@@ -310,7 +354,6 @@ router.put('/users/:id', auth, requireRole('superadmin'), async (req, res) => {
     if (typeof req.body.name === 'string')  payload.name = req.body.name;
     if (typeof req.body.isActive === 'boolean') payload.isActive = req.body.isActive;
 
-    // Appliquer la commune canonicalisée si on l’a recalculée
     if (nextCommuneId !== (user.communeId || '')) {
       payload.communeId = nextCommuneId;
       payload.communeName = nextCommuneName;
@@ -341,8 +384,7 @@ router.post('/users/:id/toggle-active', auth, requireRole('superadmin'), async (
   }
 });
 
-/* ===================== FACTURES ===================== */
-// (inchangé — laissé pour contexte)
+/* ===================== FACTURES (extraits utiles) ===================== */
 router.get('/users/:id/invoices', auth, requireRole('superadmin'), async (req, res) => {
   try {
     const user = await findUserByAnyId(req.params.id, req.query, req.query);
@@ -369,8 +411,5 @@ router.get('/users/:id/invoices', auth, requireRole('superadmin'), async (req, r
     res.status(500).json({ message: 'Erreur serveur' });
   }
 });
-
-/* ====== PDF Helper / autres routes ====== */
-// ... (laisse le reste de ton fichier identique si tu n’as rien changé)
 
 module.exports = router;
