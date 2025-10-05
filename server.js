@@ -14,7 +14,8 @@ const runBackup = require('./scripts/backup');
 const { secretFingerprint } = require('./utils/jwt');
 
 const Commune = require('./models/Commune');
-const communesRouter = require('./routes/communes');
+// ⬇️ Correction: importer le bon router
+const communeRoutes = require('./routes/communeRoutes');
 
 // ✅ Auth middleware pour /api/me pare-balles
 const auth = require('./middleware/authMiddleware');
@@ -67,7 +68,6 @@ app.use(promBundle({
 app.get('/api/health', (_, res) => res.json({ status: 'ok', timestamp: Date.now() }));
 
 // ✅ Pare-balles: expose /api/me ici pour éviter tout 404 (même si routes/me.js bug)
-//    -> Si ton routes/me.js répond aussi sur /me, celui-ci garantit un fallback sain.
 app.get('/api/me', auth, (req, res) => {
   res.json({
     user: {
@@ -99,9 +99,10 @@ app.use('/api/projects', require('./routes/projects'));
 app.use('/api/devices', require('./routes/devices'));
 
 // IMPORTANT: router des communes
-app.use('/api/communes', communesRouter);
+// ⬇️ Correction: utiliser communeRoutes (et ne pas doubler "/api" dans le fichier de routes)
+app.use('/api/communes', communeRoutes);
 // ✅ Alias public pour couvrir les appels mobile sans /api
-app.use('/communes', communesRouter);
+app.use('/communes', communeRoutes);
 
 app.use('/api', require('./routes/userRoutes'));
 app.use('/api', require('./routes/subscriptions'));
