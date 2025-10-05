@@ -14,9 +14,8 @@ const Invoice = require('../models/Invoice');
 const Commune = require('../models/Commune');
 const { sign } = require('../utils/jwt');
 
-/* Utils */
+/* ===================== Utils généraux ===================== */
 const isValidHex24 = (s) => typeof s === 'string' && /^[a-f0-9]{24}$/i.test(s);
-const isValidId = (id) => isValidHex24(String(id || ''));
 const norm = (v) => String(v || '').trim().toLowerCase();
 const decode = (v) => { try { return decodeURIComponent(String(v)); } catch { return String(v || ''); } };
 const pickHexFromAny = (v) => {
@@ -32,10 +31,10 @@ const pickHexFromAny = (v) => {
   const m = s.match(/[a-f0-9]{24}/i);
   return m && isValidHex24(m[0]) ? m[0] : '';
 };
-function formatDateFR(d) { try { return new Date(d).toLocaleDateString('fr-FR'); } catch { return ''; } }
 function escapeRegExp(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+function formatDateFR(d) { try { return new Date(d).toLocaleDateString('fr-FR'); } catch { return ''; } }
 
-/* ---------- Slug ---------- */
+/* ---------- Slugify pour communes auto ---------- */
 function slugify(input) {
   return String(input || '')
     .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
@@ -45,7 +44,7 @@ function slugify(input) {
     .replace(/--+/g, '-');
 }
 
-/* ---------- Canonicalisation commune ---------- */
+/* ===================== Communes : recherche/canon/ensure ===================== */
 async function findCommuneByAny(anyId) {
   const raw = String(anyId ?? '').trim();
   if (!raw) return null;
@@ -69,7 +68,6 @@ async function findCommuneByAny(anyId) {
   return null;
 }
 
-/** Retourne { key, name } si connue, sinon { key:'', name:'' } */
 async function toCanonicalCommune(anyId) {
   const raw = norm(anyId);
   if (!raw) return { key: '', name: '' };
@@ -80,23 +78,18 @@ async function toCanonicalCommune(anyId) {
   return { key, name };
 }
 
-/** 
- * Assure qu’une commune existe :
- * - si elle existe → retourne { key, name }
- * - sinon → la crée (slugifié) et retourne { key, name }
- */
+/** Crée la commune si absente, retourne { key: slugOrId, name } */
 async function ensureCanonicalCommune(anyIdOrName) {
   const raw = String(anyIdOrName || '').trim();
   if (!raw) return { key: '', name: '' };
 
-  // 1) existe déjà ?
+  // existe ?
   const canon = await toCanonicalCommune(raw);
   if (canon.key) return canon;
 
-  // 2) créer à la volée (uniquement pour les routes superadmin qui appellent cette fonction)
-  const slug = slugify(raw);
-  // si collision de slug, on suffixe
-  let finalSlug = slug || `commune-${Date.now()}`;
+  // créer
+  const slug = slugify(raw) || `commune-${Date.now()}`;
+  let finalSlug = slug;
   let i = 1;
   while (await Commune.findOne({ slug: finalSlug }).lean()) {
     i += 1;
@@ -116,9 +109,7 @@ async function ensureCanonicalCommune(anyIdOrName) {
   return { key: doc.slug, name: doc.name || raw };
 }
 
-/**
- * 🔍 Résout un utilisateur à partir de plein d’identifiants
- */
+/* ===================== Trouver un utilisateur par “n’importe quoi” ===================== */
 async function findUserByAnyId(primary, body = {}, query = {}) {
   const candidatesRaw = [
     primary,
@@ -229,14 +220,13 @@ router.post('/admins', auth, requireRole('superadmin'), async (req, res) => {
     const exists = await User.findOne({ email });
     if (exists) return res.status(409).json({ message: 'Email déjà utilisé' });
 
-    // ⬇️ COMMUNE OBLIGATOIRE — et si inconnue, on la crée (slugifié)
     const rawCommuneInput = communeId || communeName;
     if (!rawCommuneInput) {
       return res.status(400).json({ message: 'Commune obligatoire pour un compte admin.' });
     }
     const canon = await ensureCanonicalCommune(rawCommuneInput);
     if (!canon.key) {
-      return res.status(400).json({ message: "Commune invalide." });
+      return res.status(400).json({ message: 'Commune invalide.' });
     }
 
     const passwordHash = await bcrypt.hash(String(password), 10);
@@ -287,7 +277,7 @@ router.post('/users', auth, requireRole('superadmin'), async (req, res) => {
     }
     const canon = await ensureCanonicalCommune(rawCommuneInput);
     if (!canon.key) {
-      return res.status(400).json({ message: "Commune invalide." });
+      return res.status(400).json({ message: 'Commune invalide.' });
     }
 
     const passwordHash = await bcrypt.hash(String(password), 10);
@@ -324,12 +314,11 @@ router.put('/users/:id', auth, requireRole('superadmin'), async (req, res) => {
   try {
     const user = await findUserByAnyId(req.params.id, req.body, req.query);
     if (!user) return res.status(404).json({ message: 'Utilisateur introuvable' });
-
     if (req.body.role && req.body.role !== 'admin') {
       return res.status(400).json({ message: 'Changement de rôle interdit ici' });
     }
 
-    // Commune : si fournie → s’assurer qu’elle existe (création à la volée si besoin)
+    // Commune : s’il y a un changement, on s’assure qu’elle existe (création auto si besoin)
     let nextCommuneId = user.communeId || '';
     let nextCommuneName = user.communeName || '';
 
@@ -337,16 +326,10 @@ router.put('/users/:id', auth, requireRole('superadmin'), async (req, res) => {
       const raw = req.body.communeId || req.body.communeName;
       const canon = await ensureCanonicalCommune(raw);
       if (!canon.key) {
-        return res.status(400).json({ message: "Commune invalide." });
+        return res.status(400).json({ message: 'Commune invalide.' });
       }
       nextCommuneId = canon.key;
       nextCommuneName = canon.name || req.body.communeName || '';
-    }
-
-    // Si le compte est (ou reste) admin, il doit avoir une commune
-    const becomesAdmin = (req.body.role || user.role) === 'admin';
-    if (becomesAdmin && !nextCommuneId) {
-      return res.status(400).json({ message: "Un compte admin doit être rattaché à une commune valide." });
     }
 
     const payload = {};
@@ -384,7 +367,146 @@ router.post('/users/:id/toggle-active', auth, requireRole('superadmin'), async (
   }
 });
 
-/* ===================== FACTURES (extraits utiles) ===================== */
+/* ===================== RESET MOT DE PASSE ADMIN ===================== */
+router.post('/admins/:id/reset-password', auth, requireRole('superadmin'), async (req, res) => {
+  try {
+    const user = await findUserByAnyId(req.params.id, req.body, req.query);
+    if (!user) return res.status(404).json({ message: 'Utilisateur introuvable' });
+    if (String(user.role).toLowerCase() !== 'admin') {
+      return res.status(400).json({ message: 'Réservé aux comptes admin' });
+    }
+
+    const { newPassword } = req.body || {};
+    if (!newPassword || String(newPassword).length < 6) {
+      return res.status(400).json({ message: 'Nouveau mot de passe invalide (min 6 car.)' });
+    }
+    const hash = await bcrypt.hash(String(newPassword), 10);
+    await User.updateOne({ _id: user._id }, { $set: { password: hash }, $inc: { tokenVersion: 1 } });
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error('❌ POST /api/admins/:id/reset-password', err);
+    res.status(500).json({ message: 'Erreur serveur' });
+  }
+});
+
+/* ===================== SUPPRESSION ADMIN ===================== */
+router.delete('/admins/:id', auth, requireRole('superadmin'), async (req, res) => {
+  try {
+    const currentId = String(req.user && req.user.id || '');
+    const user = await findUserByAnyId(req.params.id, req.body, req.query);
+    if (!user) return res.status(404).json({ message: 'Utilisateur introuvable' });
+
+    if (String(user._id) === currentId) {
+      return res.status(400).json({ message: 'Impossible de vous supprimer vous-même' });
+    }
+    if (String(user.role).toLowerCase() === 'superadmin') {
+      return res.status(400).json({ message: 'Suppression d’un superadmin interdite' });
+    }
+
+    await User.deleteOne({ _id: user._id });
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error('❌ DELETE /api/admins/:id', err);
+    res.status(500).json({ message: 'Erreur serveur' });
+  }
+});
+
+/* ===================== IMPERSONATION ADMIN (✅ la route manquante) ===================== */
+router.post('/admins/:id/impersonate', auth, requireRole('superadmin'), async (req, res) => {
+  try {
+    const target = await findUserByAnyId(req.params.id, req.body, req.query);
+    if (!target) return res.status(404).json({ message: 'Utilisateur introuvable' });
+    if (String(target.role).toLowerCase() !== 'admin') {
+      return res.status(400).json({ message: 'Seuls les comptes admin sont impersonables ici' });
+    }
+    if (target.isActive === false) {
+      return res.status(403).json({ message: 'Compte cible désactivé' });
+    }
+
+    // token d’impersonation — on embarque la commune
+    const payload = {
+      id: String(target._id),
+      email: target.email,
+      role: target.role || 'admin',
+      tv: typeof target.tokenVersion === 'number' ? target.tokenVersion : 0,
+      impersonated: true,
+      origUserId: String(req.user.id),
+      communeId: target.communeId || '',
+      communeName: target.communeName || '',
+    };
+
+    const token = sign(payload, { expiresIn: '2h' });
+    return res.json({ token });
+  } catch (err) {
+    console.error('❌ POST /api/admins/:id/impersonate', err);
+    res.status(500).json({ message: 'Erreur serveur' });
+  }
+});
+
+/* ===================== LISTE /api/users (fallback admin/superadmin) ===================== */
+router.get('/users', auth, requireRole('superadmin'), async (req, res) => {
+  try {
+    const {
+      q = '',
+      communeId = '',
+      role = '',
+      status = '',
+      sub = '',
+      page = 1,
+      pageSize = 15,
+    } = req.query;
+
+    const find = {};
+    if (role) find.role = role;
+
+    if (q) {
+      const rx = new RegExp(q, 'i');
+      find.$or = [{ email: rx }, { name: rx }];
+    }
+
+    if (communeId) {
+      const { key } = await toCanonicalCommune(communeId);
+      if (key) find.communeId = key;
+      else return res.json({ items: [], total: 0 });
+    }
+
+    if (status === 'active')   find.isActive = { $ne: false };
+    if (status === 'inactive') find.isActive = false;
+
+    if (sub === 'none') {
+      find.$or = [
+        ...(find.$or || []),
+        { subscriptionStatus: { $exists: false } },
+        { subscriptionStatus: 'none' },
+      ];
+    }
+    if (sub === 'active')  find.subscriptionStatus = 'active';
+    if (sub === 'expired') find.subscriptionStatus = 'expired';
+
+    const p = Math.max(1, parseInt(page, 10) || 1);
+    const ps = Math.max(1, Math.min(200, parseInt(pageSize, 10) || 15));
+
+    let items = await User.find(find)
+      .sort({ createdAt: -1 })
+      .skip((p - 1) * ps)
+      .limit(ps)
+      .lean();
+
+    items = items.map(u => ({
+      ...u,
+      _idString: (u._id && String(u._id)) || '',
+    }));
+
+    const total = await User.countDocuments(find);
+
+    res.json({ items, total });
+  } catch (err) {
+    console.error('❌ GET /api/users', err);
+    res.status(500).json({ message: 'Erreur serveur' });
+  }
+});
+
+/* ===================== FACTURES (optionnel, utile si déjà câblé côté front) ===================== */
 router.get('/users/:id/invoices', auth, requireRole('superadmin'), async (req, res) => {
   try {
     const user = await findUserByAnyId(req.params.id, req.query, req.query);
@@ -408,6 +530,40 @@ router.get('/users/:id/invoices', auth, requireRole('superadmin'), async (req, r
     res.json({ items: list, total: list.length });
   } catch (err) {
     console.error('❌ GET /api/users/:id/invoices', err);
+    res.status(500).json({ message: 'Erreur serveur' });
+  }
+});
+
+router.get('/users/:id/invoices/:num/pdf', auth, requireRole('superadmin'), async (req, res) => {
+  try {
+    const user = await findUserByAnyId(req.params.id, req.query, req.query);
+    if (!user) return res.status(404).json({ message: 'Utilisateur introuvable' });
+
+    const number = String(req.params.num || '').trim();
+    const invoice = await Invoice.findOne({ number, userId: user._id });
+    if (!invoice) return res.status(404).json({ message: 'Facture introuvable' });
+
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `inline; filename="${invoice.number}.pdf"`);
+    res.setHeader('Cache-Control', 'no-store');
+
+    const logoPath = process.env.ASSO_LOGO_PATH || 'assets/logo-bellevue.png';
+
+    const doc = new PDFDocument({ size: 'A4', margin: 50 });
+    doc.pipe(res);
+
+    // rendu minimal
+    doc.fontSize(20).text('Licence Securidem', 50, 50);
+    doc.fontSize(10).text(`N°: ${invoice.number} — Date: ${formatDateFR(invoice.issuedAt)}`);
+    doc.moveDown().text(`Client: ${invoice.customerName || invoice.userEmail}`);
+    doc.text(`Email: ${invoice.userEmail}`);
+    if (invoice.communeName || invoice.communeId) {
+      doc.text(`Commune: ${invoice.communeName || invoice.communeId}`);
+    }
+    doc.moveDown().fontSize(12).text(`Total: ${invoice.amount.toFixed(2)} ${invoice.currency}`);
+    doc.end();
+  } catch (err) {
+    console.error('❌ GET /api/users/:id/invoices/:num/pdf', err);
     res.status(500).json({ message: 'Erreur serveur' });
   }
 });
