@@ -77,7 +77,7 @@ async function toCanonicalCommune(anyId) {
   return { key, name };
 }
 
-/** Crée la commune si absente, retourne { key: slugOrId, name } */
+/** Crée la commune si absente, retourne { key: slugOrId, name } (active = true pour l’app mobile) */
 async function ensureCanonicalCommune(anyIdOrName) {
   const raw = String(anyIdOrName || '').trim();
   if (!raw) return { key: '', name: '' };
@@ -101,7 +101,7 @@ async function ensureCanonicalCommune(anyIdOrName) {
     region: '',
     imageUrl: '',
     slug: finalSlug,
-    active: true, // ✅ visible dans /communes côté mobile
+    active: true,
   });
 
   return { key: doc.slug, name: doc.name || raw };
@@ -149,14 +149,13 @@ async function findUserByAnyId(primary, body = {}, query = {}) {
 async function buildUniqueAliasEmail(baseEmail, slug) {
   const s = String(baseEmail || '').trim();
   const at = s.lastIndexOf('@');
-  if (at < 0) return ''; // pas d'alias possible
+  if (at < 0) return '';
   const local = s.slice(0, at);
   const domain = s.slice(at + 1);
   const base = `${local}+${slug}`;
   let candidate = `${base}@${domain}`;
   let i = 1;
 
-  // on normalise au stockage
   while (await User.findOne({ email: norm(candidate) })) {
     i += 1;
     candidate = `${base}-${i}@${domain}`;
@@ -211,11 +210,7 @@ router.get('/admins', auth, requireRole('superadmin'), async (req, res) => {
       .limit(ps)
       .lean();
 
-    items = items.map(u => ({
-      ...u,
-      _idString: (u._id && String(u._id)) || '',
-    }));
-
+    items = items.map(u => ({ ...u, _idString: (u._id && String(u._id)) || '' }));
     const total = await User.countDocuments(find);
 
     res.setHeader('Cache-Control', 'no-store');
@@ -233,6 +228,9 @@ router.post('/admins', auth, requireRole('superadmin'), async (req, res) => {
     email = norm(email);
     if (!email || !password) {
       return res.status(400).json({ message: 'Email et mot de passe requis' });
+    }
+    if (String(password).length < 6) {
+      return res.status(400).json({ message: 'Mot de passe trop court (min 6 caractères).' });
     }
 
     // 1) S’assurer que la commune existe (création auto + active:true)
@@ -272,36 +270,46 @@ router.post('/admins', auth, requireRole('superadmin'), async (req, res) => {
       return res.json({ ...plain, upserted: true, mode: 'updated' });
     }
 
-    // 2b) si email pris par un autre rôle (ex: superadmin) → créer un alias et créer l’admin
+    // 2b) si email pris par un autre rôle (ex: superadmin) → alias email
     let finalEmail = email;
     if (existing && String(existing.role).toLowerCase() !== 'admin') {
       const alias = await buildUniqueAliasEmail(email, canon.key);
       if (!alias) {
-        // si on ne peut pas aliaser (email sans @), on renvoie un message explicite
-        return res.status(400).json({
-          message: "L'email est déjà utilisé par un compte non-admin et ne peut pas être aliasé. Utilisez un autre email."
+        return res.status(409).json({
+          message: "Cet email appartient déjà à un autre compte et ne peut pas être aliasé. Utilisez une autre adresse.",
+          code: 'EMAIL_TAKEN',
         });
       }
       finalEmail = alias;
     }
 
     // 3) créer l’admin
-    const doc = await User.create({
-      email: finalEmail,
-      password: passwordHash,
-      name: name || '',
-      role: 'admin',
-      communeId: canon.key,
-      communeName: canon.name || communeName || '',
-      photo: photo || '',
-      createdBy: createdBy ? String(createdBy) : '',
-      isActive: true,
-      subscriptionStatus: 'none',
-      subscriptionEndAt: null,
-      subscriptionPrice: 0,
-      subscriptionCurrency: 'EUR',
-      subscriptionMethod: '',
-    });
+    let doc;
+    try {
+      doc = await User.create({
+        email: finalEmail,
+        password: passwordHash,
+        name: name || '',
+        role: 'admin',
+        communeId: canon.key,
+        communeName: canon.name || communeName || '',
+        photo: photo || '',
+        createdBy: createdBy ? String(createdBy) : '',
+        isActive: true,
+        subscriptionStatus: 'none',
+        subscriptionEndAt: null,
+        subscriptionPrice: 0,
+        subscriptionCurrency: 'EUR',
+        subscriptionMethod: '',
+      });
+    } catch (e) {
+      // Gestion explicite des collisions d’email
+      if (e && e.code === 11000 && e.keyPattern && e.keyPattern.email) {
+        return res.status(409).json({ message: 'Email déjà utilisé', code: 'EMAIL_TAKEN' });
+      }
+      console.error('❌ create admin error:', e);
+      throw e; // tombera dans le catch du dessus → 500
+    }
 
     const plain = doc.toObject();
     plain._idString = String(doc._id);
@@ -311,7 +319,6 @@ router.post('/admins', auth, requireRole('superadmin'), async (req, res) => {
       ...plain,
       upserted: true,
       mode: 'created',
-      // si alias utilisé, on l’indique pour que le front puisse afficher l’email final
       emailAliased: finalEmail !== email,
       originalEmail: email,
     });
@@ -514,11 +521,7 @@ router.get('/users', auth, requireRole('superadmin'), async (req, res) => {
       .limit(ps)
       .lean();
 
-    items = items.map(u => ({
-      ...u,
-      _idString: (u._id && String(u._id)) || '',
-    }));
-
+    items = items.map(u => ({ ...u, _idString: (u._id && String(u._id)) || '' }));
     const total = await User.countDocuments(find);
 
     res.setHeader('Cache-Control', 'no-store');
@@ -574,6 +577,7 @@ router.get('/users/:id/invoices/:num/pdf', auth, requireRole('superadmin'), asyn
     const doc = new PDFDocument({ size: 'A4', margin: 50 });
     doc.pipe(res);
 
+    // rendu minimal
     doc.fontSize(20).text('Licence Securidem', 50, 50);
     doc.fontSize(10).text(`N°: ${invoice.number} — Date: ${formatDateFR(invoice.issuedAt)}`);
     doc.moveDown().text(`Client: ${invoice.customerName || invoice.userEmail}`);
