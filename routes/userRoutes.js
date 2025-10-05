@@ -29,13 +29,13 @@ const pickHexFromAny = (v) => {
   const m = s.match(/[a-f0-9]{24}/i);
   return m && isValidHex24(m[0]) ? m[0] : '';
 };
-function escapeRegExp(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+function escapeRegExp(s) { return String(s || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
 function formatDateFR(d) { try { return new Date(d).toLocaleDateString('fr-FR'); } catch { return ''; } }
 
 /* ---------- Slugify pour communes auto ---------- */
+function stripAccents(s='') { return String(s).normalize('NFD').replace(/[\u0300-\u036f]/g, ''); }
 function slugify(input) {
-  return String(input || '')
-    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+  return stripAccents(String(input || ''))
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '')
@@ -77,7 +77,7 @@ async function toCanonicalCommune(anyId) {
   return { key, name };
 }
 
-/** Crée la commune si absente, retourne { key: slugOrId, name } (active = true pour l’app mobile) */
+/** Crée la commune si absente, retourne { key: slugOrId, name } */
 async function ensureCanonicalCommune(anyIdOrName) {
   const raw = String(anyIdOrName || '').trim();
   if (!raw) return { key: '', name: '' };
@@ -88,41 +88,24 @@ async function ensureCanonicalCommune(anyIdOrName) {
   const baseSlug = slugify(raw) || `commune-${Date.now()}`;
   let finalSlug = baseSlug;
   let i = 1;
+  // éviter les doublons de slug même si l'index n'est pas unique
   while (await Commune.findOne({ slug: finalSlug }).lean()) {
     i += 1;
     finalSlug = `${baseSlug}-${i}`;
   }
 
-  // création résiliente aux courses (slug déjà pris entre le check et l’insert)
-  try {
-    const doc = await Commune.create({
-      name: raw,
-      label: raw,
-      communeName: raw,
-      code: '',
-      region: '',
-      imageUrl: '',
-      slug: finalSlug,
-      active: true,
-    });
-    return { key: doc.slug, name: doc.name || raw };
-  } catch (e) {
-    if (e && e.code === 11000) {
-      const altSlug = `${finalSlug}-${Date.now().toString().slice(-4)}`;
-      const doc2 = await Commune.create({
-        name: raw,
-        label: raw,
-        communeName: raw,
-        code: '',
-        region: '',
-        imageUrl: '',
-        slug: altSlug,
-        active: true,
-      });
-      return { key: doc2.slug, name: doc2.name || raw };
-    }
-    throw e;
-  }
+  const doc = await Commune.create({
+    name: raw,
+    label: raw,
+    communeName: raw,
+    code: '',
+    region: '',
+    imageUrl: '',
+    slug: finalSlug,
+    active: true, // ✅ visible dans /communes côté mobile
+  });
+
+  return { key: doc.slug, name: doc.name || raw };
 }
 
 /* ===================== Users helper ===================== */
@@ -165,9 +148,9 @@ async function findUserByAnyId(primary, body = {}, query = {}) {
 
 /* ===================== Email alias en cas de collision ===================== */
 async function buildUniqueAliasEmail(baseEmail, slug) {
-  const s = String(baseEmail || '').trim();
+  const s = String(baseEmail || '').trim().toLowerCase();
   const at = s.lastIndexOf('@');
-  if (at < 0) return '';
+  if (at < 0) return ''; // pas d'alias possible
   const local = s.slice(0, at);
   const domain = s.slice(at + 1);
   const base = `${local}+${slug}`;
@@ -247,9 +230,6 @@ router.post('/admins', auth, requireRole('superadmin'), async (req, res) => {
     if (!email || !password) {
       return res.status(400).json({ message: 'Email et mot de passe requis' });
     }
-    if (String(password).length < 6) {
-      return res.status(400).json({ message: 'Mot de passe trop court (min 6 caractères).' });
-    }
 
     // 1) S’assurer que la commune existe (création auto + active:true)
     const rawCommuneInput = communeId || communeName;
@@ -271,10 +251,10 @@ router.post('/admins', auth, requireRole('superadmin'), async (req, res) => {
         communeId: canon.key,
         communeName: canon.name || communeName || '',
         isActive: true,
+        password: passwordHash,
       };
       if (name)  update.name  = name;
       if (photo) update.photo = photo;
-      update.password = passwordHash;
 
       const updated = await User.findByIdAndUpdate(
         existing._id,
@@ -288,46 +268,35 @@ router.post('/admins', auth, requireRole('superadmin'), async (req, res) => {
       return res.json({ ...plain, upserted: true, mode: 'updated' });
     }
 
-    // 2b) si email pris par un autre rôle (ex: superadmin) → alias email
+    // 2b) si email pris par un autre rôle (ex: superadmin) → alias et créer l’admin
     let finalEmail = email;
     if (existing && String(existing.role).toLowerCase() !== 'admin') {
       const alias = await buildUniqueAliasEmail(email, canon.key);
       if (!alias) {
-        return res.status(409).json({
-          message: "Cet email appartient déjà à un autre compte et ne peut pas être aliasé. Utilisez une autre adresse.",
-          code: 'EMAIL_TAKEN',
+        return res.status(400).json({
+          message: "L'email est déjà utilisé par un compte non-admin et ne peut pas être aliasé. Utilisez un autre email."
         });
       }
       finalEmail = alias;
     }
 
-    // 3) créer l’admin (catch 11000 robuste)
-    let doc;
-    try {
-      doc = await User.create({
-        email: finalEmail,
-        password: passwordHash,
-        name: name || '',
-        role: 'admin',
-        communeId: canon.key,
-        communeName: canon.name || communeName || '',
-        photo: photo || '',
-        createdBy: createdBy ? String(createdBy) : '',
-        isActive: true,
-        subscriptionStatus: 'none',
-        subscriptionEndAt: null,
-        subscriptionPrice: 0,
-        subscriptionCurrency: 'EUR',
-        subscriptionMethod: '',
-      });
-    } catch (e) {
-      // ✅ certains environnements n’envoient pas keyPattern/keyValue → on traite tout E11000 comme doublon email
-      if (e && e.code === 11000) {
-        return res.status(409).json({ message: 'Email déjà utilisé', code: 'EMAIL_TAKEN' });
-      }
-      console.error('❌ create admin error:', e);
-      throw e;
-    }
+    // 3) créer l’admin
+    const doc = await User.create({
+      email: finalEmail,
+      password: passwordHash,
+      name: name || '',
+      role: 'admin',
+      communeId: canon.key,
+      communeName: canon.name || communeName || '',
+      photo: photo || '',
+      createdBy: createdBy ? String(createdBy) : '',
+      isActive: true,
+      subscriptionStatus: 'none',
+      subscriptionEndAt: null,
+      subscriptionPrice: 0,
+      subscriptionCurrency: 'EUR',
+      subscriptionMethod: '',
+    });
 
     const plain = doc.toObject();
     plain._idString = String(doc._id);
@@ -341,6 +310,10 @@ router.post('/admins', auth, requireRole('superadmin'), async (req, res) => {
       originalEmail: email,
     });
   } catch (err) {
+    // ✅ gestion E11000 (doublon email) → 409 au lieu d’un 500
+    if (err && (err.code === 11000 || String(err.message || '').includes('E11000'))) {
+      return res.status(409).json({ message: 'Email déjà utilisé' });
+    }
     console.error('❌ POST /api/admins', err);
     return res.status(500).json({ message: 'Erreur serveur' });
   }
@@ -595,7 +568,6 @@ router.get('/users/:id/invoices/:num/pdf', auth, requireRole('superadmin'), asyn
     const doc = new PDFDocument({ size: 'A4', margin: 50 });
     doc.pipe(res);
 
-    // rendu minimal
     doc.fontSize(20).text('Licence Securidem', 50, 50);
     doc.fontSize(10).text(`N°: ${invoice.number} — Date: ${formatDateFR(invoice.issuedAt)}`);
     doc.moveDown().text(`Client: ${invoice.customerName || invoice.userEmail}`);
