@@ -222,7 +222,7 @@ router.get('/admins', auth, requireRole('superadmin'), async (req, res) => {
   }
 });
 
-/* ===================== CRÉATION / MISE À JOUR ADMIN (idempotent + auto-commune + alias email) ===================== */
+/* ===================== CRÉATION ADMIN (toujours créer, alias si email déjà pris) ===================== */
 router.post('/admins', auth, requireRole('superadmin'), async (req, res) => {
   try {
     let { email, password, name, communeId, communeName, photo, createdBy } = req.body || {};
@@ -241,46 +241,22 @@ router.post('/admins', auth, requireRole('superadmin'), async (req, res) => {
       return res.status(400).json({ message: 'Commune invalide.' });
     }
 
-    // 2) L’admin existe déjà ?
-    let existing = await User.findOne({ email });
     const passwordHash = await bcrypt.hash(String(password), 10);
 
-    // 2a) si déjà admin → mise à jour (commune + mdp + infos)
-    if (existing && String(existing.role).toLowerCase() === 'admin') {
-      const update = {
-        communeId: canon.key,
-        communeName: canon.name || communeName || '',
-        isActive: true,
-        password: passwordHash,
-      };
-      if (name)  update.name  = name;
-      if (photo) update.photo = photo;
-
-      const updated = await User.findByIdAndUpdate(
-        existing._id,
-        { $set: update, $inc: { tokenVersion: 1 } },
-        { new: true }
-      );
-
-      const plain = updated.toObject();
-      plain._idString = String(updated._id);
-      res.setHeader('Cache-Control', 'no-store');
-      return res.json({ ...plain, upserted: true, mode: 'updated' });
-    }
-
-    // 2b) si email pris par un autre rôle (ex: superadmin) → alias et créer l’admin
+    // 2) Si l'email est déjà pris, on génère un alias — PEU IMPORTE le rôle du compte existant
     let finalEmail = email;
-    if (existing && String(existing.role).toLowerCase() !== 'admin') {
+    const already = await User.findOne({ email });
+    if (already) {
       const alias = await buildUniqueAliasEmail(email, canon.key);
       if (!alias) {
-        return res.status(400).json({
-          message: "L'email est déjà utilisé par un compte non-admin et ne peut pas être aliasé. Utilisez un autre email."
+        return res.status(409).json({
+          message: "Email déjà utilisé et impossible d'aliaser (format invalide). Choisissez un autre email."
         });
       }
       finalEmail = alias;
     }
 
-    // 3) créer l’admin
+    // 3) créer le NOUVEL admin (jamais d'update implicite d'un autre compte)
     const doc = await User.create({
       email: finalEmail,
       password: passwordHash,
@@ -304,13 +280,14 @@ router.post('/admins', auth, requireRole('superadmin'), async (req, res) => {
     res.setHeader('Cache-Control', 'no-store');
     return res.status(201).json({
       ...plain,
-      upserted: true,
-      mode: 'created',
       emailAliased: finalEmail !== email,
       originalEmail: email,
+      aliasEmail: finalEmail,
+      upserted: true,
+      mode: 'created',
     });
   } catch (err) {
-    // ✅ gestion E11000 (doublon email) → 409 au lieu d’un 500
+    // Gestion E11000 (doublon email inattendu) → 409
     if (err && (err.code === 11000 || String(err.message || '').includes('E11000'))) {
       return res.status(409).json({ message: 'Email déjà utilisé' });
     }
