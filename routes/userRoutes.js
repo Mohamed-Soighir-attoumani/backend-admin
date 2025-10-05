@@ -161,10 +161,20 @@ async function buildUniqueAliasEmail(baseEmail, slug) {
   }
   return candidate.toLowerCase();
 }
+const isDupError = (err) =>
+  !!(err && (err.code === 11000 || String(err.message || '').includes('E11000')));
 
-function isDupError(err) {
-  return !!(err && (err.code === 11000 || String(err.message || '').includes('E11000')));
-}
+/* ===================== [DEBUG] Tester si un email existe (superadmin) ===================== */
+router.get('/admins/debug/check-email', auth, requireRole('superadmin'), async (req, res) => {
+  try {
+    const email = norm(req.query.email || '');
+    if (!email) return res.status(400).json({ message: 'email ?' });
+    const doc = await User.findOne({ email }).lean();
+    res.json({ exists: !!doc, email, _id: doc?._id || null });
+  } catch (e) {
+    res.status(500).json({ message: e.message });
+  }
+});
 
 /* ===================== LISTE ADMINS ===================== */
 router.get('/admins', auth, requireRole('superadmin'), async (req, res) => {
@@ -224,7 +234,7 @@ router.get('/admins', auth, requireRole('superadmin'), async (req, res) => {
   }
 });
 
-/* ===================== CRÉATION ADMIN (alias + retry si doublon) ===================== */
+/* ===================== CRÉATION ADMIN (optimiste + retry si E11000) ===================== */
 router.post('/admins', auth, requireRole('superadmin'), async (req, res) => {
   try {
     let { email, password, name, communeId, communeName, photo, createdBy } = req.body || {};
@@ -245,17 +255,9 @@ router.post('/admins', auth, requireRole('superadmin'), async (req, res) => {
 
     const passwordHash = await bcrypt.hash(String(password), 10);
 
-    // 2) Déterminer un email non pris (alias si besoin)
-    let finalEmail = email;
-    if (await User.findOne({ email })) {
-      const alias = await buildUniqueAliasEmail(email, canon.key);
-      if (!alias) return res.status(409).json({ message: "Email déjà utilisé et impossible d'aliaser (format invalide)." });
-      finalEmail = alias;
-    }
-
-    // 3) tentative de création + retry si E11000 email
-    const payload = {
-      email: finalEmail,
+    // 2) Tentative de création directe
+    const basePayload = {
+      email, // on tente d’abord l’email “nu”
       password: passwordHash,
       name: name || '',
       role: 'admin',
@@ -271,43 +273,57 @@ router.post('/admins', auth, requireRole('superadmin'), async (req, res) => {
       subscriptionMethod: '',
     };
 
+    let payload = { ...basePayload };
     let adminDoc = null;
-    const MAX_RETRY = 3;
-    for (let attempt = 0; attempt <= MAX_RETRY; attempt++) {
-      try {
-        adminDoc = await User.create(payload);
-        break;
-      } catch (err) {
-        if (isDupError(err)) {
-          // Log détaillé pour comprendre d'où vient le doublon
-          console.error('⚠️ E11000 lors de la création admin', {
-            keyPattern: err.keyPattern, keyValue: err.keyValue, message: err.message
-          });
 
-          const dupOnEmail =
-            (err.keyPattern && err.keyPattern.email) ||
-            (err.keyValue && typeof err.keyValue.email !== 'undefined') ||
-            /index:\s*email_1/i.test(String(err.message || ''));
+    const tryCreate = async () => User.create(payload);
 
-          // si c’est bien un doublon d’email → on change l’email et on retente
-          if (dupOnEmail && attempt < MAX_RETRY) {
-            // génère un nouveau suffixe (ex: +slug-2, +slug-3…)
-            const base = email;
-            const newAlias = await buildUniqueAliasEmail(base, `${canon.key}-${attempt + 2}`);
-            if (!newAlias) return res.status(409).json({ message: 'Email déjà utilisé (alias impossible).' });
-            payload.email = newAlias;
-            continue;
-          }
+    try {
+      adminDoc = await tryCreate();
+    } catch (err) {
+      if (!isDupError(err)) throw err;
 
-          // autre clé en doublon → message précis
-          const key = err.keyValue ? Object.keys(err.keyValue)[0] : null;
-          if (key && key !== 'email') {
-            return res.status(409).json({ message: `Doublon sur le champ '${key}'`, key, value: err.keyValue[key] });
-          }
-          // fallback
-          return res.status(409).json({ message: 'Email déjà utilisé' });
+      // S’il y a un doublon et que c’est l’email → on alias et on retente
+      const dupOnEmail =
+        (err.keyPattern && err.keyPattern.email) ||
+        (err.keyValue && typeof err.keyValue.email !== 'undefined') ||
+        /index:\s*email_1/i.test(String(err.message || ''));
+
+      if (!dupOnEmail) {
+        // autre clé en doublon (très rare ici) → message clair
+        const key = err.keyValue ? Object.keys(err.keyValue)[0] : null;
+        return res.status(409).json({
+          message: key ? `Doublon sur le champ '${key}'` : 'Conflit de clé unique',
+          key,
+          value: key ? err.keyValue[key] : undefined,
+        });
+      }
+
+      // Génère un alias et réessaie plusieurs fois si nécessaire
+      const MAX_RETRY = 4;
+      let lastErr = err;
+
+      for (let i = 0; i < MAX_RETRY; i++) {
+        const suffix = i === 0 ? canon.key : `${canon.key}-${i + 1}`;
+        const alias = await buildUniqueAliasEmail(email, suffix);
+        if (!alias) break; // pas d’alias possible
+
+        payload = { ...basePayload, email: alias };
+        try {
+          adminDoc = await tryCreate();
+          break;
+        } catch (e2) {
+          lastErr = e2;
+          if (!isDupError(e2)) throw e2; // autre erreur
+          // si encore E11000, boucle pour un nouvel alias
         }
-        throw err; // autre erreur : laisse filer au catch global
+      }
+
+      if (!adminDoc) {
+        return res.status(409).json({
+          message: 'Email déjà utilisé (alias automatique impossible après plusieurs tentatives).',
+          originalEmail: email,
+        });
       }
     }
 
