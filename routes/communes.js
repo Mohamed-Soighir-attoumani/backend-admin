@@ -1,569 +1,90 @@
-// backend/routes/userRoutes.js
+// backend/routes/communeRoutes.js
 const express = require('express');
 const router = express.Router();
-const mongoose = require('mongoose');
-const bcrypt = require('bcryptjs');
-const PDFDocument = require('pdfkit');
-
+const Commune = require('../models/Commune');
 const auth = require('../middleware/authMiddleware');
 const requireRole = require('../middleware/requireRole');
-const User = require('../models/User');
-const Invoice = require('../models/Invoice');
-const Commune = require('../models/Commune');
-const { sign } = require('../utils/jwt');
 
-/* ===================== Utils ===================== */
-const isValidHex24 = (s) => typeof s === 'string' && /^[a-f0-9]{24}$/i.test(s);
+// util
 const norm = (v) => String(v || '').trim().toLowerCase();
-const decode = (v) => { try { return decodeURIComponent(String(v)); } catch { return String(v || ''); } };
-const pickHexFromAny = (v) => {
-  if (!v) return '';
-  if (typeof v === 'object') {
-    if (v.$oid && isValidHex24(v.$oid)) return v.$oid;
-    try {
-      const m = JSON.stringify(v).match(/[a-f0-9]{24}/i);
-      if (m && isValidHex24(m[0])) return m[0];
-    } catch {}
-  }
-  const s = String(v);
-  const m = s.match(/[a-f0-9]{24}/i);
-  return m && isValidHex24(m[0]) ? m[0] : '';
-};
 const escapeRegExp = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-const formatDateFR = (d) => { try { return new Date(d).toLocaleDateString('fr-FR'); } catch { return ''; } };
 
-/* ---------- Slugify pour communes ---------- */
-const strip = (s) => String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '');
-const slugify = (input) =>
-  strip(input)
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .replace(/--+/g, '-');
-
-/* ===================== Communes : canon/ensure ===================== */
-async function findCommuneByAny(anyId) {
-  const raw = String(anyId ?? '').trim();
-  if (!raw) return null;
-
-  if (isValidHex24(raw)) {
-    const c = await Commune.findById(raw).lean();
-    if (c) return c;
-  }
-  let c = await Commune.findOne({ slug: new RegExp(`^${escapeRegExp(raw)}$`, 'i') }).lean();
-  if (c) return c;
-
-  const nameFields = ['name', 'label', 'communeName', 'nom'];
-  for (const f of nameFields) {
-    c = await Commune.findOne({ [f]: new RegExp(`^${escapeRegExp(raw)}$`, 'i') }).lean();
-    if (c) return c;
-  }
-
-  c = await Commune.findOne({ code: new RegExp(`^${escapeRegExp(raw)}$`, 'i') }).lean();
-  if (c) return c;
-
-  return null;
-}
-
-async function toCanonicalCommune(anyId) {
-  const raw = norm(anyId);
-  if (!raw) return { key: '', name: '' };
-  const c = await findCommuneByAny(raw);
-  if (!c) return { key: '', name: '' };
-  const key = norm(c.slug || String(c._id));
-  const name = String(c.name ?? c.label ?? c.communeName ?? c.nom ?? '').trim();
-  return { key, name };
-}
-
-/** Crée la commune si absente, retourne { key: slugOrId, name } */
-async function ensureCanonicalCommune(anyIdOrName) {
-  const raw = String(anyIdOrName || '').trim();
-  if (!raw) return { key: '', name: '' };
-
-  // existe ?
-  const canon = await toCanonicalCommune(raw);
-  if (canon.key) return canon;
-
-  // créer avec slug unique + active:true (visible côté mobile)
-  const baseSlug = slugify(raw) || `commune-${Date.now()}`;
-  let finalSlug = baseSlug;
-  let i = 1;
-  while (await Commune.findOne({ slug: finalSlug }).lean()) {
-    i += 1;
-    finalSlug = `${baseSlug}-${i}`;
-  }
-
-  const doc = await Commune.create({
-    name: raw,
-    label: raw,
-    communeName: raw,
-    code: '',
-    region: '',
-    imageUrl: '',
-    slug: finalSlug,
-    active: true,
-  });
-
-  return { key: doc.slug, name: doc.name || raw };
-}
-
-/* ===================== Trouver un utilisateur ===================== */
-async function findUserByAnyId(primary, body = {}, query = {}) {
-  const candidatesRaw = [
-    primary,
-    body && body.id,
-    body && body.userId,
-    body && body.email,
-    query && query.id,
-    query && query.userId,
-    query && query.email,
-  ].filter((x) => x !== undefined && x !== null);
-
-  const candidates = candidatesRaw
-    .map((x) => (typeof x === 'string' ? x.trim() : x))
-    .filter(Boolean);
-
-  for (const raw of candidates) {
-    const maybeEmail = typeof raw === 'string' && raw.includes('@');
-    const hex = pickHexFromAny(raw);
-
-    if (hex) {
-      const byId = await User.findById(hex);
-      if (byId) return byId;
-    }
-    if (maybeEmail) {
-      const byEmail = await User.findOne({ email: norm(raw) });
-      if (byEmail) return byEmail;
-    }
-    const rawStr = decode(raw).trim();
-    if (rawStr) {
-      const byUserId = await User.findOne({ userId: rawStr });
-      if (byUserId) return byUserId;
-    }
-  }
-  return null;
-}
-
-/* ===================== LISTE ADMINS ===================== */
-router.get('/admins', auth, requireRole('superadmin'), async (req, res) => {
+// ========== PUBLIC: liste des communes (utilisé par l’app mobile) ==========
+router.get('/communes', async (req, res) => {
   try {
-    const {
-      q = '',
-      communeId = '',
-      status = '',
-      sub = '',
-      page = 1,
-      pageSize = 15,
-    } = req.query;
-
-    const find = { role: 'admin' };
+    const { q = '' } = req.query;
+    const find = { $or: [{ active: { $exists: false } }, { active: { $ne: false } }] };
 
     if (q) {
-      const rx = new RegExp(q, 'i');
-      find.$or = [{ email: rx }, { name: rx }];
-    }
-
-    if (communeId) {
-      const { key } = await toCanonicalCommune(communeId);
-      if (key) find.communeId = key;
-      else return res.json({ items: [], total: 0 });
-    }
-
-    if (status === 'active')   find.isActive = { $ne: false };
-    if (status === 'inactive') find.isActive = false;
-
-    if (sub === 'none') {
+      const rx = new RegExp(escapeRegExp(String(q)), 'i');
       find.$or = [
-        ...(find.$or || []),
-        { subscriptionStatus: { $exists: false } },
-        { subscriptionStatus: 'none' },
+        ...find.$or,
+        { name: rx }, { label: rx }, { communeName: rx }, { slug: rx }, { code: rx }, { region: rx },
       ];
     }
-    if (sub === 'active')  find.subscriptionStatus = 'active';
-    if (sub === 'expired') find.subscriptionStatus = 'expired';
 
-    const p = Math.max(1, parseInt(page, 10) || 1);
-    const ps = Math.max(1, Math.min(200, parseInt(pageSize, 10) || 15));
-
-    let items = await User.find(find)
-      .sort({ createdAt: -1 })
-      .skip((p - 1) * ps)
-      .limit(ps)
+    const items = await Commune.find(find)
+      .select({ name:1, label:1, communeName:1, code:1, region:1, imageUrl:1, slug:1 })
+      .sort({ name: 1 })
       .lean();
 
-    items = items.map(u => ({ ...u, _idString: (u._id && String(u._id)) || '' }));
-    const total = await User.countDocuments(find);
-
-    res.setHeader('Cache-Control', 'no-store');
-    return res.json({ items, total });
-  } catch (err) {
-    console.error('❌ GET /api/admins', err);
+    // réponses non-cachées pour que l’app voie immédiatement les nouvelles communes
+    res.setHeader('Cache-Control', 'no-store, max-age=0');
+    return res.json(items);
+  } catch (e) {
+    console.error('GET /communes', e);
     return res.status(500).json({ message: 'Erreur serveur' });
   }
 });
 
-/* ===================== CRÉATION ADMIN ===================== */
-router.post('/admins', auth, requireRole('superadmin'), async (req, res) => {
+// ========== ADMIN: liste complète (panel) ==========
+router.get('/api/communes', auth, requireRole('superadmin'), async (req, res) => {
   try {
-    let { email, password, name, communeId, communeName, photo, createdBy } = req.body || {};
-    email = norm(email);
-    if (!email || !password) {
-      return res.status(400).json({ message: 'Email et mot de passe requis' });
+    const items = await Commune.find().sort({ name: 1 }).lean();
+    res.setHeader('Cache-Control', 'no-store');
+    return res.json({ items, total: items.length });
+  } catch (e) {
+    console.error('GET /api/communes', e);
+    return res.status(500).json({ message: 'Erreur serveur' });
+  }
+});
+
+// ========== ADMIN: création/modif rapide (optionnelle) ==========
+router.post('/api/communes', auth, requireRole('superadmin'), async (req, res) => {
+  try {
+    const { name = '', slug = '', code = '', region = '', imageUrl = '', active = true } = req.body || {};
+    const strip = (s) => s.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+    const slugify = (s) =>
+      strip(String(s || ''))
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '')
+        .replace(/--+/g, '-');
+
+    const base = slug || name;
+    if (!base) return res.status(400).json({ message: 'Nom ou slug requis' });
+
+    const baseSlug = slugify(base) || `commune-${Date.now()}`;
+    let finalSlug = baseSlug;
+    let i = 1;
+    while (await Commune.findOne({ slug: finalSlug }).lean()) {
+      i += 1;
+      finalSlug = `${baseSlug}-${i}`;
     }
 
-    const exists = await User.findOne({ email });
-    if (exists) return res.status(409).json({ message: 'Email déjà utilisé' });
-
-    const rawCommuneInput = communeId || communeName;
-    if (!rawCommuneInput) {
-      return res.status(400).json({ message: 'Commune obligatoire pour un compte admin.' });
-    }
-
-    // ⚙️ crée/normalise la commune et retourne la clé canonique (slug)
-    const canon = await ensureCanonicalCommune(rawCommuneInput);
-    if (!canon.key) {
-      return res.status(400).json({ message: 'Commune invalide.' });
-    }
-
-    const passwordHash = await bcrypt.hash(String(password), 10);
-
-    const doc = await User.create({
-      email,
-      password: passwordHash,
-      name: name || '',
-      role: 'admin',
-      communeId: canon.key,                // 🔑 slug
-      communeName: canon.name || communeName || '',
-      photo: photo || '',
-      createdBy: createdBy ? String(createdBy) : '',
-      isActive: true,
-      subscriptionStatus: 'none',
-      subscriptionEndAt: null,
-      subscriptionPrice: 0,
-      subscriptionCurrency: 'EUR',
-      subscriptionMethod: '',
+    const doc = await Commune.create({
+      name: name || base,
+      label: name || base,
+      communeName: name || base,
+      code,
+      region,
+      imageUrl,
+      slug: finalSlug,
+      active: !!active,
     });
-
-    const plain = doc.toObject();
-    plain._idString = String(doc._id);
-
-    // réponses non-cachées pour que le panel voie tout de suite
-    res.setHeader('Cache-Control', 'no-store');
-    return res.status(201).json(plain);
-  } catch (err) {
-    console.error('❌ POST /api/admins', err);
-    return res.status(500).json({ message: 'Erreur serveur' });
-  }
-});
-
-/* ===================== (compat) CRÉATION via /users ===================== */
-router.post('/users', auth, requireRole('superadmin'), async (req, res) => {
-  try {
-    let { email, password, name, communeId, communeName, role, createdBy, photo } = req.body || {};
-    email = norm(email);
-    if (!email || !password) {
-      return res.status(400).json({ message: 'Email et mot de passe requis' });
-    }
-    role = 'admin';
-
-    const exists = await User.findOne({ email });
-    if (exists) return res.status(409).json({ message: 'Email déjà utilisé' });
-
-    const rawCommuneInput = communeId || communeName;
-    if (!rawCommuneInput) {
-      return res.status(400).json({ message: 'Commune obligatoire pour un compte admin.' });
-    }
-
-    const canon = await ensureCanonicalCommune(rawCommuneInput);
-    if (!canon.key) {
-      return res.status(400).json({ message: 'Commune invalide.' });
-    }
-
-    const passwordHash = await bcrypt.hash(String(password), 10);
-
-    const doc = await User.create({
-      email,
-      password: passwordHash,
-      name: name || '',
-      role,
-      communeId: canon.key,
-      communeName: canon.name || communeName || '',
-      photo: photo || '',
-      createdBy: createdBy ? String(createdBy) : '',
-      isActive: true,
-      subscriptionStatus: 'none',
-      subscriptionEndAt: null,
-      subscriptionPrice: 0,
-      subscriptionCurrency: 'EUR',
-      subscriptionMethod: '',
-    });
-
-    const plain = doc.toObject();
-    plain._idString = String(doc._id);
-
-    res.setHeader('Cache-Control', 'no-store');
-    return res.status(201).json(plain);
-  } catch (err) {
-    console.error('❌ POST /api/users', err);
-    return res.status(500).json({ message: 'Erreur serveur' });
-  }
-});
-
-/* ===================== MISE À JOUR ADMIN ===================== */
-router.put('/users/:id', auth, requireRole('superadmin'), async (req, res) => {
-  try {
-    const user = await findUserByAnyId(req.params.id, req.body, req.query);
-    if (!user) return res.status(404).json({ message: 'Utilisateur introuvable' });
-    if (req.body.role && req.body.role !== 'admin') {
-      return res.status(400).json({ message: 'Changement de rôle interdit ici' });
-    }
-
-    // Commune : normaliser/créer si changement
-    let nextCommuneId = user.communeId || '';
-    let nextCommuneName = user.communeName || '';
-
-    if (typeof req.body.communeId === 'string' || typeof req.body.communeName === 'string') {
-      const raw = req.body.communeId || req.body.communeName;
-      const canon = await ensureCanonicalCommune(raw);
-      if (!canon.key) {
-        return res.status(400).json({ message: 'Commune invalide.' });
-      }
-      nextCommuneId = canon.key;
-      nextCommuneName = canon.name || req.body.communeName || '';
-    }
-
-    const payload = {};
-    if (typeof req.body.email === 'string') payload.email = norm(req.body.email);
-    if (typeof req.body.name === 'string')  payload.name = req.body.name;
-    if (typeof req.body.isActive === 'boolean') payload.isActive = req.body.isActive;
-
-    if (nextCommuneId !== (user.communeId || '')) {
-      payload.communeId = nextCommuneId;
-      payload.communeName = nextCommuneName;
-    }
-
-    const updated = await User.findByIdAndUpdate(user._id, { $set: payload }, { new: true });
-    res.setHeader('Cache-Control', 'no-store');
-    return res.json({ ...updated.toObject(), _idString: String(updated._id) });
-  } catch (err) {
-    console.error('❌ PUT /api/users/:id', err);
-    return res.status(500).json({ message: 'Erreur serveur' });
-  }
-});
-
-/* ===================== TOGGLE ACTIVE ===================== */
-router.post('/users/:id/toggle-active', auth, requireRole('superadmin'), async (req, res) => {
-  try {
-    const user = await findUserByAnyId(req.params.id, req.body, req.query);
-    if (!user) return res.status(404).json({ message: 'Utilisateur introuvable' });
-
-    const next = !!req.body.active;
-    user.isActive = next;
-    await user.save();
-
-    res.setHeader('Cache-Control', 'no-store');
-    return res.json({ ok: true, user: { ...user.toObject(), _idString: String(user._id) } });
-  } catch (err) {
-    console.error('❌ POST /api/users/:id/toggle-active', err);
-    return res.status(500).json({ message: 'Erreur serveur' });
-  }
-});
-
-/* ===================== RESET MOT DE PASSE ADMIN ===================== */
-router.post('/admins/:id/reset-password', auth, requireRole('superadmin'), async (req, res) => {
-  try {
-    const user = await findUserByAnyId(req.params.id, req.body, req.query);
-    if (!user) return res.status(404).json({ message: 'Utilisateur introuvable' });
-    if (String(user.role).toLowerCase() !== 'admin') {
-      return res.status(400).json({ message: 'Réservé aux comptes admin' });
-    }
-
-    const { newPassword } = req.body || {};
-    if (!newPassword || String(newPassword).length < 6) {
-      return res.status(400).json({ message: 'Nouveau mot de passe invalide (min 6 car.)' });
-    }
-    const hash = await bcrypt.hash(String(newPassword), 10);
-    await User.updateOne({ _id: user._id }, { $set: { password: hash }, $inc: { tokenVersion: 1 } });
-
-    res.setHeader('Cache-Control', 'no-store');
-    return res.json({ ok: true });
-  } catch (err) {
-    console.error('❌ POST /api/admins/:id/reset-password', err);
-    return res.status(500).json({ message: 'Erreur serveur' });
-  }
-});
-
-/* ===================== SUPPRESSION ADMIN ===================== */
-router.delete('/admins/:id', auth, requireRole('superadmin'), async (req, res) => {
-  try {
-    const currentId = String((req.user && req.user.id) || '');
-    const user = await findUserByAnyId(req.params.id, req.body, req.query);
-    if (!user) return res.status(404).json({ message: 'Utilisateur introuvable' });
-
-    if (String(user._id) === currentId) {
-      return res.status(400).json({ message: 'Impossible de vous supprimer vous-même' });
-    }
-    if (String(user.role).toLowerCase() === 'superadmin') {
-      return res.status(400).json({ message: 'Suppression d’un superadmin interdite' });
-    }
-
-    await User.deleteOne({ _id: user._id });
-    res.setHeader('Cache-Control', 'no-store');
-    return res.json({ ok: true });
-  } catch (err) {
-    console.error('❌ DELETE /api/admins/:id', err);
-    return res.status(500).json({ message: 'Erreur serveur' });
-  }
-});
-
-/* ===================== IMPERSONATION ADMIN ===================== */
-router.post('/admins/:id/impersonate', auth, requireRole('superadmin'), async (req, res) => {
-  try {
-    const target = await findUserByAnyId(req.params.id, req.body, req.query);
-    if (!target) return res.status(404).json({ message: 'Utilisateur introuvable' });
-    if (String(target.role).toLowerCase() !== 'admin') {
-      return res.status(400).json({ message: 'Seuls les comptes admin sont impersonables ici' });
-    }
-    if (target.isActive === false) {
-      return res.status(403).json({ message: 'Compte cible désactivé' });
-    }
-
-    const payload = {
-      id: String(target._id),
-      email: target.email,
-      role: target.role || 'admin',
-      tv: typeof target.tokenVersion === 'number' ? target.tokenVersion : 0,
-      impersonated: true,
-      origUserId: String(req.user.id),
-      communeId: target.communeId || '',
-      communeName: target.communeName || '',
-    };
-
-    const token = sign(payload, { expiresIn: '2h' });
-    res.setHeader('Cache-Control', 'no-store');
-    return res.json({ token });
-  } catch (err) {
-    console.error('❌ POST /api/admins/:id/impersonate', err);
-    return res.status(500).json({ message: 'Erreur serveur' });
-  }
-});
-
-/* ===================== LISTE /api/users (fallback) ===================== */
-router.get('/users', auth, requireRole('superadmin'), async (req, res) => {
-  try {
-    const {
-      q = '',
-      communeId = '',
-      role = '',
-      status = '',
-      sub = '',
-      page = 1,
-      pageSize = 15,
-    } = req.query;
-
-    const find = {};
-    if (role) find.role = role;
-
-    if (q) {
-      const rx = new RegExp(q, 'i');
-      find.$or = [{ email: rx }, { name: rx }];
-    }
-
-    if (communeId) {
-      const { key } = await toCanonicalCommune(communeId);
-      if (key) find.communeId = key;
-      else return res.json({ items: [], total: 0 });
-    }
-
-    if (status === 'active')   find.isActive = { $ne: false };
-    if (status === 'inactive') find.isActive = false;
-
-    if (sub === 'none') {
-      find.$or = [
-        ...(find.$or || []),
-        { subscriptionStatus: { $exists: false } },
-        { subscriptionStatus: 'none' },
-      ];
-    }
-    if (sub === 'active')  find.subscriptionStatus = 'active';
-    if (sub === 'expired') find.subscriptionStatus = 'expired';
-
-    const p = Math.max(1, parseInt(page, 10) || 1);
-    const ps = Math.max(1, Math.min(200, parseInt(pageSize, 10) || 15));
-
-    let items = await User.find(find)
-      .sort({ createdAt: -1 })
-      .skip((p - 1) * ps)
-      .limit(ps)
-      .lean();
-
-    items = items.map(u => ({ ...u, _idString: (u._id && String(u._id)) || '' }));
-    const total = await User.countDocuments(find);
-
-    res.setHeader('Cache-Control', 'no-store');
-    return res.json({ items, total });
-  } catch (err) {
-    console.error('❌ GET /api/users', err);
-    return res.status(500).json({ message: 'Erreur serveur' });
-  }
-});
-
-/* ===================== FACTURES (optionnel) ===================== */
-router.get('/users/:id/invoices', auth, requireRole('superadmin'), async (req, res) => {
-  try {
-    const user = await findUserByAnyId(req.params.id, req.query, req.query);
-    if (!user) return res.status(404).json({ message: 'Utilisateur introuvable' });
-
-    const invoices = await Invoice.find({ userId: user._id }).sort({ issuedAt: -1 }).lean();
-
-    const list = invoices.map(inv => ({
-      id: String(inv._id),
-      number: inv.number,
-      amount: inv.amount,
-      currency: inv.currency,
-      status: inv.status,
-      date: inv.issuedAt,
-      method: inv.method || '',
-      periodStart: inv.periodStart || null,
-      periodEnd: inv.periodEnd || null,
-      url: `/api/users/${encodeURIComponent(String(user._id))}/invoices/${encodeURIComponent(inv.number)}/pdf`,
-    }));
-
-    res.setHeader('Cache-Control', 'no-store');
-    return res.json({ items: list, total: list.length });
-  } catch (err) {
-    console.error('❌ GET /api/users/:id/invoices', err);
-    return res.status(500).json({ message: 'Erreur serveur' });
-  }
-});
-
-router.get('/users/:id/invoices/:num/pdf', auth, requireRole('superadmin'), async (req, res) => {
-  try {
-    const user = await findUserByAnyId(req.params.id, req.query, req.query);
-    if (!user) return res.status(404).json({ message: 'Utilisateur introuvable' });
-
-    const number = String(req.params.num || '').trim();
-    const invoice = await Invoice.findOne({ number, userId: user._id });
-    if (!invoice) return res.status(404).json({ message: 'Facture introuvable' });
-
-    res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `inline; filename="${invoice.number}.pdf"`);
-    res.setHeader('Cache-Control', 'no-store');
-
-    const doc = new PDFDocument({ size: 'A4', margin: 50 });
-    doc.pipe(res);
-
-    doc.fontSize(20).text('Licence Securidem', 50, 50);
-    doc.fontSize(10).text(`N°: ${invoice.number} — Date: ${formatDateFR(invoice.issuedAt)}`);
-    doc.moveDown().text(`Client: ${invoice.customerName || invoice.userEmail}`);
-    doc.text(`Email: ${invoice.userEmail}`);
-    if (invoice.communeName || invoice.communeId) {
-      doc.text(`Commune: ${invoice.communeName || invoice.communeId}`);
-    }
-    doc.moveDown().fontSize(12).text(`Total: ${invoice.amount.toFixed(2)} ${invoice.currency}`);
-    doc.end();
-  } catch (err) {
-    console.error('❌ GET /api/users/:id/invoices/:num/pdf', err);
+    res.status(201).json(doc);
+  } catch (e) {
+    console.error('POST /api/communes', e);
     return res.status(500).json({ message: 'Erreur serveur' });
   }
 });
