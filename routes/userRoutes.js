@@ -3,8 +3,6 @@ const express = require('express');
 const router = express.Router();
 const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
-const fs = require('fs');
-const path = require('path');
 const PDFDocument = require('pdfkit');
 
 const auth = require('../middleware/authMiddleware');
@@ -14,7 +12,7 @@ const Invoice = require('../models/Invoice');
 const Commune = require('../models/Commune');
 const { sign } = require('../utils/jwt');
 
-/* ===================== Utils généraux ===================== */
+/* ===================== Utils ===================== */
 const isValidHex24 = (s) => typeof s === 'string' && /^[a-f0-9]{24}$/i.test(s);
 const norm = (v) => String(v || '').trim().toLowerCase();
 const decode = (v) => { try { return decodeURIComponent(String(v)); } catch { return String(v || ''); } };
@@ -31,10 +29,9 @@ const pickHexFromAny = (v) => {
   const m = s.match(/[a-f0-9]{24}/i);
   return m && isValidHex24(m[0]) ? m[0] : '';
 };
-function escapeRegExp(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
 function formatDateFR(d) { try { return new Date(d).toLocaleDateString('fr-FR'); } catch { return ''; } }
+function escapeRegExp(s) { return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
 
-/* ---------- Normalisation texte ---------- */
 const stripAccents = (s) =>
   String(s || '')
     .normalize('NFD')
@@ -49,7 +46,7 @@ function slugify(input) {
     .replace(/--+/g, '-');
 }
 
-// supprime les préfixes “Ville de … / Commune de … / Mairie de …”
+// supprime “Ville/Mairie/Commune de …”
 const dropCommonPrefixes = (s) => {
   const x = stripAccents(String(s || '')).toLowerCase().trim();
   return x
@@ -57,36 +54,40 @@ const dropCommonPrefixes = (s) => {
     .replace(/^(mairie|ville|commune)\s*/i, '');
 };
 
-/* ===================== Communes : recherche/canon/ensure ===================== */
+/* ===================== Communes ===================== */
 async function findCommuneByAny(anyIdOrName) {
   const raw = String(anyIdOrName ?? '').trim();
   if (!raw) return null;
 
-  // 1) _id direct
+  // _id direct
   if (isValidHex24(raw)) {
     const byId = await Commune.findById(raw).lean();
     if (byId) return byId;
   }
 
-  // 2) essais basés sur slug (avec et sans préfixes)
+  // slug (exact + insensible casse)
   const s1 = slugify(raw);
   const s2 = slugify(dropCommonPrefixes(raw));
   if (s1) {
-    const c = await Commune.findOne({ slug: s1 }).lean();
+    let c = await Commune.findOne({ slug: s1 }).lean();
+    if (c) return c;
+    c = await Commune.findOne({ slug: new RegExp(`^${escapeRegExp(s1)}$`, 'i') }).lean();
     if (c) return c;
   }
   if (s2 && s2 !== s1) {
-    const c = await Commune.findOne({ slug: s2 }).lean();
+    let c = await Commune.findOne({ slug: s2 }).lean();
+    if (c) return c;
+    c = await Commune.findOne({ slug: new RegExp(`^${escapeRegExp(s2)}$`, 'i') }).lean();
     if (c) return c;
   }
 
-  // 3) code exact (insensible aux accents/casse via collation)
+  // code exact (collation FR)
   let c = await Commune.findOne({ code: raw })
     .collation({ locale: 'fr', strength: 1 })
     .lean();
   if (c) return c;
 
-  // 4) correspondances sur noms (exacts, insensibles aux accents/casse)
+  // noms exacts (collation FR)
   const nameFields = ['name', 'label', 'communeName', 'nom'];
   for (const f of nameFields) {
     c = await Commune.findOne({ [f]: raw })
@@ -95,7 +96,7 @@ async function findCommuneByAny(anyIdOrName) {
     if (c) return c;
   }
 
-  // 5) dernier filet : comparer des "slugs dérivés" de tous les champs pertinents
+  // dernier filet : comparer slugs dérivés de tous les champs
   const all = await Commune.find({}, { slug: 1, code: 1, name: 1, label: 1, communeName: 1, nom: 1 }).lean();
   const targets = new Set([s1, s2].filter(Boolean));
   for (const it of all) {
@@ -127,7 +128,7 @@ async function toCanonicalCommune(anyIdOrName) {
   return { key, name };
 }
 
-/** Crée la commune si absente, retourne { key: slugOrId, name } */
+/** Crée la commune si absente, tolère les duplicates (E11000) */
 async function ensureCanonicalCommune(anyIdOrName) {
   const raw = String(anyIdOrName || '').trim();
   if (!raw) return { key: '', name: '' };
@@ -136,7 +137,7 @@ async function ensureCanonicalCommune(anyIdOrName) {
   const canon = await toCanonicalCommune(raw);
   if (canon.key) return canon;
 
-  // créer proprement en retirant les préfixes et accents
+  // création
   const base = slugify(dropCommonPrefixes(raw)) || slugify(raw) || `commune-${Date.now()}`;
   let finalSlug = base;
   let i = 1;
@@ -145,21 +146,31 @@ async function ensureCanonicalCommune(anyIdOrName) {
     finalSlug = `${base}-${i}`;
   }
 
-  const humanName = raw; // on conserve la saisie en nom visible
-  const doc = await Commune.create({
-    name: humanName,
-    label: humanName,
-    communeName: humanName,
-    code: '',
-    region: '',
-    imageUrl: '',
-    slug: finalSlug,
-  });
-
-  return { key: doc.slug, name: doc.name || humanName };
+  const humanName = raw;
+  try {
+    const doc = await Commune.create({
+      name: humanName,
+      label: humanName,
+      communeName: humanName,
+      code: '',
+      region: '',
+      imageUrl: '',
+      slug: finalSlug,
+    });
+    return { key: doc.slug, name: doc.name || humanName };
+  } catch (err) {
+    // si quelqu’un a créé la même commune entre-temps → on la retrouve et on la renvoie
+    if (err && err.code === 11000) {
+      const again = await Commune.findOne({ slug: new RegExp(`^${escapeRegExp(finalSlug)}$`, 'i') }).lean();
+      if (again) {
+        return { key: again.slug || String(again._id), name: again.name || humanName };
+      }
+    }
+    throw err;
+  }
 }
 
-/* ===================== Trouver un utilisateur par “n’importe quoi” ===================== */
+/* ===================== Users helpers ===================== */
 async function findUserByAnyId(primary, body = {}, query = {}) {
   const candidatesRaw = [
     primary,
@@ -274,7 +285,6 @@ router.post('/admins', auth, requireRole('superadmin'), async (req, res) => {
     if (!rawCommuneInput) {
       return res.status(400).json({ message: 'Commune obligatoire pour un compte admin.' });
     }
-    // ✅ canonise (reconnaît “Ville de Dembeni”, accents, slug, _id, code…)
     const canon = await ensureCanonicalCommune(rawCommuneInput);
     if (!canon.key) {
       return res.status(400).json({ message: 'Commune invalide.' });
@@ -304,6 +314,9 @@ router.post('/admins', auth, requireRole('superadmin'), async (req, res) => {
 
     res.status(201).json(plain);
   } catch (err) {
+    if (err && err.code === 11000 && err.keyPattern && err.keyPattern.email) {
+      return res.status(409).json({ message: 'Email déjà utilisé' });
+    }
     console.error('❌ POST /api/admins', err);
     res.status(500).json({ message: 'Erreur serveur' });
   }
@@ -355,6 +368,9 @@ router.post('/users', auth, requireRole('superadmin'), async (req, res) => {
 
     res.status(201).json(plain);
   } catch (err) {
+    if (err && err.code === 11000 && err.keyPattern && err.keyPattern.email) {
+      return res.status(409).json({ message: 'Email déjà utilisé' });
+    }
     console.error('❌ POST /api/users', err);
     res.status(500).json({ message: 'Erreur serveur' });
   }
@@ -369,7 +385,7 @@ router.put('/users/:id', auth, requireRole('superadmin'), async (req, res) => {
       return res.status(400).json({ message: 'Changement de rôle interdit ici' });
     }
 
-    // Commune : s’il y a un changement, on s’assure qu’elle existe (création auto si besoin)
+    // Commune : si changement → ensure
     let nextCommuneId = user.communeId || '';
     let nextCommuneName = user.communeName || '';
 
@@ -493,7 +509,7 @@ router.post('/admins/:id/impersonate', auth, requireRole('superadmin'), async (r
   }
 });
 
-/* ===================== LISTE /api/users (fallback admin/superadmin) ===================== */
+/* ===================== LISTE /api/users ===================== */
 router.get('/users', auth, requireRole('superadmin'), async (req, res) => {
   try {
     const {
@@ -600,7 +616,6 @@ router.get('/users/:id/invoices/:num/pdf', auth, requireRole('superadmin'), asyn
     const doc = new PDFDocument({ size: 'A4', margin: 50 });
     doc.pipe(res);
 
-    // rendu minimal
     doc.fontSize(20).text('Licence Securidem', 50, 50);
     doc.fontSize(10).text(`N°: ${invoice.number} — Date: ${formatDateFR(invoice.issuedAt)}`);
     doc.moveDown().text(`Client: ${invoice.customerName || invoice.userEmail}`);
