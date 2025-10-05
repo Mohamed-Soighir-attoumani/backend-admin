@@ -93,18 +93,36 @@ async function ensureCanonicalCommune(anyIdOrName) {
     finalSlug = `${baseSlug}-${i}`;
   }
 
-  const doc = await Commune.create({
-    name: raw,
-    label: raw,
-    communeName: raw,
-    code: '',
-    region: '',
-    imageUrl: '',
-    slug: finalSlug,
-    active: true,
-  });
-
-  return { key: doc.slug, name: doc.name || raw };
+  // création résiliente aux courses (slug déjà pris entre le check et l’insert)
+  try {
+    const doc = await Commune.create({
+      name: raw,
+      label: raw,
+      communeName: raw,
+      code: '',
+      region: '',
+      imageUrl: '',
+      slug: finalSlug,
+      active: true,
+    });
+    return { key: doc.slug, name: doc.name || raw };
+  } catch (e) {
+    if (e && e.code === 11000) {
+      const altSlug = `${finalSlug}-${Date.now().toString().slice(-4)}`;
+      const doc2 = await Commune.create({
+        name: raw,
+        label: raw,
+        communeName: raw,
+        code: '',
+        region: '',
+        imageUrl: '',
+        slug: altSlug,
+        active: true,
+      });
+      return { key: doc2.slug, name: doc2.name || raw };
+    }
+    throw e;
+  }
 }
 
 /* ===================== Users helper ===================== */
@@ -283,7 +301,7 @@ router.post('/admins', auth, requireRole('superadmin'), async (req, res) => {
       finalEmail = alias;
     }
 
-    // 3) créer l’admin
+    // 3) créer l’admin (catch 11000 robuste)
     let doc;
     try {
       doc = await User.create({
@@ -303,12 +321,12 @@ router.post('/admins', auth, requireRole('superadmin'), async (req, res) => {
         subscriptionMethod: '',
       });
     } catch (e) {
-      // Gestion explicite des collisions d’email
-      if (e && e.code === 11000 && e.keyPattern && e.keyPattern.email) {
+      // ✅ certains environnements n’envoient pas keyPattern/keyValue → on traite tout E11000 comme doublon email
+      if (e && e.code === 11000) {
         return res.status(409).json({ message: 'Email déjà utilisé', code: 'EMAIL_TAKEN' });
       }
       console.error('❌ create admin error:', e);
-      throw e; // tombera dans le catch du dessus → 500
+      throw e;
     }
 
     const plain = doc.toObject();
