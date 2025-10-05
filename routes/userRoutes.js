@@ -3,6 +3,8 @@ const express = require('express');
 const router = express.Router();
 const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
+const fs = require('fs');
+const path = require('path');
 const PDFDocument = require('pdfkit');
 
 const auth = require('../middleware/authMiddleware');
@@ -12,7 +14,7 @@ const Invoice = require('../models/Invoice');
 const Commune = require('../models/Commune');
 const { sign } = require('../utils/jwt');
 
-/* ===================== Utils ===================== */
+/* ===================== Utils généraux ===================== */
 const isValidHex24 = (s) => typeof s === 'string' && /^[a-f0-9]{24}$/i.test(s);
 const norm = (v) => String(v || '').trim().toLowerCase();
 const decode = (v) => { try { return decodeURIComponent(String(v)); } catch { return String(v || ''); } };
@@ -29,36 +31,42 @@ const pickHexFromAny = (v) => {
   const m = s.match(/[a-f0-9]{24}/i);
   return m && isValidHex24(m[0]) ? m[0] : '';
 };
-const escapeRegExp = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-const formatDateFR = (d) => { try { return new Date(d).toLocaleDateString('fr-FR'); } catch { return ''; } };
+function escapeRegExp(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+function formatDateFR(d) { try { return new Date(d).toLocaleDateString('fr-FR'); } catch { return ''; } }
 
-/* ---------- Slugify pour communes ---------- */
-const strip = (s) => String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '');
-const slugify = (input) =>
-  strip(input)
+/* ---------- Slugify pour communes auto ---------- */
+function slugify(input) {
+  return String(input || '')
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '')
     .replace(/--+/g, '-');
+}
 
-/* ===================== Communes : canon/ensure ===================== */
+/* ===================== Communes : recherche / canon / ensure ===================== */
 async function findCommuneByAny(anyId) {
   const raw = String(anyId ?? '').trim();
   if (!raw) return null;
 
+  // ID Mongo ?
   if (isValidHex24(raw)) {
     const c = await Commune.findById(raw).lean();
     if (c) return c;
   }
+
+  // slug (case-insensitive)
   let c = await Commune.findOne({ slug: new RegExp(`^${escapeRegExp(raw)}$`, 'i') }).lean();
   if (c) return c;
 
+  // noms exacts (case-insensitive)
   const nameFields = ['name', 'label', 'communeName', 'nom'];
   for (const f of nameFields) {
     c = await Commune.findOne({ [f]: new RegExp(`^${escapeRegExp(raw)}$`, 'i') }).lean();
     if (c) return c;
   }
 
+  // code exact
   c = await Commune.findOne({ code: new RegExp(`^${escapeRegExp(raw)}$`, 'i') }).lean();
   if (c) return c;
 
@@ -80,14 +88,15 @@ async function ensureCanonicalCommune(anyIdOrName) {
   const raw = String(anyIdOrName || '').trim();
   if (!raw) return { key: '', name: '' };
 
-  // existe ?
+  // Existe déjà ?
   const canon = await toCanonicalCommune(raw);
   if (canon.key) return canon;
 
-  // créer avec slug unique + active:true (visible côté mobile)
+  // Sinon créer avec active:true pour l’exposer aux endpoints publics
   const baseSlug = slugify(raw) || `commune-${Date.now()}`;
   let finalSlug = baseSlug;
   let i = 1;
+  // unicité du slug
   while (await Commune.findOne({ slug: finalSlug }).lean()) {
     i += 1;
     finalSlug = `${baseSlug}-${i}`;
@@ -101,13 +110,13 @@ async function ensureCanonicalCommune(anyIdOrName) {
     region: '',
     imageUrl: '',
     slug: finalSlug,
-    active: true,
+    active: true, // ✅ IMPORTANT pour affichage côté mobile /communes
   });
 
   return { key: doc.slug, name: doc.name || raw };
 }
 
-/* ===================== Trouver un utilisateur ===================== */
+/* ===================== Trouver un utilisateur par “n’importe quoi” ===================== */
 async function findUserByAnyId(primary, body = {}, query = {}) {
   const candidatesRaw = [
     primary,
@@ -141,6 +150,7 @@ async function findUserByAnyId(primary, body = {}, query = {}) {
       if (byUserId) return byUserId;
     }
   }
+
   return null;
 }
 
@@ -191,18 +201,22 @@ router.get('/admins', auth, requireRole('superadmin'), async (req, res) => {
       .limit(ps)
       .lean();
 
-    items = items.map(u => ({ ...u, _idString: (u._id && String(u._id)) || '' }));
+    items = items.map(u => ({
+      ...u,
+      _idString: (u._id && String(u._id)) || '',
+    }));
+
     const total = await User.countDocuments(find);
 
     res.setHeader('Cache-Control', 'no-store');
-    return res.json({ items, total });
+    res.json({ items, total });
   } catch (err) {
     console.error('❌ GET /api/admins', err);
-    return res.status(500).json({ message: 'Erreur serveur' });
+    res.status(500).json({ message: 'Erreur serveur' });
   }
 });
 
-/* ===================== CRÉATION ADMIN ===================== */
+/* ===================== CRÉATION / MISE À JOUR ADMIN (idempotent) ===================== */
 router.post('/admins', auth, requireRole('superadmin'), async (req, res) => {
   try {
     let { email, password, name, communeId, communeName, photo, createdBy } = req.body || {};
@@ -211,28 +225,59 @@ router.post('/admins', auth, requireRole('superadmin'), async (req, res) => {
       return res.status(400).json({ message: 'Email et mot de passe requis' });
     }
 
-    const exists = await User.findOne({ email });
-    if (exists) return res.status(409).json({ message: 'Email déjà utilisé' });
-
+    // 1) S’assurer que la commune existe et obtenir la clé canonique (slug)
     const rawCommuneInput = communeId || communeName;
     if (!rawCommuneInput) {
       return res.status(400).json({ message: 'Commune obligatoire pour un compte admin.' });
     }
-
-    // ⚙️ crée/normalise la commune et retourne la clé canonique (slug)
     const canon = await ensureCanonicalCommune(rawCommuneInput);
     if (!canon.key) {
       return res.status(400).json({ message: 'Commune invalide.' });
     }
 
+    // 2) L’admin existe déjà ?
+    const existing = await User.findOne({ email });
     const passwordHash = await bcrypt.hash(String(password), 10);
 
+    if (existing) {
+      // Si c’est un admin → on le met à jour au lieu d’erreur 409
+      if (String(existing.role).toLowerCase() === 'admin') {
+        const update = {
+          communeId: canon.key,
+          communeName: canon.name || communeName || '',
+          isActive: true,
+        };
+        if (name)  update.name  = name;
+        if (photo) update.photo = photo;
+
+        // Réinitialiser le mot de passe si fourni
+        update.password = passwordHash;
+
+        const updated = await User.findByIdAndUpdate(
+          existing._id,
+          { $set: update, $inc: { tokenVersion: 1 } },
+          { new: true }
+        );
+
+        const plain = updated.toObject();
+        plain._idString = String(updated._id);
+        res.setHeader('Cache-Control', 'no-store');
+        return res.json({ ...plain, upserted: true, mode: 'updated' });
+      }
+
+      // Email déjà pris par un non-admin → renvoyer un message clair
+      return res.status(409).json({
+        message: "Email déjà utilisé par un compte qui n'est pas un administrateur.",
+      });
+    }
+
+    // 3) Sinon, créer l’admin
     const doc = await User.create({
       email,
       password: passwordHash,
       name: name || '',
       role: 'admin',
-      communeId: canon.key,                // 🔑 slug
+      communeId: canon.key,                              // 🔑 slug
       communeName: canon.name || communeName || '',
       photo: photo || '',
       createdBy: createdBy ? String(createdBy) : '',
@@ -247,66 +292,19 @@ router.post('/admins', auth, requireRole('superadmin'), async (req, res) => {
     const plain = doc.toObject();
     plain._idString = String(doc._id);
 
-    // réponses non-cachées pour que le panel voie tout de suite
     res.setHeader('Cache-Control', 'no-store');
-    return res.status(201).json(plain);
+    return res.status(201).json({ ...plain, upserted: true, mode: 'created' });
   } catch (err) {
     console.error('❌ POST /api/admins', err);
     return res.status(500).json({ message: 'Erreur serveur' });
   }
 });
 
-/* ===================== (compat) CRÉATION via /users ===================== */
+/* ===================== (compat) CRÉATION via /users — alias de /admins ===================== */
 router.post('/users', auth, requireRole('superadmin'), async (req, res) => {
-  try {
-    let { email, password, name, communeId, communeName, role, createdBy, photo } = req.body || {};
-    email = norm(email);
-    if (!email || !password) {
-      return res.status(400).json({ message: 'Email et mot de passe requis' });
-    }
-    role = 'admin';
-
-    const exists = await User.findOne({ email });
-    if (exists) return res.status(409).json({ message: 'Email déjà utilisé' });
-
-    const rawCommuneInput = communeId || communeName;
-    if (!rawCommuneInput) {
-      return res.status(400).json({ message: 'Commune obligatoire pour un compte admin.' });
-    }
-
-    const canon = await ensureCanonicalCommune(rawCommuneInput);
-    if (!canon.key) {
-      return res.status(400).json({ message: 'Commune invalide.' });
-    }
-
-    const passwordHash = await bcrypt.hash(String(password), 10);
-
-    const doc = await User.create({
-      email,
-      password: passwordHash,
-      name: name || '',
-      role,
-      communeId: canon.key,
-      communeName: canon.name || communeName || '',
-      photo: photo || '',
-      createdBy: createdBy ? String(createdBy) : '',
-      isActive: true,
-      subscriptionStatus: 'none',
-      subscriptionEndAt: null,
-      subscriptionPrice: 0,
-      subscriptionCurrency: 'EUR',
-      subscriptionMethod: '',
-    });
-
-    const plain = doc.toObject();
-    plain._idString = String(doc._id);
-
-    res.setHeader('Cache-Control', 'no-store');
-    return res.status(201).json(plain);
-  } catch (err) {
-    console.error('❌ POST /api/users', err);
-    return res.status(500).json({ message: 'Erreur serveur' });
-  }
+  // on délègue à la même logique pour garder un comportement identique
+  req.url = '/admins';
+  return router.handle(req, res);
 });
 
 /* ===================== MISE À JOUR ADMIN ===================== */
@@ -318,7 +316,7 @@ router.put('/users/:id', auth, requireRole('superadmin'), async (req, res) => {
       return res.status(400).json({ message: 'Changement de rôle interdit ici' });
     }
 
-    // Commune : normaliser/créer si changement
+    // Commune : s’il y a un changement, on s’assure qu’elle existe (création auto si besoin)
     let nextCommuneId = user.communeId || '';
     let nextCommuneName = user.communeName || '';
 
@@ -344,10 +342,10 @@ router.put('/users/:id', auth, requireRole('superadmin'), async (req, res) => {
 
     const updated = await User.findByIdAndUpdate(user._id, { $set: payload }, { new: true });
     res.setHeader('Cache-Control', 'no-store');
-    return res.json({ ...updated.toObject(), _idString: String(updated._id) });
+    res.json({ ...updated.toObject(), _idString: String(updated._id) });
   } catch (err) {
     console.error('❌ PUT /api/users/:id', err);
-    return res.status(500).json({ message: 'Erreur serveur' });
+    res.status(500).json({ message: 'Erreur serveur' });
   }
 });
 
@@ -362,10 +360,10 @@ router.post('/users/:id/toggle-active', auth, requireRole('superadmin'), async (
     await user.save();
 
     res.setHeader('Cache-Control', 'no-store');
-    return res.json({ ok: true, user: { ...user.toObject(), _idString: String(user._id) } });
+    res.json({ ok: true, user: { ...user.toObject(), _idString: String(user._id) } });
   } catch (err) {
     console.error('❌ POST /api/users/:id/toggle-active', err);
-    return res.status(500).json({ message: 'Erreur serveur' });
+    res.status(500).json({ message: 'Erreur serveur' });
   }
 });
 
@@ -384,12 +382,11 @@ router.post('/admins/:id/reset-password', auth, requireRole('superadmin'), async
     }
     const hash = await bcrypt.hash(String(newPassword), 10);
     await User.updateOne({ _id: user._id }, { $set: { password: hash }, $inc: { tokenVersion: 1 } });
-
     res.setHeader('Cache-Control', 'no-store');
     return res.json({ ok: true });
   } catch (err) {
     console.error('❌ POST /api/admins/:id/reset-password', err);
-    return res.status(500).json({ message: 'Erreur serveur' });
+    res.status(500).json({ message: 'Erreur serveur' });
   }
 });
 
@@ -412,7 +409,7 @@ router.delete('/admins/:id', auth, requireRole('superadmin'), async (req, res) =
     return res.json({ ok: true });
   } catch (err) {
     console.error('❌ DELETE /api/admins/:id', err);
-    return res.status(500).json({ message: 'Erreur serveur' });
+    res.status(500).json({ message: 'Erreur serveur' });
   }
 });
 
@@ -428,6 +425,7 @@ router.post('/admins/:id/impersonate', auth, requireRole('superadmin'), async (r
       return res.status(403).json({ message: 'Compte cible désactivé' });
     }
 
+    // token d’impersonation — on embarque la commune
     const payload = {
       id: String(target._id),
       email: target.email,
@@ -444,11 +442,11 @@ router.post('/admins/:id/impersonate', auth, requireRole('superadmin'), async (r
     return res.json({ token });
   } catch (err) {
     console.error('❌ POST /api/admins/:id/impersonate', err);
-    return res.status(500).json({ message: 'Erreur serveur' });
+    res.status(500).json({ message: 'Erreur serveur' });
   }
 });
 
-/* ===================== LISTE /api/users (fallback) ===================== */
+/* ===================== LISTE /api/users (fallback admin/superadmin) ===================== */
 router.get('/users', auth, requireRole('superadmin'), async (req, res) => {
   try {
     const {
@@ -497,14 +495,18 @@ router.get('/users', auth, requireRole('superadmin'), async (req, res) => {
       .limit(ps)
       .lean();
 
-    items = items.map(u => ({ ...u, _idString: (u._id && String(u._id)) || '' }));
+    items = items.map(u => ({
+      ...u,
+      _idString: (u._id && String(u._id)) || '',
+    }));
+
     const total = await User.countDocuments(find);
 
     res.setHeader('Cache-Control', 'no-store');
-    return res.json({ items, total });
+    res.json({ items, total });
   } catch (err) {
     console.error('❌ GET /api/users', err);
-    return res.status(500).json({ message: 'Erreur serveur' });
+    res.status(500).json({ message: 'Erreur serveur' });
   }
 });
 
@@ -530,10 +532,10 @@ router.get('/users/:id/invoices', auth, requireRole('superadmin'), async (req, r
     }));
 
     res.setHeader('Cache-Control', 'no-store');
-    return res.json({ items: list, total: list.length });
+    res.json({ items: list, total: list.length });
   } catch (err) {
     console.error('❌ GET /api/users/:id/invoices', err);
-    return res.status(500).json({ message: 'Erreur serveur' });
+    res.status(500).json({ message: 'Erreur serveur' });
   }
 });
 
@@ -550,9 +552,12 @@ router.get('/users/:id/invoices/:num/pdf', auth, requireRole('superadmin'), asyn
     res.setHeader('Content-Disposition', `inline; filename="${invoice.number}.pdf"`);
     res.setHeader('Cache-Control', 'no-store');
 
+    const logoPath = process.env.ASSO_LOGO_PATH || 'assets/logo-bellevue.png';
+
     const doc = new PDFDocument({ size: 'A4', margin: 50 });
     doc.pipe(res);
 
+    // rendu minimal
     doc.fontSize(20).text('Licence Securidem', 50, 50);
     doc.fontSize(10).text(`N°: ${invoice.number} — Date: ${formatDateFR(invoice.issuedAt)}`);
     doc.moveDown().text(`Client: ${invoice.customerName || invoice.userEmail}`);
@@ -564,7 +569,7 @@ router.get('/users/:id/invoices/:num/pdf', auth, requireRole('superadmin'), asyn
     doc.end();
   } catch (err) {
     console.error('❌ GET /api/users/:id/invoices/:num/pdf', err);
-    return res.status(500).json({ message: 'Erreur serveur' });
+    res.status(500).json({ message: 'Erreur serveur' });
   }
 });
 
