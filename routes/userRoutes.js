@@ -88,7 +88,6 @@ async function ensureCanonicalCommune(anyIdOrName) {
   const baseSlug = slugify(raw) || `commune-${Date.now()}`;
   let finalSlug = baseSlug;
   let i = 1;
-  // éviter les doublons de slug même si l'index n'est pas unique
   while (await Commune.findOne({ slug: finalSlug }).lean()) {
     i += 1;
     finalSlug = `${baseSlug}-${i}`;
@@ -102,7 +101,7 @@ async function ensureCanonicalCommune(anyIdOrName) {
     region: '',
     imageUrl: '',
     slug: finalSlug,
-    active: true, // ✅ visible dans /communes côté mobile
+    active: true, // ✅ visible côté mobile (/communes)
   });
 
   return { key: doc.slug, name: doc.name || raw };
@@ -150,18 +149,21 @@ async function findUserByAnyId(primary, body = {}, query = {}) {
 async function buildUniqueAliasEmail(baseEmail, slug) {
   const s = String(baseEmail || '').trim().toLowerCase();
   const at = s.lastIndexOf('@');
-  if (at < 0) return ''; // pas d'alias possible
+  if (at < 0) return '';
   const local = s.slice(0, at);
   const domain = s.slice(at + 1);
   const base = `${local}+${slug}`;
   let candidate = `${base}@${domain}`;
   let i = 1;
-
   while (await User.findOne({ email: norm(candidate) })) {
     i += 1;
     candidate = `${base}-${i}@${domain}`;
   }
   return candidate.toLowerCase();
+}
+
+function isDupError(err) {
+  return !!(err && (err.code === 11000 || String(err.message || '').includes('E11000')));
 }
 
 /* ===================== LISTE ADMINS ===================== */
@@ -222,7 +224,7 @@ router.get('/admins', auth, requireRole('superadmin'), async (req, res) => {
   }
 });
 
-/* ===================== CRÉATION ADMIN (toujours créer, alias si email déjà pris) ===================== */
+/* ===================== CRÉATION ADMIN (alias + retry si doublon) ===================== */
 router.post('/admins', auth, requireRole('superadmin'), async (req, res) => {
   try {
     let { email, password, name, communeId, communeName, photo, createdBy } = req.body || {};
@@ -243,21 +245,16 @@ router.post('/admins', auth, requireRole('superadmin'), async (req, res) => {
 
     const passwordHash = await bcrypt.hash(String(password), 10);
 
-    // 2) Si l'email est déjà pris, on génère un alias — PEU IMPORTE le rôle du compte existant
+    // 2) Déterminer un email non pris (alias si besoin)
     let finalEmail = email;
-    const already = await User.findOne({ email });
-    if (already) {
+    if (await User.findOne({ email })) {
       const alias = await buildUniqueAliasEmail(email, canon.key);
-      if (!alias) {
-        return res.status(409).json({
-          message: "Email déjà utilisé et impossible d'aliaser (format invalide). Choisissez un autre email."
-        });
-      }
+      if (!alias) return res.status(409).json({ message: "Email déjà utilisé et impossible d'aliaser (format invalide)." });
       finalEmail = alias;
     }
 
-    // 3) créer le NOUVEL admin (jamais d'update implicite d'un autre compte)
-    const doc = await User.create({
+    // 3) tentative de création + retry si E11000 email
+    const payload = {
       email: finalEmail,
       password: passwordHash,
       name: name || '',
@@ -272,25 +269,61 @@ router.post('/admins', auth, requireRole('superadmin'), async (req, res) => {
       subscriptionPrice: 0,
       subscriptionCurrency: 'EUR',
       subscriptionMethod: '',
-    });
+    };
 
-    const plain = doc.toObject();
-    plain._idString = String(doc._id);
+    let adminDoc = null;
+    const MAX_RETRY = 3;
+    for (let attempt = 0; attempt <= MAX_RETRY; attempt++) {
+      try {
+        adminDoc = await User.create(payload);
+        break;
+      } catch (err) {
+        if (isDupError(err)) {
+          // Log détaillé pour comprendre d'où vient le doublon
+          console.error('⚠️ E11000 lors de la création admin', {
+            keyPattern: err.keyPattern, keyValue: err.keyValue, message: err.message
+          });
+
+          const dupOnEmail =
+            (err.keyPattern && err.keyPattern.email) ||
+            (err.keyValue && typeof err.keyValue.email !== 'undefined') ||
+            /index:\s*email_1/i.test(String(err.message || ''));
+
+          // si c’est bien un doublon d’email → on change l’email et on retente
+          if (dupOnEmail && attempt < MAX_RETRY) {
+            // génère un nouveau suffixe (ex: +slug-2, +slug-3…)
+            const base = email;
+            const newAlias = await buildUniqueAliasEmail(base, `${canon.key}-${attempt + 2}`);
+            if (!newAlias) return res.status(409).json({ message: 'Email déjà utilisé (alias impossible).' });
+            payload.email = newAlias;
+            continue;
+          }
+
+          // autre clé en doublon → message précis
+          const key = err.keyValue ? Object.keys(err.keyValue)[0] : null;
+          if (key && key !== 'email') {
+            return res.status(409).json({ message: `Doublon sur le champ '${key}'`, key, value: err.keyValue[key] });
+          }
+          // fallback
+          return res.status(409).json({ message: 'Email déjà utilisé' });
+        }
+        throw err; // autre erreur : laisse filer au catch global
+      }
+    }
+
+    const plain = adminDoc.toObject();
+    plain._idString = String(adminDoc._id);
 
     res.setHeader('Cache-Control', 'no-store');
     return res.status(201).json({
       ...plain,
-      emailAliased: finalEmail !== email,
+      emailAliased: plain.email !== email,
       originalEmail: email,
-      aliasEmail: finalEmail,
+      aliasEmail: plain.email,
       upserted: true,
       mode: 'created',
     });
   } catch (err) {
-    // Gestion E11000 (doublon email inattendu) → 409
-    if (err && (err.code === 11000 || String(err.message || '').includes('E11000'))) {
-      return res.status(409).json({ message: 'Email déjà utilisé' });
-    }
     console.error('❌ POST /api/admins', err);
     return res.status(500).json({ message: 'Erreur serveur' });
   }
