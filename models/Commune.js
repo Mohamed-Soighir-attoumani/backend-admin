@@ -1,19 +1,18 @@
 // backend/models/Commune.js
 const mongoose = require('mongoose');
 
-const communeSchema = new mongoose.Schema(
+const CommuneSchema = new mongoose.Schema(
   {
-    name: { type: String, required: true, trim: true },
-    label: { type: String, trim: true, default: '' },
-    communeName: { type: String, trim: true, default: '' },
-    code: { type: String, trim: true, default: '' },
-    region: { type: String, trim: true, default: '' },
-    imageUrl: { type: String, trim: true, default: '' },
-
-    // ⚑ clé canonique utilisée par le panel/app comme "communeId"
-    slug: { type: String, required: true, trim: true, lowercase: true, unique: true, index: true },
+    name:        { type: String, default: '' },   // Nom affiché
+    label:       { type: String, default: '' },   // Alias éventuel
+    communeName: { type: String, default: '' },   // Compat
+    code:        { type: String, default: '' },   // Code INSEE si dispo
+    region:      { type: String, default: '' },
+    imageUrl:    { type: String, default: '' },
+    slug:        { type: String, required: true, unique: true, index: true }, // clé canonique publique
+    active:      { type: Boolean, default: true }, // listée côté mobile si true (ou non défini)
   },
   { timestamps: true }
 );
 
-module.exports = mongoose.model('Commune', communeSchema);
+module.exports = mongoose.model('Commune', CommuneSchema);
