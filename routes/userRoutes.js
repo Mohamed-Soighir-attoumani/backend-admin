@@ -164,6 +164,26 @@ async function buildUniqueAliasEmail(baseEmail, slug) {
 const isDupError = (err) =>
   !!(err && (err.code === 11000 || String(err.message || '').includes('E11000')));
 
+/* ===================== Helpers commune<->admins ===================== */
+const safeLower = (s) => (typeof s === 'string' ? s.trim().toLowerCase() : '');
+
+async function recomputeCommuneActive(slug) {
+  const cid = safeLower(slug);
+  if (!cid) return;
+  const activeAdmins = await User.countDocuments({
+    role: 'admin',
+    communeId: cid,
+    isActive: { $ne: false },
+  });
+  const commune = await Commune.findOne({ slug: cid });
+  if (!commune) return;
+  const nextActive = activeAdmins > 0;
+  if (commune.active !== nextActive) {
+    commune.active = nextActive;
+    await commune.save();
+  }
+}
+
 /* ===================== [DEBUG] Tester si un email existe (superadmin) ===================== */
 router.get('/admins/debug/check-email', auth, requireRole('superadmin'), async (req, res) => {
   try {
@@ -335,6 +355,9 @@ async function createAdminCore(req, res) {
       }
     }
 
+    // ✅ On (re)valide l'état "active" de la commune : au moins 1 admin => active:true
+    await recomputeCommuneActive(canon.key);
+
     const plain = adminDoc.toObject();
     plain._idString = String(adminDoc._id);
 
@@ -391,12 +414,18 @@ router.put('/users/:id', auth, requireRole('superadmin'), async (req, res) => {
     if (typeof req.body.name === 'string')  payload.name = req.body.name;
     if (typeof req.body.isActive === 'boolean') payload.isActive = req.body.isActive;
 
+    const oldCid = safeLower(user.communeId || '');
     if (nextCommuneId !== (user.communeId || '')) {
       payload.communeId = nextCommuneId;
       payload.communeName = nextCommuneName;
     }
 
     const updated = await User.findByIdAndUpdate(user._id, { $set: payload }, { new: true });
+
+    // ✅ Recompute sur ancienne et nouvelle commune
+    await recomputeCommuneActive(oldCid);
+    await recomputeCommuneActive(safeLower(updated.communeId || ''));
+
     res.setHeader('Cache-Control', 'no-store');
     res.json({ ...updated.toObject(), _idString: String(updated._id) });
   } catch (err) {
@@ -414,6 +443,9 @@ router.post('/users/:id/toggle-active', auth, requireRole('superadmin'), async (
     const next = !!req.body.active;
     user.isActive = next;
     await user.save();
+
+    // ✅ Recompute sur la commune du user
+    await recomputeCommuneActive(safeLower(user.communeId || ''));
 
     res.setHeader('Cache-Control', 'no-store');
     res.json({ ok: true, user: { ...user.toObject(), _idString: String(user._id) } });
@@ -460,7 +492,13 @@ router.delete('/admins/:id', auth, requireRole('superadmin'), async (req, res) =
       return res.status(400).json({ message: 'Suppression d’un superadmin interdite' });
     }
 
+    const cid = safeLower(user.communeId || '');
+
     await User.deleteOne({ _id: user._id });
+
+    // ✅ Recompute l'état de la commune : s'il ne reste aucun admin actif -> active:false
+    await recomputeCommuneActive(cid);
+
     res.setHeader('Cache-Control', 'no-store');
     return res.json({ ok: true });
   } catch (err) {
