@@ -230,11 +230,13 @@ router.get('/admins', auth, requireRole('superadmin'), async (req, res) => {
     res.json({ items, total });
   } catch (err) {
     console.error('❌ GET /api/admins', err);
-    res.status(500).json({ message: 'Erreur serveur' });
+    res.status(500).json({ message: err.message || 'Erreur serveur' });
   }
 });
 
 /* ===================== CRÉATION ADMIN — cœur réutilisable ===================== */
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
 async function createAdminCore(req, res) {
   try {
     let { email, password, name, communeId, communeName, photo, createdBy } = req.body || {};
@@ -242,9 +244,15 @@ async function createAdminCore(req, res) {
     if (!email || !password) {
       return res.status(400).json({ message: 'Email et mot de passe requis' });
     }
+    if (!EMAIL_RE.test(email)) {
+      return res.status(400).json({ message: 'Email invalide' });
+    }
+    if (String(password).length < 6) {
+      return res.status(400).json({ message: 'Mot de passe trop court (min 6 caractères)' });
+    }
 
     // 1) Commune obligatoire, création auto si absente
-    const rawCommuneInput = communeId || communeName;
+    const rawCommuneInput = (communeId || communeName || '').trim();
     if (!rawCommuneInput) {
       return res.status(400).json({ message: 'Commune obligatoire pour un compte admin.' });
     }
@@ -259,11 +267,11 @@ async function createAdminCore(req, res) {
     const basePayload = {
       email, // tentative d'abord avec l'email nu
       password: passwordHash,
-      name: name || '',
+      name: (name || '').trim(),
       role: 'admin',
       communeId: canon.key,
       communeName: canon.name || communeName || '',
-      photo: photo || '',
+      photo: (photo || '').trim(),
       createdBy: createdBy ? String(createdBy) : '',
       isActive: true,
       subscriptionStatus: 'none',
@@ -281,7 +289,10 @@ async function createAdminCore(req, res) {
     try {
       adminDoc = await tryCreate();
     } catch (err) {
-      if (!isDupError(err)) throw err;
+      if (!isDupError(err)) {
+        console.error('❌ createAdminCore > create error (non-dup):', err);
+        throw err;
+      }
 
       // Conflit d'email => générer un alias et réessayer
       const dupOnEmail =
@@ -299,8 +310,6 @@ async function createAdminCore(req, res) {
       }
 
       const MAX_RETRY = 4;
-      let lastErr = err;
-
       for (let i = 0; i < MAX_RETRY; i++) {
         const suffix = i === 0 ? canon.key : `${canon.key}-${i + 1}`;
         const alias = await buildUniqueAliasEmail(email, suffix);
@@ -311,8 +320,10 @@ async function createAdminCore(req, res) {
           adminDoc = await tryCreate();
           break;
         } catch (e2) {
-          lastErr = e2;
-          if (!isDupError(e2)) throw e2;
+          if (!isDupError(e2)) {
+            console.error('❌ createAdminCore > alias create error:', e2);
+            throw e2;
+          }
         }
       }
 
@@ -337,8 +348,8 @@ async function createAdminCore(req, res) {
       mode: 'created',
     });
   } catch (err) {
-    console.error('❌ POST createAdminCore', err);
-    return res.status(500).json({ message: 'Erreur serveur' });
+    console.error('❌ POST createAdminCore (fatal):', err);
+    return res.status(500).json({ message: err.message || 'Erreur serveur' });
   }
 }
 
@@ -390,7 +401,7 @@ router.put('/users/:id', auth, requireRole('superadmin'), async (req, res) => {
     res.json({ ...updated.toObject(), _idString: String(updated._id) });
   } catch (err) {
     console.error('❌ PUT /api/users/:id', err);
-    res.status(500).json({ message: 'Erreur serveur' });
+    res.status(500).json({ message: err.message || 'Erreur serveur' });
   }
 });
 
@@ -408,7 +419,7 @@ router.post('/users/:id/toggle-active', auth, requireRole('superadmin'), async (
     res.json({ ok: true, user: { ...user.toObject(), _idString: String(user._id) } });
   } catch (err) {
     console.error('❌ POST /api/users/:id/toggle-active', err);
-    res.status(500).json({ message: 'Erreur serveur' });
+    res.status(500).json({ message: err.message || 'Erreur serveur' });
   }
 });
 
@@ -431,7 +442,7 @@ router.post('/admins/:id/reset-password', auth, requireRole('superadmin'), async
     return res.json({ ok: true });
   } catch (err) {
     console.error('❌ POST /api/admins/:id/reset-password', err);
-    res.status(500).json({ message: 'Erreur serveur' });
+    res.status(500).json({ message: err.message || 'Erreur serveur' });
   }
 });
 
@@ -454,7 +465,7 @@ router.delete('/admins/:id', auth, requireRole('superadmin'), async (req, res) =
     return res.json({ ok: true });
   } catch (err) {
     console.error('❌ DELETE /api/admins/:id', err);
-    res.status(500).json({ message: 'Erreur serveur' });
+    res.status(500).json({ message: err.message || 'Erreur serveur' });
   }
 });
 
@@ -486,7 +497,7 @@ router.post('/admins/:id/impersonate', auth, requireRole('superadmin'), async (r
     return res.json({ token });
   } catch (err) {
     console.error('❌ POST /api/admins/:id/impersonate', err);
-    res.status(500).json({ message: 'Erreur serveur' });
+    res.status(500).json({ message: err.message || 'Erreur serveur' });
   }
 });
 
@@ -546,7 +557,7 @@ router.get('/users', auth, requireRole('superadmin'), async (req, res) => {
     res.json({ items, total });
   } catch (err) {
     console.error('❌ GET /api/users', err);
-    res.status(500).json({ message: 'Erreur serveur' });
+    res.status(500).json({ message: err.message || 'Erreur serveur' });
   }
 });
 
@@ -576,7 +587,7 @@ router.get('/users/:id/invoices', auth, requireRole('superadmin'), async (req, r
     res.json({ invoices: list, items: list, total: list.length });
   } catch (err) {
     console.error('❌ GET /api/users/:id/invoices', err);
-    res.status(500).json({ message: 'Erreur serveur' });
+    res.status(500).json({ message: err.message || 'Erreur serveur' });
   }
 });
 
@@ -607,7 +618,7 @@ router.get('/users/:id/invoices/:num/pdf', auth, requireRole('superadmin'), asyn
     doc.end();
   } catch (err) {
     console.error('❌ GET /api/users/:id/invoices/:num/pdf', err);
-    res.status(500).json({ message: 'Erreur serveur' });
+    res.status(500).json({ message: err.message || 'Erreur serveur' });
   }
 });
 
