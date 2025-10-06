@@ -13,7 +13,7 @@ const multer = require('multer');
 const { storage } = require('../utils/cloudinary');
 const upload = multer({ storage });
 
-/** Auth optionnelle: pour la liste (panel/public) */
+/** Auth optionnelle: pour la liste/détail (panel/public) */
 function optionalAuth(req, _res, next) {
   const authz = req.header('authorization') || '';
   if (authz.startsWith('Bearer ')) {
@@ -29,6 +29,45 @@ function optionalAuth(req, _res, next) {
     } catch (_) {}
   }
   next();
+}
+
+/* ===== Utilitaires ===== */
+
+function adminCanSeeDoc(doc, adminCommuneId) {
+  if (!doc) return false;
+  const cid = String(adminCommuneId || '').trim();
+  if (!cid) return false;
+
+  if (doc.visibility === 'local') {
+    return String(doc.communeId || '') === cid;
+  }
+  if (doc.visibility === 'custom') {
+    const aud = Array.isArray(doc.audienceCommunes) ? doc.audienceCommunes : [];
+    return aud.includes(cid);
+  }
+  if (doc.visibility === 'global') {
+    return true;
+  }
+  return false;
+}
+
+function publicCanSeeDoc(doc, cid) {
+  if (!doc) return false;
+
+  const now = new Date();
+  const okStart = !doc.startAt || doc.startAt <= now;
+  const okEnd   = !doc.endAt   || doc.endAt   >= now;
+  if (!okStart || !okEnd) return false;
+
+  const communeId = String(cid || '').trim();
+
+  if (doc.visibility === 'global') return true;
+  if (doc.visibility === 'local')  return !!communeId && String(doc.communeId || '') === communeId;
+  if (doc.visibility === 'custom') {
+    const aud = Array.isArray(doc.audienceCommunes) ? doc.audienceCommunes : [];
+    return !!communeId && aud.includes(communeId);
+  }
+  return false;
 }
 
 /* ============ CREATE (panel) ============ */
@@ -101,23 +140,33 @@ router.post('/', auth, requireRole('admin'), upload.single('image'), async (req,
  * - ?category=sante|proprete|autres (optionnel)
  * - ?period=7|30 (optionnel)
  * - multi-commune: header x-commune-id ou ?communeId=
- * - public = respecte la fenêtre startAt/endAt ; panel (admin/superadmin) = ignore
+ * - public = respecte startAt/endAt ; panel (admin/superadmin) = ignoreTimeWindow
+ * - 🔒 admin = forcé à SA commune (pas d’override par header/query)
  */
 router.get('/', optionalAuth, async (req, res) => {
   try {
     const { category, period } = req.query;
 
-    const headerCid = (req.header('x-commune-id') || '').trim();
-    const queryCid  = (req.query.communeId || '').trim();
-    const communeId = headerCid || queryCid || '';
-
     const userRole = req.user?.role || null;
+    let communeId = '';
+
+    if (userRole === 'admin') {
+      // 🔒 admin : forcer la commune à son propre rattachement
+      communeId = String(req.user?.communeId || '').trim();
+      if (!communeId) {
+        return res.status(403).json({ message: 'Compte admin non rattaché à une commune' });
+      }
+    } else {
+      // public ou superadmin : on accepte header/query
+      const headerCid = (req.header('x-commune-id') || '').trim();
+      const queryCid  = (req.query.communeId || '').trim();
+      communeId = headerCid || queryCid || '';
+    }
 
     const filter = buildVisibilityQuery({
       communeId,
       userRole,
-      // panel (admin/superadmin) doit voir tout, même hors fenêtre temporelle
-      ignoreTimeWindow: !!userRole,
+      ignoreTimeWindow: !!userRole, // panel : ignore fenêtre ; public : respecte
     });
 
     if (category && ['sante','proprete','autres'].includes(category)) {
@@ -131,11 +180,8 @@ router.get('/', optionalAuth, async (req, res) => {
       filter.createdAt = Object.assign(filter.createdAt || {}, { $gte: fromDate });
     }
 
-    const items = await Info.find(filter)
-      .sort({ priority: -1, createdAt: -1 })
-      .lean();
+    const items = await Info.find(filter).sort({ priority: -1, createdAt: -1 }).lean();
 
-    // 🔹 Empêche un cache “vide” côté reviewer / store
     res.set('Cache-Control', 'no-store');
     res.set('Pragma', 'no-cache');
     res.set('Expires', '0');
@@ -143,6 +189,46 @@ router.get('/', optionalAuth, async (req, res) => {
     res.json(items);
   } catch (err) {
     console.error('❌ GET /infos', err);
+    res.status(500).json({ message: 'Erreur serveur' });
+  }
+});
+
+/* ============ DETAIL (publique + panel) ============ */
+router.get('/:id', optionalAuth, async (req, res) => {
+  try {
+    const id = String(req.params.id || '').trim();
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ message: 'ID invalide' });
+    }
+
+    const doc = await Info.findById(id).lean();
+    if (!doc) return res.status(404).json({ message: 'Info introuvable' });
+
+    const role = req.user?.role || null;
+
+    if (role === 'superadmin') {
+      // superadmin voit tout
+      res.set('Cache-Control', 'no-store');
+      return res.json(doc);
+    }
+
+    if (role === 'admin') {
+      // 🔒 admin seulement si autorisé par sa commune
+      const ok = adminCanSeeDoc(doc, req.user?.communeId);
+      if (!ok) return res.status(404).json({ message: 'Info introuvable' }); // 404 pour ne rien révéler
+      res.set('Cache-Control', 'no-store');
+      return res.json(doc);
+    }
+
+    // Public : respecter fenêtre temporelle + portée + commune fournie
+    const cid = (req.header('x-commune-id') || req.query.communeId || '').trim();
+    const ok = publicCanSeeDoc(doc, cid);
+    if (!ok) return res.status(404).json({ message: 'Info introuvable' });
+
+    res.set('Cache-Control', 'no-store');
+    res.json(doc);
+  } catch (err) {
+    console.error('❌ GET /infos/:id', err);
     res.status(500).json({ message: 'Erreur serveur' });
   }
 });
@@ -156,11 +242,14 @@ router.patch('/:id', auth, requireRole('admin'), upload.single('image'), async (
     const current = await Info.findById(id);
     if (!current) return res.status(404).json({ message: 'Info non trouvée' });
 
-    // Admin: ne peut modifier QUE ses propres infos + dans SA commune (si local)
+    // Admin: ne peut modifier QUE ses propres infos + dans SA commune (si local/custom) – superadmin = passe
     if (req.user.role === 'admin') {
       const own = current.authorId && current.authorId === req.user.id;
-      const sameCommune = current.visibility !== 'local' || current.communeId === (req.user.communeId || '');
-      if (!own || !sameCommune) {
+      const sameScope =
+        current.visibility === 'global' ||
+        (current.visibility === 'local'   && current.communeId === (req.user.communeId || '')) ||
+        (current.visibility === 'custom'  && Array.isArray(current.audienceCommunes) && current.audienceCommunes.includes(req.user.communeId || ''));
+      if (!own || !sameScope) {
         return res.status(403).json({ message: 'Interdit (vous n’êtes pas l’auteur ou mauvaise commune)' });
       }
     }
@@ -174,7 +263,7 @@ router.patch('/:id', auth, requireRole('admin'), upload.single('image'), async (
     if (['sante','proprete','autres'].includes(req.body.category)) setIf('category', req.body.category);
     if (['normal','pinned','urgent'].includes(req.body.priority))  setIf('priority', req.body.priority);
 
-    // Image (remplacement)
+    // Image
     if (req.file) setIf('imageUrl', req.file.path);
 
     // Dates
@@ -228,8 +317,11 @@ router.delete('/:id', auth, requireRole('admin'), async (req, res) => {
 
     if (req.user.role === 'admin') {
       const own = current.authorId && current.authorId === req.user.id;
-      const sameCommune = current.visibility !== 'local' || current.communeId === (req.user.communeId || '');
-      if (!own || !sameCommune) {
+      const sameScope =
+        current.visibility === 'global' ||
+        (current.visibility === 'local'   && current.communeId === (req.user.communeId || '')) ||
+        (current.visibility === 'custom'  && Array.isArray(current.audienceCommunes) && current.audienceCommunes.includes(req.user.communeId || ''));
+      if (!own || !sameScope) {
         return res.status(403).json({ message: 'Interdit (vous n’êtes pas l’auteur ou mauvaise commune)' });
       }
     }
