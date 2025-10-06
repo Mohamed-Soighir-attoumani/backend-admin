@@ -32,6 +32,9 @@ const infoSchema = new mongoose.Schema(
     // Traçabilité
     authorId:    { type: String, default: '' },
     authorEmail: { type: String, default: '' },
+
+    // Lecture
+    isRead: { type: Boolean, default: false },
   },
   { timestamps: true }
 );
@@ -39,5 +42,19 @@ const infoSchema = new mongoose.Schema(
 infoSchema.index({ visibility: 1, communeId: 1 });
 infoSchema.index({ visibility: 1, audienceCommunes: 1 });
 infoSchema.index({ createdAt: -1 });
+
+/** Normalisation pour éviter les mismatches de casse entre panel/app */
+infoSchema.pre('validate', function (next) {
+  if (typeof this.communeId === 'string') {
+    this.communeId = this.communeId.trim().toLowerCase();
+  }
+  if (Array.isArray(this.audienceCommunes)) {
+    const normed = this.audienceCommunes
+      .map((s) => String(s || '').trim().toLowerCase())
+      .filter(Boolean);
+    this.audienceCommunes = Array.from(new Set(normed));
+  }
+  next();
+});
 
 module.exports = mongoose.model('Info', infoSchema);
