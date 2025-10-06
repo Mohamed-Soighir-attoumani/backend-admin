@@ -20,6 +20,10 @@ const communeRoutes = require('./routes/communeRoutes');
 // ✅ Auth middleware pour /api/me pare-balles
 const auth = require('./middleware/authMiddleware');
 
+// ⬇️ Routers
+const infosRouter = require('./routes/infos');
+const notificationsRouter = require('./routes/notifications');
+
 const app = express();
 
 const PORT = process.env.PORT || 4000;
@@ -93,8 +97,15 @@ app.use('/api', require('./routes/me')); // version enrichie (name/photo...), pa
 app.use('/api/change-password', (req, _res, next) => { console.log('[HIT] /api/change-password', req.method, req.path || '/'); next(); }, require('./routes/changePassword'));
 app.use('/api/incidents', require('./routes/incidents'));
 app.use('/api/articles', require('./routes/articles'));
-app.use('/api/infos', require('./routes/infos'));
-app.use('/api/notifications', require('./routes/notifications'));
+
+// 🔔 Notifications
+app.use('/api/notifications', notificationsRouter);
+
+// ℹ️ Infos — on monte plusieurs alias pour éviter les 404 selon le front :
+app.use('/api/infos', infosRouter);  // chemin canonique
+app.use('/api/info',  infosRouter);  // alias singulier (certains fronts l’emploient)
+app.use('/infos',     infosRouter);  // alias public (si API_URL n’inclut pas /api)
+
 app.use('/api/projects', require('./routes/projects'));
 app.use('/api/devices', require('./routes/devices'));
 
@@ -150,12 +161,10 @@ async function fixCommuneIndexes() {
     // 2) ⚠️ Supprimer l’index UNIQUE id_1 (cause des E11000 avec {id:null})
     const idIdx = indexes.find(i => i.name === 'id_1');
     if (idIdx) {
-      // Peu importe s’il est unique ou non, on le supprime : le champ "id" n’est pas utilisé par le schéma
       await collection.dropIndex('id_1');
       logger.info('Index id_1 supprimé ✅ (champ id non utilisé par le schéma)');
     }
 
-    // (Optionnel) recharger la liste et logguer
     const after = await collection.indexes();
     logger.info(`Indexes communes après correction: ${after.map(i => i.name).join(', ')}`);
   } catch (e) {
@@ -173,7 +182,6 @@ async function ensureDefaultCommunes() {
     { id: 'chirongui', name: 'Chirongui', region: 'Mayotte', imageUrl: '/uploads/communes/chirongui.jpg' },
   ].map(c => ({ ...c, slug: c.id })); // slug=id
 
-  // Le schéma est "strict", le champ "id" ne sera pas stocké, c’est ok.
   await Commune.insertMany(base, { ordered: true });
   logger.info('Communes par défaut insérées ✅');
 }
@@ -185,9 +193,7 @@ mongoose
     logger.info(`JWT secret fingerprint: ${secretFingerprint()}`);
     if (!GITHUB_TOKEN) logger.warn('GITHUB_TOKEN manquant — endpoint /cve retournera []');
 
-    // 1) Corriger les indexes problématiques (id_1 + slug_1 unique)
     await fixCommuneIndexes();
-    // 2) Seed si vide
     await ensureDefaultCommunes();
 
     app.listen(PORT, HOST, () => logger.info(`Serveur dispo sur http://${HOST}:${PORT} 🚀`));
