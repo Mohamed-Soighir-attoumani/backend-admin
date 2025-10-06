@@ -14,7 +14,7 @@ const runBackup = require('./scripts/backup');
 const { secretFingerprint } = require('./utils/jwt');
 
 const Commune = require('./models/Commune');
-// ⬇️ Correction: importer le bon router
+// ⬇️ Router des communes
 const communeRoutes = require('./routes/communeRoutes');
 
 // ✅ Auth middleware pour /api/me pare-balles
@@ -89,7 +89,7 @@ app.get('/api/me', auth, (req, res) => {
 /* Routes API */
 app.use('/api', require('./routes/setup-admin'));
 app.use('/api', require('./routes/auth'));
-app.use('/api', require('./routes/me')); // garde la version enrichie (name/photo...), pare-balles couvre le 404
+app.use('/api', require('./routes/me')); // version enrichie (name/photo...), pare-balles couvre le 404
 app.use('/api/change-password', (req, _res, next) => { console.log('[HIT] /api/change-password', req.method, req.path || '/'); next(); }, require('./routes/changePassword'));
 app.use('/api/incidents', require('./routes/incidents'));
 app.use('/api/articles', require('./routes/articles'));
@@ -98,10 +98,9 @@ app.use('/api/notifications', require('./routes/notifications'));
 app.use('/api/projects', require('./routes/projects'));
 app.use('/api/devices', require('./routes/devices'));
 
-// IMPORTANT: router des communes
-// ⬇️ Correction: utiliser communeRoutes (et ne pas doubler "/api" dans le fichier de routes)
+// IMPORTANT: router des communes (sans re-préfixer /api dans le fichier)
 app.use('/api/communes', communeRoutes);
-// ✅ Alias public pour couvrir les appels mobile sans /api
+// ✅ Alias public pour l’app mobile
 app.use('/communes', communeRoutes);
 
 app.use('/api', require('./routes/userRoutes'));
@@ -132,22 +131,35 @@ app.use('/api/*', (req, res) => {
   res.status(404).json({ message: `Route API introuvable ❌ (${req.method} ${req.originalUrl})` });
 });
 
-// --------- Maintenance indexes + seed ----------
+/* --------- Maintenance indexes + seed ---------- */
 async function fixCommuneIndexes() {
   try {
-    // Récupérer les indexes et drop le 'slug_1' s'il est unique
     const collection = mongoose.connection.collection('communes');
     const indexes = await collection.indexes();
+
+    // 1) Supprimer un éventuel index UNIQUE sur slug_1 (héritage ancien)
     const slugIdx = indexes.find(i => i.name === 'slug_1');
     if (slugIdx && slugIdx.unique) {
       await collection.dropIndex('slug_1');
       logger.info('Index unique slug_1 supprimé ✅');
-      // Recréer un index simple non-unique si tu veux
+      // Recréer un index simple non-unique
       await collection.createIndex({ slug: 1 }, { name: 'slug_1' });
       logger.info('Index slug_1 recréé (non-unique) ✅');
     }
+
+    // 2) ⚠️ Supprimer l’index UNIQUE id_1 (cause des E11000 avec {id:null})
+    const idIdx = indexes.find(i => i.name === 'id_1');
+    if (idIdx) {
+      // Peu importe s’il est unique ou non, on le supprime : le champ "id" n’est pas utilisé par le schéma
+      await collection.dropIndex('id_1');
+      logger.info('Index id_1 supprimé ✅ (champ id non utilisé par le schéma)');
+    }
+
+    // (Optionnel) recharger la liste et logguer
+    const after = await collection.indexes();
+    logger.info(`Indexes communes après correction: ${after.map(i => i.name).join(', ')}`);
   } catch (e) {
-    logger.warn('Impossible de modifier les indexes slug_1 (peut-être déjà correct)', { error: e.message });
+    logger.warn('Impossible de corriger les indexes des communes (peut-être déjà corrects)', { error: e.message });
   }
 }
 
@@ -161,6 +173,7 @@ async function ensureDefaultCommunes() {
     { id: 'chirongui', name: 'Chirongui', region: 'Mayotte', imageUrl: '/uploads/communes/chirongui.jpg' },
   ].map(c => ({ ...c, slug: c.id })); // slug=id
 
+  // Le schéma est "strict", le champ "id" ne sera pas stocké, c’est ok.
   await Commune.insertMany(base, { ordered: true });
   logger.info('Communes par défaut insérées ✅');
 }
@@ -172,7 +185,7 @@ mongoose
     logger.info(`JWT secret fingerprint: ${secretFingerprint()}`);
     if (!GITHUB_TOKEN) logger.warn('GITHUB_TOKEN manquant — endpoint /cve retournera []');
 
-    // 1) Corriger l’index unique historique si présent
+    // 1) Corriger les indexes problématiques (id_1 + slug_1 unique)
     await fixCommuneIndexes();
     // 2) Seed si vide
     await ensureDefaultCommunes();
