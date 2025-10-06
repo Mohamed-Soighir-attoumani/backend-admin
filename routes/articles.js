@@ -9,7 +9,7 @@ const jwt = require('jsonwebtoken');
 const Article = require('../models/Article');
 const Commune = require('../models/Commune');
 const auth = require('../middleware/authMiddleware');
-// Gardé (même si non utilisé partout) pour compat descendante
+// Conservé pour compat descendante (non obligatoire ici)
 const { buildVisibilityQuery } = require('../utils/visibility');
 
 // ⚙️ Storage conforme à utils/cloudinary.js (Cloudinary ou disque)
@@ -128,6 +128,7 @@ router.post('/', auth, upload.single('image'), async (req, res) => {
     };
 
     if (req.user.role === 'superadmin') {
+      // Superadmin peut choisir la visibilité
       if (visibility && ['local', 'global', 'custom'].includes(visibility)) {
         base.visibility = visibility;
       }
@@ -158,7 +159,7 @@ router.post('/', auth, upload.single('image'), async (req, res) => {
         base.audienceCommunes = [];
       }
     } else {
-      // admin simple
+      // admin simple : VISIBILITÉ FORCÉE À LOCAL, sur SA commune
       if (!base.communeId) {
         return res.status(403).json({ message: 'Votre compte n’est pas rattaché à une commune' });
       }
@@ -191,16 +192,20 @@ router.get('/', auth, async (req, res) => {
     let filter = {};
 
     if (role === 'admin') {
-      // admin : filtre sur SA commune (header/query peuvent l’écraser si on le souhaite)
+      // 🔒 Un admin ne voit QUE ses propres articles, et seulement ceux qui
+      // concernent sa commune (local) ou le ciblent via custom.
+      const meId = String(req.user.id || '');
       const baseCid = headerCid || queryCid || (req.user.communeId || '');
       const { list: ids } = await communeKeys(baseCid);
+
       if (!ids.length) return res.json([]); // pas de commune => pas d’articles
 
       filter = {
+        authorId: meId,
         $or: [
           { visibility: 'local', communeId: { $in: ids } },
           { visibility: 'custom', audienceCommunes: { $in: ids } },
-          { visibility: 'global' },
+          // Pas de 'global' pour les admins (ils n'en créent pas)
         ],
       };
     } else if (role === 'superadmin') {
@@ -326,29 +331,38 @@ router.get('/:id', optionalAuth, async (req, res) => {
     const role = req.user?.role || null;
     const isPanel = role === 'admin' || role === 'superadmin';
 
-    if (!isPanel) {
-      const rawCid = (req.header('x-commune-id') || req.query.communeId || '')
-        .trim()
-        .toLowerCase();
-      const { list: ids } = await communeKeys(rawCid);
-      const now = new Date();
-      const okStart = !doc.startAt || doc.startAt <= now;
-      const okEnd = !doc.endAt || doc.endAt >= now;
-      const okStatus = doc.status === 'published';
-
-      let allowed = false;
-      if (doc.visibility === 'global') {
-        allowed = true;
-      } else if (doc.visibility === 'local') {
-        allowed = ids.includes(String(doc.communeId).toLowerCase());
-      } else if (doc.visibility === 'custom') {
-        const set = new Set((doc.audienceCommunes || []).map((s) => String(s).toLowerCase()));
-        allowed = ids.some((k) => set.has(k));
+    if (isPanel) {
+      // 🛡️ Panel : si admin, ne peut voir QUE ses propres articles
+      if (role === 'admin') {
+        if (String(doc.authorId || '') !== String(req.user?.id || '')) {
+          return res.status(404).json({ message: 'Article introuvable' });
+        }
       }
+      return res.json(doc);
+    }
 
-      if (!(allowed && okStatus && okStart && okEnd)) {
-        return res.status(404).json({ message: 'Article introuvable' });
-      }
+    // Public: contrôle d’accès par commune + statut/temps
+    const rawCid = (req.header('x-commune-id') || req.query.communeId || '')
+      .trim()
+      .toLowerCase();
+    const { list: ids } = await communeKeys(rawCid);
+    const now = new Date();
+    const okStart = !doc.startAt || doc.startAt <= now;
+    const okEnd = !doc.endAt || doc.endAt >= now;
+    const okStatus = doc.status === 'published';
+
+    let allowed = false;
+    if (doc.visibility === 'global') {
+      allowed = true;
+    } else if (doc.visibility === 'local') {
+      allowed = ids.includes(String(doc.communeId).toLowerCase());
+    } else if (doc.visibility === 'custom') {
+      const set = new Set((doc.audienceCommunes || []).map((s) => String(s).toLowerCase()));
+      allowed = ids.some((k) => set.has(k));
+    }
+
+    if (!(allowed && okStatus && okStart && okEnd)) {
+      return res.status(404).json({ message: 'Article introuvable' });
     }
 
     res.json(doc);
