@@ -234,7 +234,7 @@ router.get('/admins', auth, requireRole('superadmin'), async (req, res) => {
   }
 });
 
-/* ===================== CRÉATION ADMIN (optimiste + retry si E11000) ===================== */
+/* ===================== CRÉATION ADMIN ===================== */
 router.post('/admins', auth, requireRole('superadmin'), async (req, res) => {
   try {
     let { email, password, name, communeId, communeName, photo, createdBy } = req.body || {};
@@ -290,7 +290,6 @@ router.post('/admins', auth, requireRole('superadmin'), async (req, res) => {
         /index:\s*email_1/i.test(String(err.message || ''));
 
       if (!dupOnEmail) {
-        // autre clé en doublon (très rare ici) → message clair
         const key = err.keyValue ? Object.keys(err.keyValue)[0] : null;
         return res.status(409).json({
           message: key ? `Doublon sur le champ '${key}'` : 'Conflit de clé unique',
@@ -299,14 +298,13 @@ router.post('/admins', auth, requireRole('superadmin'), async (req, res) => {
         });
       }
 
-      // Génère un alias et réessaie plusieurs fois si nécessaire
       const MAX_RETRY = 4;
       let lastErr = err;
 
       for (let i = 0; i < MAX_RETRY; i++) {
         const suffix = i === 0 ? canon.key : `${canon.key}-${i + 1}`;
         const alias = await buildUniqueAliasEmail(email, suffix);
-        if (!alias) break; // pas d’alias possible
+        if (!alias) break;
 
         payload = { ...basePayload, email: alias };
         try {
@@ -314,8 +312,7 @@ router.post('/admins', auth, requireRole('superadmin'), async (req, res) => {
           break;
         } catch (e2) {
           lastErr = e2;
-          if (!isDupError(e2)) throw e2; // autre erreur
-          // si encore E11000, boucle pour un nouvel alias
+          if (!isDupError(e2)) throw e2;
         }
       }
 
@@ -345,10 +342,90 @@ router.post('/admins', auth, requireRole('superadmin'), async (req, res) => {
   }
 });
 
-/* ===================== (compat) CRÉATION via /users — redirige vers /admins ===================== */
+/* ===================== (compat) CRÉATION via /users — impl directe, plus de reroutage ===================== */
 router.post('/users', auth, requireRole('superadmin'), async (req, res) => {
-  req.url = '/admins';
-  return router.handle(req, res);
+  try {
+    let { email, password, name, communeId, communeName, photo, createdBy } = req.body || {};
+    email = norm(email);
+    if (!email || !password) {
+      return res.status(400).json({ message: 'Email et mot de passe requis' });
+    }
+
+    const rawCommuneInput = communeId || communeName;
+    if (!rawCommuneInput) {
+      return res.status(400).json({ message: 'Commune obligatoire pour un compte admin.' });
+    }
+    const canon = await ensureCanonicalCommune(rawCommuneInput);
+    if (!canon.key) {
+      return res.status(400).json({ message: 'Commune invalide.' });
+    }
+
+    const passwordHash = await bcrypt.hash(String(password), 10);
+
+    const basePayload = {
+      email,
+      password: passwordHash,
+      name: name || '',
+      role: 'admin',
+      communeId: canon.key,
+      communeName: canon.name || communeName || '',
+      photo: photo || '',
+      createdBy: createdBy ? String(createdBy) : '',
+      isActive: true,
+      subscriptionStatus: 'none',
+      subscriptionEndAt: null,
+      subscriptionPrice: 0,
+      subscriptionCurrency: 'EUR',
+      subscriptionMethod: '',
+    };
+
+    let payload = { ...basePayload };
+    let adminDoc = null;
+
+    const tryCreate = async () => User.create(payload);
+
+    try {
+      adminDoc = await tryCreate();
+    } catch (err) {
+      if (!isDupError(err)) throw err;
+
+      const MAX_RETRY = 4;
+      for (let i = 0; i < MAX_RETRY; i++) {
+        const suffix = i === 0 ? canon.key : `${canon.key}-${i + 1}`;
+        const alias = await buildUniqueAliasEmail(email, suffix);
+        if (!alias) break;
+        payload = { ...basePayload, email: alias };
+        try {
+          adminDoc = await tryCreate();
+          break;
+        } catch (e2) {
+          if (!isDupError(e2)) throw e2;
+        }
+      }
+      if (!adminDoc) {
+        return res.status(409).json({
+          message: 'Email déjà utilisé (alias automatique impossible après plusieurs tentatives).',
+          originalEmail: email,
+        });
+      }
+    }
+
+    const plain = adminDoc.toObject();
+    plain._idString = String(adminDoc._id);
+
+    res.setHeader('Cache-Control', 'no-store');
+    return res.status(201).json({
+      ...plain,
+      emailAliased: plain.email !== email,
+      originalEmail: email,
+      aliasEmail: plain.email,
+      upserted: true,
+      mode: 'created',
+    });
+  } catch (err) {
+    console.error('❌ POST /api/users (compat -> create admin)', err);
+    return res.status(500).json({ message: 'Erreur serveur' });
+  }
 });
 
 /* ===================== MISE À JOUR ADMIN ===================== */
