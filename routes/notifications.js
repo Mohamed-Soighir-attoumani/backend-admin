@@ -1,13 +1,33 @@
+// backend/routes/notifications.js
 const express = require('express');
 const router = express.Router();
 const mongoose = require('mongoose');
 const jwt = require('jsonwebtoken');
+
 const Notification = require('../models/Notification');
 const auth = require('../middleware/authMiddleware');
 const requireRole = require('../middleware/requireRole');
-const { buildVisibilityQuery } = require('../utils/visibility');
+
+// On garde l'utilitaire si tu en as besoin ailleurs, mais on n'en dépend plus pour le cœur.
+let buildVisibilityQuery = null;
+try { ({ buildVisibilityQuery } = require('../utils/visibility')); } catch (_) {}
 
 const normCid = (v) => String(v || '').trim().toLowerCase();
+
+/* ======================= Helpers ======================= */
+function getCommuneIdFromReq(req) {
+  // Headers possibles
+  const h1 = req.header('x-commune-id');
+  const h2 = req.header('x-commune');
+  const h3 = req.header('x-communeid');
+  // Query possibles
+  const q1 = req.query?.communeId;
+  const q2 = req.query?.commune;
+  // Fallback éventuel si l’utilisateur est authentifié et rattaché à une commune
+  const u  = req.user?.communeId;
+
+  return normCid(h1 || h2 || h3 || q1 || q2 || u || '');
+}
 
 /** Auth optionnelle: si Authorization présent, on essaie d’extraire quelques infos */
 function optionalAuth(req, _res, next) {
@@ -15,19 +35,21 @@ function optionalAuth(req, _res, next) {
   if (authz.startsWith('Bearer ')) {
     const token = authz.slice(7).trim();
     try {
-      const payload = jwt.verify(token, process.env.JWT_SECRET);
+      const payload = jwt.verify(token, process.env.JWT_SECRET || 'dev-secret');
       req.user = {
         role: payload.role,
         communeId: payload.communeId || '',
         email: payload.email || '',
         id: payload.id ? String(payload.id) : '',
       };
-    } catch (_) { /* ignore */ }
+    } catch {
+      // token invalide => on continue en public
+    }
   }
   next();
 }
 
-/* --------------------- CREATE (panel) --------------------- */
+/* ======================= CREATE (panel) ======================= */
 router.post('/', auth, requireRole(['admin', 'superadmin']), async (req, res) => {
   try {
     let {
@@ -49,9 +71,9 @@ router.post('/', auth, requireRole(['admin', 'superadmin']), async (req, res) =>
     title = String(title).trim();
     message = String(message).trim();
     priority = ['normal','pinned','urgent'].includes(priority) ? priority : 'normal';
-
     const toDateOrNull = (v) => (v ? new Date(v) : null);
 
+    // Base commune côté admin: il est rattaché à une commune
     const base = {
       title,
       message,
@@ -66,6 +88,7 @@ router.post('/', auth, requireRole(['admin', 'superadmin']), async (req, res) =>
     };
 
     if (req.user.role === 'superadmin') {
+      // Le superadmin peut choisir le mode et la/les communes
       if (visibility && ['local','global','custom'].includes(visibility)) {
         base.visibility = visibility;
       }
@@ -74,16 +97,17 @@ router.post('/', auth, requireRole(['admin', 'superadmin']), async (req, res) =>
         if (!base.communeId) {
           return res.status(400).json({ message: 'communeId requis pour visibility=local' });
         }
+        base.audienceCommunes = [];
       } else if (base.visibility === 'custom') {
         const arr = Array.isArray(audienceCommunes) ? audienceCommunes : [];
-        base.audienceCommunes = arr.map((s) => String(s || '').trim().toLowerCase()).filter(Boolean);
+        base.audienceCommunes = arr.map((s) => normCid(s)).filter(Boolean);
         base.communeId = '';
       } else if (base.visibility === 'global') {
         base.communeId = '';
         base.audienceCommunes = [];
       }
     } else {
-      // Admin: forcé en local sur sa commune
+      // Admin: forcé en local sur SA commune
       if (!base.communeId) {
         return res.status(403).json({ message: 'Votre compte n’est pas rattaché à une commune' });
       }
@@ -97,25 +121,22 @@ router.post('/', auth, requireRole(['admin', 'superadmin']), async (req, res) =>
   }
 });
 
-/* ----------------- MARK ALL READ (public, multi-commune) ----------------- */
+/* ============== MARK ALL READ (public, multi-commune) ============== */
 router.patch('/mark-all-read', async (req, res) => {
   try {
-    const bodyCid   = normCid(req.body?.communeId || '');
-    const headerCid = normCid(req.header('x-commune-id') || '');
-    const queryCid  = normCid(req.query?.communeId || '');
-    const communeId = bodyCid || headerCid || queryCid || '';
+    const fromBody   = normCid(req.body?.communeId || '');
+    const fromHeader = normCid(req.header('x-commune-id') || req.header('x-commune') || req.header('x-communeid') || '');
+    const fromQuery  = normCid(req.query?.communeId || req.query?.commune || '');
+    const communeId  = fromBody || fromHeader || fromQuery || '';
 
-    let filter = {};
+    // Filtre simple: toutes les notifs visibles pour cette commune
+    const orClauses = [{ visibility: 'global' }];
     if (communeId) {
-      filter = buildVisibilityQuery({
-        communeId,
-        userRole: null,        // public
-        includeLegacy: true,
-        includeTimeWindow: false,
-      }) || {};
+      orClauses.push({ visibility: 'local',  communeId });
+      orClauses.push({ visibility: 'custom', audienceCommunes: { $in: [communeId] } });
     }
 
-    const result = await Notification.updateMany(filter, { $set: { isRead: true } });
+    const result = await Notification.updateMany({ $or: orClauses }, { $set: { isRead: true } });
     res.json({
       message: 'Notifications marquées comme lues.',
       matched: result?.matchedCount ?? undefined,
@@ -127,7 +148,7 @@ router.patch('/mark-all-read', async (req, res) => {
   }
 });
 
-/* ------------------------ UPDATE ------------------------- */
+/* =========================== UPDATE =========================== */
 router.patch('/:id', auth, requireRole(['admin','superadmin']), async (req, res) => {
   const { id } = req.params;
   if (!mongoose.Types.ObjectId.isValid(id)) {
@@ -174,7 +195,7 @@ router.patch('/:id', auth, requireRole(['admin','superadmin']), async (req, res)
         } else if (visibility === 'custom') {
           payload.communeId = '';
           const arr = Array.isArray(audienceCommunes) ? audienceCommunes : [];
-          payload.audienceCommunes = arr.map((s) => String(s || '').trim().toLowerCase()).filter(Boolean);
+          payload.audienceCommunes = arr.map((s) => normCid(s)).filter(Boolean);
         } else if (visibility === 'global') {
           payload.communeId = '';
           payload.audienceCommunes = [];
@@ -190,7 +211,7 @@ router.patch('/:id', auth, requireRole(['admin','superadmin']), async (req, res)
   }
 });
 
-/* ------------------------ DELETE ------------------------- */
+/* =========================== DELETE =========================== */
 router.delete('/:id', auth, requireRole(['admin','superadmin']), async (req, res) => {
   const { id } = req.params;
   if (!mongoose.Types.ObjectId.isValid(id)) {
@@ -215,37 +236,49 @@ router.delete('/:id', auth, requireRole(['admin','superadmin']), async (req, res
   }
 });
 
-/* ------------------------- LIST -------------------------- */
+/* ============================ LIST ============================ */
 router.get('/', optionalAuth, async (req, res) => {
   try {
     const { period } = req.query;
 
-    const headerCid = normCid(req.header('x-commune-id') || '');
-    const queryCid  = normCid(req.query.communeId || '');
-    const communeId = headerCid || queryCid || '';
-
+    const communeId = getCommuneIdFromReq(req);  // 🔧 robustesse accrue
     const role = req.user?.role || null;
     const isPanel = role === 'admin' || role === 'superadmin';
 
-    const filter = buildVisibilityQuery({
-      communeId,
-      userRole: role,
-      includeLegacy: true,
-      // includeTimeWindow: false -> on gère ci-dessous (public seulement)
-    }) || {};
+    // --------- Filtre VISIBILITÉ (robuste, sans dépendre d’un utilitaire) ---------
+    // Toujours inclure les globales
+    const orClauses = [{ visibility: 'global' }];
 
-    // Fenêtre d'affichage : uniquement pour le public (pas admin/superadmin)
+    // Si une commune est fournie, inclure les locales de cette commune et les customs ciblant cette commune
+    if (communeId) {
+      orClauses.push({ visibility: 'local',  communeId });
+      orClauses.push({ visibility: 'custom', audienceCommunes: { $in: [communeId] } });
+    }
+
+    // (Optionnel) Support legacy: anciennes notifs sans "visibility"
+    // On les considère locales si leur communeId matche, sinon "globales" par défaut
+    orClauses.push({
+      $and: [
+        { $or: [{ visibility: { $exists: false } }, { visibility: null }] },
+        communeId
+          ? { $or: [{ communeId }, { audienceCommunes: { $in: [communeId] } }, { commune: communeId }] }
+          : {},
+      ].filter(Boolean),
+    });
+
+    const filter = { $or: orClauses };
+
+    // --------- Fenêtre temporelle : seulement pour public ---------
     if (!isPanel) {
       const now = new Date();
-      const timeClauses = [
+      const andTime = [
         { $or: [{ startAt: { $exists: false } }, { startAt: null }, { startAt: { $lte: now } }] },
         { $or: [{ endAt:   { $exists: false } }, { endAt:   null }, { endAt:   { $gte: now } }] },
       ];
-      if (filter.$and) filter.$and.push(...timeClauses);
-      else filter.$and = timeClauses;
+      filter.$and = andTime;
     }
 
-    // Période
+    // --------- Période (7/30 jours) ---------
     if (period === '7' || period === '30') {
       const days = parseInt(period, 10);
       const fromDate = new Date();
@@ -253,9 +286,14 @@ router.get('/', optionalAuth, async (req, res) => {
       filter.createdAt = Object.assign(filter.createdAt || {}, { $gte: fromDate });
     }
 
-    // Admin simple : ne voir QUE ses propres notifications (pour le panel)
-    if (role === 'admin' && req.user?.id) {
-      filter.authorId = String(req.user.id);
+    // --------- Panel admin: limiter à sa commune (mais pas aux seules notifs qu’il a créées)
+    if (role === 'admin' && req.user?.communeId) {
+      const cid = normCid(req.user.communeId);
+      filter.$or = [
+        { visibility: 'global' },
+        { visibility: 'local',  communeId: cid },
+        { visibility: 'custom', audienceCommunes: { $in: [cid] } },
+      ];
     }
 
     const docs = await Notification.find(filter)
@@ -269,12 +307,13 @@ router.get('/', optionalAuth, async (req, res) => {
   }
 });
 
-/* ------------------------- SEED -------------------------- */
+/* ============================ SEED ============================ */
 router.post('/seed', async (_req, res) => {
   try {
     const n = await Notification.create({
       title: 'Notification de test',
       message: '🔔 Ceci est une notification de test.',
+      visibility: 'global',
     });
     res.status(201).json(n);
   } catch (err) {
