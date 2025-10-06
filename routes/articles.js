@@ -1,4 +1,3 @@
-// backend/routes/articles.js
 const express = require('express');
 const router = express.Router();
 const multer = require('multer');
@@ -9,7 +8,7 @@ const jwt = require('jsonwebtoken');
 const Article = require('../models/Article');
 const Commune = require('../models/Commune');
 const auth = require('../middleware/authMiddleware');
-// Conservé pour compat descendante (non obligatoire ici)
+// Gardé (même si non utilisé partout) pour compat descendante
 const { buildVisibilityQuery } = require('../utils/visibility');
 
 // ⚙️ Storage conforme à utils/cloudinary.js (Cloudinary ou disque)
@@ -61,7 +60,7 @@ function optionalAuth(req, _res, next) {
   if (authz.startsWith('Bearer ')) {
     const token = authz.slice(7).trim();
     try {
-      const payload = jwt.verify(token, process.env.JWT_SECRET);
+      const payload = jwt.verify(token, process.env.JWT_SECRET || 'dev-secret');
       req.user = {
         role: payload.role,
         communeId: payload.communeId || '',
@@ -128,7 +127,6 @@ router.post('/', auth, upload.single('image'), async (req, res) => {
     };
 
     if (req.user.role === 'superadmin') {
-      // Superadmin peut choisir la visibilité
       if (visibility && ['local', 'global', 'custom'].includes(visibility)) {
         base.visibility = visibility;
       }
@@ -159,11 +157,11 @@ router.post('/', auth, upload.single('image'), async (req, res) => {
         base.audienceCommunes = [];
       }
     } else {
-      // admin simple : VISIBILITÉ FORCÉE À LOCAL, sur SA commune
+      // admin simple
       if (!base.communeId) {
         return res.status(403).json({ message: 'Votre compte n’est pas rattaché à une commune' });
       }
-      base.visibility = 'local';
+      base.visibility = 'local'; // un admin ne peut publier que pour SA commune
     }
 
     const doc = await Article.create(base);
@@ -192,20 +190,21 @@ router.get('/', auth, async (req, res) => {
     let filter = {};
 
     if (role === 'admin') {
-      // 🔒 Un admin ne voit QUE ses propres articles, et seulement ceux qui
-      // concernent sa commune (local) ou le ciblent via custom.
-      const meId = String(req.user.id || '');
+      // admin : SEULEMENT ses propres articles ET scoping commune
       const baseCid = headerCid || queryCid || (req.user.communeId || '');
       const { list: ids } = await communeKeys(baseCid);
-
       if (!ids.length) return res.json([]); // pas de commune => pas d’articles
 
       filter = {
-        authorId: meId,
-        $or: [
-          { visibility: 'local', communeId: { $in: ids } },
-          { visibility: 'custom', audienceCommunes: { $in: ids } },
-          // Pas de 'global' pour les admins (ils n'en créent pas)
+        $and: [
+          { authorId: String(req.user.id) }, // 👈 ne voir QUE ses propres articles
+          {
+            $or: [
+              { visibility: 'local', communeId: { $in: ids } },
+              { visibility: 'custom', audienceCommunes: { $in: ids } },
+              { visibility: 'global' }, // au cas où (normalement les admins ne créent pas de global)
+            ],
+          },
         ],
       };
     } else if (role === 'superadmin') {
@@ -331,21 +330,25 @@ router.get('/:id', optionalAuth, async (req, res) => {
     const role = req.user?.role || null;
     const isPanel = role === 'admin' || role === 'superadmin';
 
-    if (isPanel) {
-      // 🛡️ Panel : si admin, ne peut voir QUE ses propres articles
-      if (role === 'admin') {
-        if (String(doc.authorId || '') !== String(req.user?.id || '')) {
-          return res.status(404).json({ message: 'Article introuvable' });
-        }
+    // 🔒 Panel : un ADMIN ne peut lire que ses propres articles
+    if (role === 'admin') {
+      if (String(doc.authorId || '') !== String(req.user?.id || '')) {
+        // 404 volontaire pour ne pas révéler l’existence
+        return res.status(404).json({ message: 'Article introuvable' });
       }
       return res.json(doc);
     }
 
-    // Public: contrôle d’accès par commune + statut/temps
-    const rawCid = (req.header('x-commune-id') || req.query.communeId || '')
-      .trim()
-      .toLowerCase();
-    const { list: ids } = await communeKeys(rawCid);
+    // Superadmin : accès total
+    if (role === 'superadmin') {
+      return res.json(doc);
+    }
+
+    // Public (pas de token admin/superadmin) : vérifier la fenêtre & le ciblage de commune
+    const headerCid = (req.header('x-commune-id') || '').trim().toLowerCase();
+    const queryCid = (req.query.communeId || '').trim().toLowerCase();
+    const { list: ids } = await communeKeys(headerCid || queryCid);
+
     const now = new Date();
     const okStart = !doc.startAt || doc.startAt <= now;
     const okEnd = !doc.endAt || doc.endAt >= now;
