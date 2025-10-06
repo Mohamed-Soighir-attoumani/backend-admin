@@ -234,8 +234,8 @@ router.get('/admins', auth, requireRole('superadmin'), async (req, res) => {
   }
 });
 
-/* ===================== CRÉATION ADMIN ===================== */
-router.post('/admins', auth, requireRole('superadmin'), async (req, res) => {
+/* ===================== CRÉATION ADMIN — cœur réutilisable ===================== */
+async function createAdminCore(req, res) {
   try {
     let { email, password, name, communeId, communeName, photo, createdBy } = req.body || {};
     email = norm(email);
@@ -243,7 +243,7 @@ router.post('/admins', auth, requireRole('superadmin'), async (req, res) => {
       return res.status(400).json({ message: 'Email et mot de passe requis' });
     }
 
-    // 1) S’assurer que la commune existe (création auto + active:true)
+    // 1) Commune obligatoire, création auto si absente
     const rawCommuneInput = communeId || communeName;
     if (!rawCommuneInput) {
       return res.status(400).json({ message: 'Commune obligatoire pour un compte admin.' });
@@ -257,7 +257,7 @@ router.post('/admins', auth, requireRole('superadmin'), async (req, res) => {
 
     // 2) Tentative de création directe
     const basePayload = {
-      email, // on tente d’abord l’email “nu”
+      email, // tentative d'abord avec l'email nu
       password: passwordHash,
       name: name || '',
       role: 'admin',
@@ -283,7 +283,7 @@ router.post('/admins', auth, requireRole('superadmin'), async (req, res) => {
     } catch (err) {
       if (!isDupError(err)) throw err;
 
-      // S’il y a un doublon et que c’est l’email → on alias et on retente
+      // Conflit d'email => générer un alias et réessayer
       const dupOnEmail =
         (err.keyPattern && err.keyPattern.email) ||
         (err.keyValue && typeof err.keyValue.email !== 'undefined') ||
@@ -337,95 +337,19 @@ router.post('/admins', auth, requireRole('superadmin'), async (req, res) => {
       mode: 'created',
     });
   } catch (err) {
-    console.error('❌ POST /api/admins', err);
+    console.error('❌ POST createAdminCore', err);
     return res.status(500).json({ message: 'Erreur serveur' });
   }
+}
+
+/* ===================== CRÉATION ADMIN (route principale) ===================== */
+router.post('/admins', auth, requireRole('superadmin'), async (req, res) => {
+  return createAdminCore(req, res);
 });
 
-/* ===================== (compat) CRÉATION via /users — impl directe, plus de reroutage ===================== */
+/* ===================== (compat) CRÉATION via /users — appel du même core ===================== */
 router.post('/users', auth, requireRole('superadmin'), async (req, res) => {
-  try {
-    let { email, password, name, communeId, communeName, photo, createdBy } = req.body || {};
-    email = norm(email);
-    if (!email || !password) {
-      return res.status(400).json({ message: 'Email et mot de passe requis' });
-    }
-
-    const rawCommuneInput = communeId || communeName;
-    if (!rawCommuneInput) {
-      return res.status(400).json({ message: 'Commune obligatoire pour un compte admin.' });
-    }
-    const canon = await ensureCanonicalCommune(rawCommuneInput);
-    if (!canon.key) {
-      return res.status(400).json({ message: 'Commune invalide.' });
-    }
-
-    const passwordHash = await bcrypt.hash(String(password), 10);
-
-    const basePayload = {
-      email,
-      password: passwordHash,
-      name: name || '',
-      role: 'admin',
-      communeId: canon.key,
-      communeName: canon.name || communeName || '',
-      photo: photo || '',
-      createdBy: createdBy ? String(createdBy) : '',
-      isActive: true,
-      subscriptionStatus: 'none',
-      subscriptionEndAt: null,
-      subscriptionPrice: 0,
-      subscriptionCurrency: 'EUR',
-      subscriptionMethod: '',
-    };
-
-    let payload = { ...basePayload };
-    let adminDoc = null;
-
-    const tryCreate = async () => User.create(payload);
-
-    try {
-      adminDoc = await tryCreate();
-    } catch (err) {
-      if (!isDupError(err)) throw err;
-
-      const MAX_RETRY = 4;
-      for (let i = 0; i < MAX_RETRY; i++) {
-        const suffix = i === 0 ? canon.key : `${canon.key}-${i + 1}`;
-        const alias = await buildUniqueAliasEmail(email, suffix);
-        if (!alias) break;
-        payload = { ...basePayload, email: alias };
-        try {
-          adminDoc = await tryCreate();
-          break;
-        } catch (e2) {
-          if (!isDupError(e2)) throw e2;
-        }
-      }
-      if (!adminDoc) {
-        return res.status(409).json({
-          message: 'Email déjà utilisé (alias automatique impossible après plusieurs tentatives).',
-          originalEmail: email,
-        });
-      }
-    }
-
-    const plain = adminDoc.toObject();
-    plain._idString = String(adminDoc._id);
-
-    res.setHeader('Cache-Control', 'no-store');
-    return res.status(201).json({
-      ...plain,
-      emailAliased: plain.email !== email,
-      originalEmail: email,
-      aliasEmail: plain.email,
-      upserted: true,
-      mode: 'created',
-    });
-  } catch (err) {
-    console.error('❌ POST /api/users (compat -> create admin)', err);
-    return res.status(500).json({ message: 'Erreur serveur' });
-  }
+  return createAdminCore(req, res);
 });
 
 /* ===================== MISE À JOUR ADMIN ===================== */
@@ -648,7 +572,8 @@ router.get('/users/:id/invoices', auth, requireRole('superadmin'), async (req, r
     }));
 
     res.setHeader('Cache-Control', 'no-store');
-    res.json({ items: list, total: list.length });
+    // Compat: certains front attendent "invoices", d'autres "items"
+    res.json({ invoices: list, items: list, total: list.length });
   } catch (err) {
     console.error('❌ GET /api/users/:id/invoices', err);
     res.status(500).json({ message: 'Erreur serveur' });
