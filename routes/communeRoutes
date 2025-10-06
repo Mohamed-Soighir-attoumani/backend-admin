@@ -48,7 +48,16 @@ router.get('/', async (req, res) => {
     }
 
     const items = await Commune.find(find)
-      .select({ name: 1, label: 1, communeName: 1, code: 1, region: 1, imageUrl: 1, slug: 1, active: 1 })
+      .select({
+        name: 1,
+        label: 1,
+        communeName: 1,
+        code: 1,
+        region: 1,
+        imageUrl: 1,
+        slug: 1,
+        active: 1,
+      })
       .sort({ name: 1 })
       .lean();
 
