@@ -58,6 +58,17 @@ function publicCanSeeDoc(doc, cid) {
   return false;
 }
 
+// L'admin ne peut modifier/supprimer QUE ses propres infos
+function isAuthorUser(doc, user) {
+  if (!doc || !user) return false;
+  const byId = doc.authorId && String(doc.authorId) === String(user.id);
+  const byEmail =
+    doc.authorEmail &&
+    user.email &&
+    String(doc.authorEmail).trim().toLowerCase() === String(user.email).trim().toLowerCase();
+  return !!(byId || byEmail);
+}
+
 // ───────────────────────── CREATE (panel) ─────────────────────────
 // Autoriser admin ET superadmin + fournir un alias POST /create (évite 404 côté front)
 async function handleCreate(req, res) {
@@ -98,6 +109,9 @@ async function handleCreate(req, res) {
       },
       authorId: req.user.id,
       authorEmail: req.user.email,
+      // Les champs ci-dessous aident le front à distinguer les globales "créées par superadmin"
+      authorRole: req.user.role,                 // sera ignoré si le schéma est strict et ne le prévoit pas
+      createdBySuperadmin: req.user.role === 'superadmin', // idem
     };
 
     // superadmin : peut choisir la portée et la/les communes
@@ -268,14 +282,26 @@ router.patch('/:id', auth, requireRole(['admin','superadmin']), upload.single('i
     const current = await Info.findById(id);
     if (!current) return res.status(404).json({ message: 'Info non trouvée' });
 
-    // Admin : limiter au périmètre de sa commune (pas forcément auteur)
+    // Admin : ne peut modifier QUE ses propres infos et dans le périmètre de sa commune/custom
     if (req.user.role === 'admin') {
-      const sameScope =
-        current.visibility === 'global' ||
-        (current.visibility === 'local'  && normCid(current.communeId) === normCid(req.user.communeId)) ||
-        (current.visibility === 'custom' && Array.isArray(current.audienceCommunes) &&
-         current.audienceCommunes.includes(normCid(req.user.communeId)));
-      if (!sameScope) return res.status(403).json({ message: 'Interdit pour votre commune' });
+      const isAuthor = isAuthorUser(current, req.user);
+      if (!isAuthor) {
+        return res.status(403).json({ message: 'Vous ne pouvez modifier que vos propres informations.' });
+      }
+
+      // Un admin ne modifie jamais une info "global"
+      if (current.visibility === 'global') {
+        return res.status(403).json({ message: 'Modification interdite : visibilité globale (réservé au superadmin).' });
+      }
+
+      const cid = normCid(req.user.communeId);
+      const inScope =
+        (current.visibility === 'local'  && normCid(current.communeId) === cid) ||
+        (current.visibility === 'custom' && Array.isArray(current.audienceCommunes) && current.audienceCommunes.includes(cid));
+
+      if (!inScope) {
+        return res.status(403).json({ message: 'Interdit : cette information ne concerne pas votre commune.' });
+      }
     }
 
     const payload = {};
@@ -343,12 +369,24 @@ router.delete('/:id', auth, requireRole(['admin','superadmin']), async (req, res
     if (!current) return res.status(404).json({ message: 'Info non trouvée' });
 
     if (req.user.role === 'admin') {
-      const sameScope =
-        current.visibility === 'global' ||
-        (current.visibility === 'local'  && normCid(current.communeId) === normCid(req.user.communeId)) ||
-        (current.visibility === 'custom' && Array.isArray(current.audienceCommunes) &&
-         current.audienceCommunes.includes(normCid(req.user.communeId)));
-      if (!sameScope) return res.status(403).json({ message: 'Interdit pour votre commune' });
+      const isAuthor = isAuthorUser(current, req.user);
+      if (!isAuthor) {
+        return res.status(403).json({ message: 'Vous ne pouvez supprimer que vos propres informations.' });
+      }
+
+      // Protection : un admin ne supprime jamais une info "global"
+      if (current.visibility === 'global') {
+        return res.status(403).json({ message: 'Suppression interdite : visibilité globale (réservé au superadmin).' });
+      }
+
+      const cid = normCid(req.user.communeId);
+      const inScope =
+        (current.visibility === 'local'  && normCid(current.communeId) === cid) ||
+        (current.visibility === 'custom' && Array.isArray(current.audienceCommunes) && current.audienceCommunes.includes(cid));
+
+      if (!inScope) {
+        return res.status(403).json({ message: 'Interdit : cette information ne concerne pas votre commune.' });
+      }
     }
 
     await Info.deleteOne({ _id: id });
