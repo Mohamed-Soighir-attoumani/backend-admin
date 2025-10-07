@@ -8,20 +8,27 @@ const articleSchema = new mongoose.Schema(
     content:   { type: String, required: true, trim: true },
     imageUrl:  { type: String, default: null },
 
-    // Catégorie (adapte si besoin : 'annonce', 'actualite', 'evenement'…)
+    // Catégorie
     category:  { type: String, enum: ['annonce', 'actualite', 'evenement', 'autres'], default: 'annonce', index: true },
 
-    // Portée multi-commune (même logique que notifications/infos)
+    // Portée multi-commune
     visibility:       { type: String, enum: ['local', 'global', 'custom'], default: 'local', index: true },
-    communeId:        { type: String, default: '', index: true },          // si local
-    audienceCommunes: { type: [String], default: [], index: true },        // si custom
+    communeId:        { type: String, default: '', index: true },          // si local (slug de préférence)
+    audienceCommunes: { type: [String], default: [], index: true },        // si custom (slugs)
 
     // Fenêtre d’affichage (optionnelle)
     priority: { type: String, enum: ['normal', 'pinned', 'urgent'], default: 'normal', index: true },
     startAt:  { type: Date, default: null, index: true },
     endAt:    { type: Date, default: null, index: true },
 
-    // Auteur
+    // Métadonnées de publication (utilisées dans les routes /public)
+    status:      { type: String, enum: ['draft', 'published'], default: 'published', index: true },
+    publishedAt: { type: Date, default: Date.now, index: true },
+    authorName:  { type: String, default: '' },
+    publisher:   { type: String, default: 'Association Bellevue Dembeni' },
+    sourceUrl:   { type: String, default: '' },
+
+    // Auteur technique (compte)
     authorId:    { type: String, default: '', index: true },
     authorEmail: { type: String, default: '' },
   },
