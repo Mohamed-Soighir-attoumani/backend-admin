@@ -1,7 +1,9 @@
 // backend/routes/communeRoutes.js
 const express = require('express');
 const router = express.Router();
+const mongoose = require('mongoose');
 const Commune = require('../models/Commune');
+const User = require('../models/User'); // ⬅️ nécessaire pour mettre à jour les admins liés
 const auth = require('../middleware/authMiddleware');
 const requireRole = require('../middleware/requireRole');
 
@@ -16,14 +18,47 @@ const slugify = (s = '') =>
     .replace(/^-+|-+$/g, '')
     .replace(/--+/g, '-');
 
+const isValidHex24 = (s) => typeof s === 'string' && /^[a-f0-9]{24}$/i.test(s);
+const norm = (v) => String(v || '').trim().toLowerCase();
+
+/** Recherche robuste d'une commune par id/slug/code/nom */
+async function findCommuneByAny(any) {
+  const raw = String(any || '').trim();
+  if (!raw) return null;
+
+  // 1) ObjectId
+  if (isValidHex24(raw)) {
+    const byId = await Commune.findById(raw).lean();
+    if (byId) return byId;
+  }
+
+  // 2) slug (case-insensitive)
+  let c = await Commune.findOne({ slug: new RegExp(`^${escapeRegExp(raw)}$`, 'i') }).lean();
+  if (c) return c;
+
+  // 3) autres champs uniques éventuels
+  c = await Commune.findOne({ code: new RegExp(`^${escapeRegExp(raw)}$`, 'i') }).lean();
+  if (c) return c;
+
+  // 4) noms
+  const nameFields = ['name', 'label', 'communeName', 'region'];
+  for (const f of nameFields) {
+    c = await Commune.findOne({ [f]: new RegExp(`^${escapeRegExp(raw)}$`, 'i') }).lean();
+    if (c) return c;
+  }
+
+  return null;
+}
+
 /**
  * IMPORTANT
  *  - On NE met PAS "/api" dans les chemins ci-dessous.
  *  - Le préfixe "/api" est ajouté dans server.js via app.use('/api/communes', router)
  *  - Donc:
- *      GET  /api/communes           -> liste publique (app mobile)
- *      GET  /api/communes/admin     -> liste complète (panel superadmin)
- *      POST /api/communes           -> créer une commune (superadmin)
+ *      GET    /api/communes           -> liste publique (app mobile)
+ *      GET    /api/communes/admin     -> liste complète (panel superadmin)
+ *      POST   /api/communes           -> créer une commune (superadmin)
+ *      DELETE /api/communes/:id       -> supprimer une commune (superadmin)
  */
 
 // ========== PUBLIC: liste des communes (utilisé par l’app mobile) ==========
@@ -123,6 +158,35 @@ router.post('/', auth, requireRole('superadmin'), async (req, res) => {
     return res.status(201).json(doc);
   } catch (e) {
     console.error('❌ POST /communes', e);
+    return res.status(500).json({ message: 'Erreur serveur' });
+  }
+});
+
+// ========== ADMIN (superadmin): suppression d’une commune ==========
+router.delete('/:id', auth, requireRole('superadmin'), async (req, res) => {
+  try {
+    const any = req.params.id || req.query.id || (req.body && req.body.id) || '';
+    const doc = await findCommuneByAny(any);
+
+    if (!doc) return res.status(404).json({ message: 'Commune introuvable' });
+
+    const slugKey = norm(doc.slug || doc._id);
+
+    // (optionnel mais conseillé) Met à jour les comptes admin rattachés :
+    // - on désactive le compte
+    // - on nettoie la commune pour éviter les incohérences côté panel
+    await User.updateMany(
+      { role: 'admin', communeId: slugKey },
+      { $set: { isActive: false, communeId: '', communeName: '' } }
+    );
+
+    await Commune.deleteOne({ _id: doc._id });
+
+    res.setHeader('Cache-Control', 'no-store');
+    // 204 = pas de body ; 200 avec JSON si tu veux un message
+    return res.status(200).json({ ok: true, deleted: slugKey });
+  } catch (e) {
+    console.error('❌ DELETE /communes/:id', e);
     return res.status(500).json({ message: 'Erreur serveur' });
   }
 });
