@@ -260,7 +260,8 @@ router.get('/', optionalAuth, async (req, res) => {
   try {
     const { period } = req.query;
     const role = req.user?.role || null;
-    const isPanel = role === 'admin' || role === 'superadmin';
+
+    // commune passée via header/query (fallback quand le JWT n'a pas la commune)
     const rawCid = getCommuneIdFromReq(req);
     const { list: ids } = await communeKeys(rawCid);
 
@@ -276,9 +277,12 @@ router.get('/', optionalAuth, async (req, res) => {
       ];
       // pas de fenêtre temporelle pour le panel
     } else if (role === 'admin') {
-      // 🔒 admin : uniquement SA commune (+ globales), en acceptant slug/Id
-      const { list: myIds } = await communeKeys(req.user.communeId || '');
+      // 🔒 admin : SA commune + globales
+      // ⚠️ FIX: si le JWT n'a pas la commune, on prend celle du header/query
+      const adminBase = req.user?.communeId || rawCid;
+      const { list: myIds } = await communeKeys(adminBase);
       if (!myIds.length) return res.json([]);
+
       filter.$or = [
         { visibility: 'global' },
         { visibility: 'local',  communeId: { $in: myIds } },
@@ -307,6 +311,7 @@ router.get('/', optionalAuth, async (req, res) => {
 
       filter.$or = orClauses;
 
+      // fenêtre temporelle uniquement côté public
       const now = new Date();
       filter.$and = [
         { $or: [{ startAt: { $exists: false } }, { startAt: null }, { startAt: { $lte: now } }] },
