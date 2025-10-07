@@ -9,28 +9,15 @@ const jwt = require('jsonwebtoken');
 const Article = require('../models/Article');
 const Commune = require('../models/Commune');
 const auth = require('../middleware/authMiddleware');
-// Compat descendante (pas forcément utilisé partout)
-let buildVisibilityQuery = null;
-try { ({ buildVisibilityQuery } = require('../utils/visibility')); } catch (_) { /* optional */ }
 
-/* -------------------- Upload: Cloudinary si dispo, sinon fallback -------------------- */
-let upload;
-let USING_CLOUDINARY = false;
-
-try {
-  const cloud = require('../utils/cloudinary'); // doit exporter { storage, hasCloudinary? }
-  const storage = cloud.storage;
-  USING_CLOUDINARY = !!cloud.hasCloudinary;
-  upload = multer({ storage, limits: { fileSize: 10 * 1024 * 1024 } });
-} catch (_) {
-  // Fallback: accepte la requête même sans image (JSON pur) sans casser l’API
-  upload = multer({ storage: multer.memoryStorage() });
-  USING_CLOUDINARY = false;
-}
+// Upload: on s’aligne sur utils/cloudinary (Cloudinary si creds, disque sinon)
+const { storage, hasCloudinary } = require('../utils/cloudinary');
+const upload = multer({ storage, limits: { fileSize: 10 * 1024 * 1024 } });
 
 /* -------------------- Helpers -------------------- */
 
 const norm = (v) => String(v || '').trim().toLowerCase();
+const isValidId = (s) => mongoose.Types.ObjectId.isValid(String(s || ''));
 
 function safeToDate(v) {
   if (!v) return null;
@@ -38,13 +25,12 @@ function safeToDate(v) {
   return isNaN(d.getTime()) ? null : d;
 }
 
-// URL publique du fichier uploadé
+// Transforme le fichier uploadé en URL publique
 function publicUrlFromFile(file) {
   if (!file) return null;
-  // Cloudinary: multer-storage-cloudinary fixe déjà file.path = URL https
-  if (USING_CLOUDINARY && file.path && /^https?:\/\//i.test(file.path)) return file.path;
-
-  // Disque (ou fallback mémoire avec nom de fichier si présent)
+  // Cloudinary: multer-storage-cloudinary donne déjà une URL
+  if (hasCloudinary && file.path && /^https?:\/\//i.test(file.path)) return file.path;
+  // Disque: /uploads/<filename> (server.js sert /uploads)
   const filename = file.filename || path.basename(String(file.path || ''));
   return filename ? `/uploads/${filename}` : null;
 }
@@ -54,8 +40,8 @@ async function communeKeys(anyId) {
   const raw = norm(anyId);
   if (!raw) return { list: [] };
 
-  const s = new Set([raw]); // garder toujours la valeur fournie
-  if (mongoose.Types.ObjectId.isValid(raw)) {
+  const s = new Set([raw]);
+  if (isValidId(raw)) {
     const c = await Commune.findById(raw).lean();
     if (c?.slug) s.add(norm(c.slug));
   } else {
@@ -69,11 +55,18 @@ async function communeKeys(anyId) {
 async function preferSlug(input) {
   const raw = norm(input);
   if (!raw) return '';
-  if (mongoose.Types.ObjectId.isValid(raw)) {
+  if (isValidId(raw)) {
     const c = await Commune.findById(raw).lean();
     return c?.slug ? norm(c.slug) : raw;
   }
   return raw; // déjà un slug
+}
+
+// Catégorie : sécuriser les valeurs
+function normalizeCategory(c) {
+  const v = norm(c);
+  const allowed = ['annonce', 'actualite', 'evenement', 'autres'];
+  return allowed.includes(v) ? v : 'annonce';
 }
 
 // Auth optionnelle (lecture publique de /:id)
@@ -89,22 +82,27 @@ function optionalAuth(req, _res, next) {
         email: payload.email || '',
         id: payload.id ? String(payload.id) : '',
       };
-    } catch (_) {
-      // token invalide → continuer en public
-    }
+    } catch (_) {}
   }
   next();
 }
 
-// Catégorie : sécuriser les valeurs (ton schéma autorise: annonce/actualite/evenement/autres)
-function normalizeCategory(c) {
-  const v = norm(c);
-  const allowed = ['annonce', 'actualite', 'evenement', 'autres'];
-  return allowed.includes(v) ? v : 'annonce';
-}
+/**
+ * Middleware pour capturer proprement les erreurs Multer
+ * (ex: LIMIT_FILE_SIZE -> 413 lisible au lieu d’un 500 générique)
+ */
+const safeSingleImage = (req, res, next) => {
+  upload.single('image')(req, res, (err) => {
+    if (!err) return next();
+    if (err.code === 'LIMIT_FILE_SIZE') {
+      return res.status(413).json({ message: 'Image trop lourde (maximum 10 Mo)' });
+    }
+    return res.status(400).json({ message: `Upload invalide: ${err.message || String(err)}` });
+  });
+};
 
 /* ================== CREATE (panel) ================== */
-router.post('/', auth, upload.single('image'), async (req, res) => {
+router.post('/', auth, safeSingleImage, async (req, res) => {
   try {
     if (!req.user) return res.status(401).json({ message: 'Non authentifié' });
     if (!['admin', 'superadmin'].includes(req.user.role)) {
@@ -134,7 +132,7 @@ router.post('/', auth, upload.single('image'), async (req, res) => {
       category: normalizeCategory(category),
 
       visibility: 'local',
-      communeId: userCid,               // par défaut pour admin
+      communeId: userCid,   // par défaut pour admin
       audienceCommunes: [],
 
       priority: ['normal', 'pinned', 'urgent'].includes(priority) ? priority : 'normal',
@@ -144,7 +142,7 @@ router.post('/', auth, upload.single('image'), async (req, res) => {
       authorId: req.user.id,
       authorEmail: req.user.email,
 
-      // champs facultatifs (schema strict les ignore si absents)
+      // champs de publication
       publishedAt: new Date(),
       authorName: (authorName || '').trim(),
       publisher: (publisher && publisher.trim()) || 'Association Bellevue Dembeni',
@@ -180,7 +178,7 @@ router.post('/', auth, upload.single('image'), async (req, res) => {
       if (!base.communeId) {
         return res.status(403).json({ message: 'Votre compte n’est pas rattaché à une commune' });
       }
-      base.visibility = 'local'; // un admin ne peut publier que pour SA commune
+      base.visibility = 'local';
     }
 
     const doc = await Article.create(base);
@@ -212,7 +210,7 @@ router.get('/', auth, async (req, res) => {
       // admin : SEULEMENT ses articles ET scoping commune
       const baseCid = headerCid || queryCid || (req.user.communeId || '');
       const { list: ids } = await communeKeys(baseCid);
-      if (!ids.length) return res.json([]); // pas de commune => pas d’articles
+      if (!ids.length) return res.json([]);
 
       filter = {
         $and: [
@@ -227,7 +225,6 @@ router.get('/', auth, async (req, res) => {
         ],
       };
     } else if (role === 'superadmin') {
-      // superadmin : si commune précisée => filtrer pour celle-ci ; sinon tout
       if (headerCid || queryCid) {
         const { list: ids } = await communeKeys(headerCid || queryCid);
         filter = {
@@ -238,11 +235,10 @@ router.get('/', auth, async (req, res) => {
           ],
         };
       } else {
-        filter = {}; // toutes les communes
+        filter = {};
       }
     }
 
-    // Période optionnelle (sur createdAt)
     if (period === '7' || period === '30') {
       const days = parseInt(period, 10);
       const fromDate = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
@@ -330,7 +326,7 @@ router.get('/public', async (req, res) => {
 router.get('/:id', optionalAuth, async (req, res) => {
   try {
     const id = String(req.params.id || '').trim();
-    if (!mongoose.Types.ObjectId.isValid(id)) {
+    if (!isValidId(id)) {
       return res.status(400).json({ message: 'ID invalide' });
     }
 
@@ -339,7 +335,7 @@ router.get('/:id', optionalAuth, async (req, res) => {
 
     const role = req.user?.role || null;
 
-    // 🔒 Panel admin: ne peut lire que ses propres articles
+    // Panel admin: ne peut lire que ses propres articles
     if (role === 'admin') {
       if (String(doc.authorId || '') !== String(req.user?.id || '')) {
         return res.status(404).json({ message: 'Article introuvable' });
@@ -358,8 +354,8 @@ router.get('/:id', optionalAuth, async (req, res) => {
     const { list: ids } = await communeKeys(headerCid || queryCid);
 
     const now = new Date();
-    const okStart = !doc.startAt || doc.startAt <= now;
-    const okEnd   = !doc.endAt   || doc.endAt   >= now;
+    const okStart  = !doc.startAt || doc.startAt <= now;
+    const okEnd    = !doc.endAt   || doc.endAt   >= now;
     const okStatus = doc.status === 'published';
 
     let allowed = false;
@@ -384,7 +380,7 @@ router.get('/:id', optionalAuth, async (req, res) => {
 });
 
 /* ================== UPDATE (panel) ================== */
-router.put('/:id', auth, upload.single('image'), async (req, res) => {
+router.put('/:id', auth, safeSingleImage, async (req, res) => {
   try {
     if (!req.user) return res.status(401).json({ message: 'Non authentifié' });
     if (!['admin', 'superadmin'].includes(req.user.role)) {
@@ -392,7 +388,7 @@ router.put('/:id', auth, upload.single('image'), async (req, res) => {
     }
 
     const id = String(req.params.id || '').trim();
-    if (!mongoose.Types.ObjectId.isValid(id)) {
+    if (!isValidId(id)) {
       return res.status(400).json({ message: 'ID invalide' });
     }
 
@@ -408,8 +404,8 @@ router.put('/:id', auth, upload.single('image'), async (req, res) => {
     const payload = {};
     const setIf = (k, v) => { if (v !== undefined) payload[k] = v; };
 
-    if (req.body.title   != null) setIf('title',   String(req.body.title).trim());
-    if (req.body.content != null) setIf('content', String(req.body.content).trim());
+    if (req.body.title    != null) setIf('title',    String(req.body.title).trim());
+    if (req.body.content  != null) setIf('content',  String(req.body.content).trim());
     if (req.body.category != null) setIf('category', normalizeCategory(req.body.category));
 
     if (req.file) setIf('imageUrl', publicUrlFromFile(req.file));
@@ -468,7 +464,7 @@ router.delete('/:id', auth, async (req, res) => {
     }
 
     const id = String(req.params.id || '').trim();
-    if (!mongoose.Types.ObjectId.isValid(id)) {
+    if (!isValidId(id)) {
       return res.status(400).json({ message: 'ID invalide' });
     }
 
