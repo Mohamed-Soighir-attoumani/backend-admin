@@ -5,6 +5,7 @@ const mongoose = require('mongoose');
 const jwt = require('jsonwebtoken');
 
 const Notification = require('../models/Notification');
+const Commune = require('../models/Commune');
 const auth = require('../middleware/authMiddleware');
 const requireRole = require('../middleware/requireRole');
 
@@ -12,9 +13,35 @@ const requireRole = require('../middleware/requireRole');
 let buildVisibilityQuery = null;
 try { ({ buildVisibilityQuery } = require('../utils/visibility')); } catch (_) {}
 
-const normCid = (v) => String(v || '').trim().toLowerCase();
+const norm = (v) => String(v || '').trim().toLowerCase();
 
-/* ======================= Helpers ======================= */
+/* ----------------- Helpers communes (slug <-> ObjectId) ----------------- */
+async function communeKeys(anyId) {
+  const raw = norm(anyId);
+  if (!raw) return { list: [] };
+
+  const s = new Set([raw]); // garder la valeur reçue
+  if (mongoose.Types.ObjectId.isValid(raw)) {
+    const c = await Commune.findById(raw).lean();
+    if (c?.slug) s.add(norm(c.slug));
+  } else {
+    const c = await Commune.findOne({ slug: raw }).lean();
+    if (c?._id) s.add(String(c._id));
+  }
+  return { list: [...s] };
+}
+
+async function preferSlug(input) {
+  const raw = norm(input);
+  if (!raw) return '';
+  if (mongoose.Types.ObjectId.isValid(raw)) {
+    const c = await Commune.findById(raw).lean();
+    return c?.slug ? norm(c.slug) : raw;
+  }
+  return raw; // déjà un slug
+}
+
+/* --------------- Récup communeId (headers, query, user) --------------- */
 function getCommuneIdFromReq(req) {
   const h1 = req.header('x-commune-id');
   const h2 = req.header('x-commune');
@@ -22,10 +49,10 @@ function getCommuneIdFromReq(req) {
   const q1 = req.query?.communeId;
   const q2 = req.query?.commune;
   const u  = req.user?.communeId;
-  return normCid(h1 || h2 || h3 || q1 || q2 || u || '');
+  return norm(h1 || h2 || h3 || q1 || q2 || u || '');
 }
 
-/** Auth optionnelle: si Authorization présent, on essaie d’extraire quelques infos */
+/** Auth optionnelle: si Authorization présent, on essaie d’extraire l’utilisateur */
 function optionalAuth(req, _res, next) {
   const authz = req.header('authorization') || '';
   if (authz.startsWith('Bearer ')) {
@@ -38,7 +65,9 @@ function optionalAuth(req, _res, next) {
         email: payload.email || '',
         id: payload.id ? String(payload.id) : '',
       };
-    } catch { /* token invalide => public */ }
+    } catch {
+      // token invalide => public
+    }
   }
   next();
 }
@@ -60,10 +89,12 @@ router.post('/', auth, requireRole(['admin', 'superadmin']), async (req, res) =>
     priority = ['normal','pinned','urgent'].includes(priority) ? priority : 'normal';
     const toDateOrNull = (v) => (v ? new Date(v) : null);
 
+    // Par défaut (admin simple) : en local sur SA commune (stocké en slug si possible)
     const base = {
-      title, message,
+      title,
+      message,
       visibility: 'local',
-      communeId: normCid(req.user.communeId || ''),
+      communeId: await preferSlug(req.user.communeId || ''),
       audienceCommunes: [],
       priority,
       startAt: toDateOrNull(startAt),
@@ -77,15 +108,16 @@ router.post('/', auth, requireRole(['admin', 'superadmin']), async (req, res) =>
         base.visibility = visibility;
       }
       if (base.visibility === 'local') {
-        base.communeId = normCid(communeId);
+        base.communeId = await preferSlug(communeId || '');
         if (!base.communeId) {
           return res.status(400).json({ message: 'communeId requis pour visibility=local' });
         }
-        base.audienceCommunes = [];
       } else if (base.visibility === 'custom') {
-        const arr = Array.isArray(audienceCommunes) ? audienceCommunes : [];
-        base.audienceCommunes = arr.map((s) => normCid(s)).filter(Boolean);
         base.communeId = '';
+        const arr = Array.isArray(audienceCommunes) ? audienceCommunes : [];
+        base.audienceCommunes = (
+          await Promise.all(arr.map(preferSlug))
+        ).map(norm).filter(Boolean);
       } else if (base.visibility === 'global') {
         base.communeId = '';
         base.audienceCommunes = [];
@@ -107,15 +139,16 @@ router.post('/', auth, requireRole(['admin', 'superadmin']), async (req, res) =>
 /* ============== MARK ALL READ (public, multi-commune) ============== */
 router.patch('/mark-all-read', async (req, res) => {
   try {
-    const fromBody   = normCid(req.body?.communeId || '');
-    const fromHeader = normCid(req.header('x-commune-id') || req.header('x-commune') || req.header('x-communeid') || '');
-    const fromQuery  = normCid(req.query?.communeId || req.query?.commune || '');
-    const communeId  = fromBody || fromHeader || fromQuery || '';
+    const cidRaw =
+      norm(req.body?.communeId || '') ||
+      norm(req.header('x-commune-id') || req.header('x-commune') || req.header('x-communeid') || '') ||
+      norm(req.query?.communeId || req.query?.commune || '');
+    const { list: ids } = await communeKeys(cidRaw);
 
     const orClauses = [{ visibility: 'global' }];
-    if (communeId) {
-      orClauses.push({ visibility: 'local',  communeId });
-      orClauses.push({ visibility: 'custom', audienceCommunes: { $in: [communeId] } });
+    if (ids.length) {
+      orClauses.push({ visibility: 'local',  communeId: { $in: ids } });
+      orClauses.push({ visibility: 'custom', audienceCommunes: { $in: ids } });
     }
 
     const result = await Notification.updateMany({ $or: orClauses }, { $set: { isRead: true } });
@@ -142,7 +175,10 @@ router.patch('/:id', auth, requireRole(['admin','superadmin']), async (req, res)
     if (!current) return res.status(404).json({ message: 'Notification non trouvée' });
 
     if (req.user.role === 'admin') {
-      if (current.visibility !== 'local' || current.communeId !== normCid(req.user.communeId || '')) {
+      // Admin : modif seulement si local et pour SA commune (en tenant compte du format)
+      const { list: myIds } = await communeKeys(req.user.communeId || '');
+      const isMine = current.visibility === 'local' && myIds.includes(norm(current.communeId));
+      if (!isMine) {
         return res.status(403).json({ message: 'Interdit pour votre commune' });
       }
     }
@@ -166,7 +202,7 @@ router.patch('/:id', auth, requireRole(['admin','superadmin']), async (req, res)
       if (visibility && ['local','global','custom'].includes(visibility)) {
         payload.visibility = visibility;
         if (visibility === 'local') {
-          payload.communeId = normCid(communeId);
+          payload.communeId = await preferSlug(communeId || '');
           payload.audienceCommunes = [];
           if (!payload.communeId) {
             return res.status(400).json({ message: 'communeId requis pour visibility=local' });
@@ -174,7 +210,9 @@ router.patch('/:id', auth, requireRole(['admin','superadmin']), async (req, res)
         } else if (visibility === 'custom') {
           payload.communeId = '';
           const arr = Array.isArray(audienceCommunes) ? audienceCommunes : [];
-          payload.audienceCommunes = arr.map((s) => normCid(s)).filter(Boolean);
+          payload.audienceCommunes = (
+            await Promise.all(arr.map(preferSlug))
+          ).map(norm).filter(Boolean);
         } else if (visibility === 'global') {
           payload.communeId = '';
           payload.audienceCommunes = [];
@@ -202,7 +240,9 @@ router.delete('/:id', auth, requireRole(['admin','superadmin']), async (req, res
     if (!current) return res.status(404).json({ message: 'Notification non trouvée' });
 
     if (req.user.role === 'admin') {
-      if (current.visibility !== 'local' || current.communeId !== normCid(req.user.communeId || '')) {
+      const { list: myIds } = await communeKeys(req.user.communeId || '');
+      const isMine = current.visibility === 'local' && myIds.includes(norm(current.communeId));
+      if (!isMine) {
         return res.status(403).json({ message: 'Interdit pour votre commune' });
       }
     }
@@ -221,46 +261,47 @@ router.get('/', optionalAuth, async (req, res) => {
     const { period } = req.query;
     const role = req.user?.role || null;
     const isPanel = role === 'admin' || role === 'superadmin';
-    const communeId = getCommuneIdFromReq(req);
+    const rawCid = getCommuneIdFromReq(req);
+    const { list: ids } = await communeKeys(rawCid);
 
     let filter = {};
 
     if (role === 'superadmin') {
-      // 🔓 Superadmin : TOUTES communes (sans filtrer sur communeId)
+      // 🔓 superadmin : tout (global/local/custom + legacy)
       filter.$or = [
         { visibility: 'global' },
-        { visibility: 'local'  },
+        { visibility: 'local'  }, // toutes communes
         { visibility: 'custom' },
         { $and: [{ $or: [{ visibility: { $exists: false } }, { visibility: null }] }] }, // legacy
       ];
       // pas de fenêtre temporelle pour le panel
     } else if (role === 'admin') {
-      // 🔒 Admin : seulement SA commune (+ globales)
-      const cid = normCid(req.user.communeId || '');
-      if (!cid) return res.json([]);
+      // 🔒 admin : uniquement SA commune (+ globales), en acceptant slug/Id
+      const { list: myIds } = await communeKeys(req.user.communeId || '');
+      if (!myIds.length) return res.json([]);
       filter.$or = [
         { visibility: 'global' },
-        { visibility: 'local',  communeId: cid },
-        { visibility: 'custom', audienceCommunes: { $in: [cid] } },
+        { visibility: 'local',  communeId: { $in: myIds } },
+        { visibility: 'custom', audienceCommunes: { $in: myIds } },
         {
           $and: [
-            { $or: [{ visibility: { $exists: false } }, { visibility: null }] }, // legacy
-            { $or: [{ communeId: cid }, { audienceCommunes: { $in: [cid] } }, { commune: cid }] },
+            { $or: [{ visibility: { $exists: false } }, { visibility: null }] },
+            { $or: [{ communeId: { $in: myIds } }, { audienceCommunes: { $in: myIds } }, { commune: { $in: myIds } }] },
           ],
         },
       ];
       // pas de fenêtre temporelle pour le panel
     } else {
-      // 🌐 Public (ou sans token) : global + ciblées sur communeId, dans la fenêtre d’affichage
+      // 🌐 public (non authentifié)
       const orClauses = [{ visibility: 'global' }];
-      if (communeId) {
-        orClauses.push({ visibility: 'local',  communeId });
-        orClauses.push({ visibility: 'custom', audienceCommunes: { $in: [communeId] } });
+      if (ids.length) {
+        orClauses.push({ visibility: 'local',  communeId: { $in: ids } });
+        orClauses.push({ visibility: 'custom', audienceCommunes: { $in: ids } });
       }
       orClauses.push({
         $and: [
           { $or: [{ visibility: { $exists: false } }, { visibility: null }] }, // legacy
-          communeId ? { $or: [{ communeId }, { audienceCommunes: { $in: [communeId] } }, { commune: communeId }] } : {},
+          ids.length ? { $or: [{ communeId: { $in: ids } }, { audienceCommunes: { $in: ids } }, { commune: { $in: ids } }] } : {},
         ].filter(Boolean),
       });
 
@@ -273,7 +314,7 @@ router.get('/', optionalAuth, async (req, res) => {
       ];
     }
 
-    // Période (7 ou 30 derniers jours)
+    // Période (7/30 jours)
     if (period === '7' || period === '30') {
       const days = parseInt(period, 10);
       const fromDate = new Date();
