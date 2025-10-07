@@ -1,3 +1,4 @@
+// backend/routes/articles.js
 const express = require('express');
 const router = express.Router();
 const multer = require('multer');
@@ -8,35 +9,56 @@ const jwt = require('jsonwebtoken');
 const Article = require('../models/Article');
 const Commune = require('../models/Commune');
 const auth = require('../middleware/authMiddleware');
-// Gardé (même si non utilisé partout) pour compat descendante
-const { buildVisibilityQuery } = require('../utils/visibility');
+// Compat descendante (pas forcément utilisé partout)
+let buildVisibilityQuery = null;
+try { ({ buildVisibilityQuery } = require('../utils/visibility')); } catch (_) { /* optional */ }
 
-// ⚙️ Storage conforme à utils/cloudinary.js (Cloudinary ou disque)
-const { storage, hasCloudinary } = require('../utils/cloudinary');
-const upload = multer({ storage, limits: { fileSize: 10 * 1024 * 1024 } });
+/* -------------------- Upload: Cloudinary si dispo, sinon fallback -------------------- */
+let upload;
+let USING_CLOUDINARY = false;
+
+try {
+  const cloud = require('../utils/cloudinary'); // doit exporter { storage, hasCloudinary? }
+  const storage = cloud.storage;
+  USING_CLOUDINARY = !!cloud.hasCloudinary;
+  upload = multer({ storage, limits: { fileSize: 10 * 1024 * 1024 } });
+} catch (_) {
+  // Fallback: accepte la requête même sans image (JSON pur) sans casser l’API
+  upload = multer({ storage: multer.memoryStorage() });
+  USING_CLOUDINARY = false;
+}
 
 /* -------------------- Helpers -------------------- */
 
-// Transforme le fichier uploadé en URL publique
+const norm = (v) => String(v || '').trim().toLowerCase();
+
+function safeToDate(v) {
+  if (!v) return null;
+  const d = new Date(v);
+  return isNaN(d.getTime()) ? null : d;
+}
+
+// URL publique du fichier uploadé
 function publicUrlFromFile(file) {
   if (!file) return null;
-  if (hasCloudinary) return file.path; // Cloudinary: déjà une URL https
-  const filename = file.filename || path.basename(file.path || '');
-  return filename ? `/uploads/${filename}` : null; // Disque: /uploads/... (server.js doit servir ce dossier)
+  // Cloudinary: multer-storage-cloudinary fixe déjà file.path = URL https
+  if (USING_CLOUDINARY && file.path && /^https?:\/\//i.test(file.path)) return file.path;
+
+  // Disque (ou fallback mémoire avec nom de fichier si présent)
+  const filename = file.filename || path.basename(String(file.path || ''));
+  return filename ? `/uploads/${filename}` : null;
 }
 
 // Normalise et rassemble les clés possibles d’une commune (slug <-> ObjectId)
 async function communeKeys(anyId) {
-  const raw = (anyId ?? '').toString().trim().toLowerCase();
+  const raw = norm(anyId);
   if (!raw) return { list: [] };
 
-  const s = new Set([raw]); // on garde toujours la valeur fournie
+  const s = new Set([raw]); // garder toujours la valeur fournie
   if (mongoose.Types.ObjectId.isValid(raw)) {
-    // raw est un ObjectId → récupérer le slug
     const c = await Commune.findById(raw).lean();
-    if (c?.slug) s.add(String(c.slug).trim().toLowerCase());
+    if (c?.slug) s.add(norm(c.slug));
   } else {
-    // raw est un slug → récupérer le _id
     const c = await Commune.findOne({ slug: raw }).lean();
     if (c?._id) s.add(String(c._id).toLowerCase());
   }
@@ -44,12 +66,12 @@ async function communeKeys(anyId) {
 }
 
 // Préférer stocker le slug quand on crée/maj un article
-async function preferSlug(rawIdOrSlug) {
-  const raw = (rawIdOrSlug ?? '').toString().trim().toLowerCase();
+async function preferSlug(input) {
+  const raw = norm(input);
   if (!raw) return '';
   if (mongoose.Types.ObjectId.isValid(raw)) {
     const c = await Commune.findById(raw).lean();
-    return c?.slug ? String(c.slug).trim().toLowerCase() : raw;
+    return c?.slug ? norm(c.slug) : raw;
   }
   return raw; // déjà un slug
 }
@@ -68,10 +90,17 @@ function optionalAuth(req, _res, next) {
         id: payload.id ? String(payload.id) : '',
       };
     } catch (_) {
-      // token invalide → ignorer
+      // token invalide → continuer en public
     }
   }
   next();
+}
+
+// Catégorie : sécuriser les valeurs (ton schéma autorise: annonce/actualite/evenement/autres)
+function normalizeCategory(c) {
+  const v = norm(c);
+  const allowed = ['annonce', 'actualite', 'evenement', 'autres'];
+  return allowed.includes(v) ? v : 'annonce';
 }
 
 /* ================== CREATE (panel) ================== */
@@ -84,45 +113,42 @@ router.post('/', auth, upload.single('image'), async (req, res) => {
 
     const {
       title, content, visibility, communeId, priority, startAt, endAt,
-      authorName, publisher, sourceUrl, status
+      authorName, publisher, sourceUrl, status, category
     } = req.body || {};
 
     if (!title || !content) {
       return res.status(400).json({ message: 'Titre et contenu requis' });
     }
 
-    let imageUrl = req.body.imageUrl || null;
-    if (req.file) imageUrl = publicUrlFromFile(req.file);
-
-    const toDateOrNull = (v) => (v ? new Date(v) : null);
+    const imageUrl = req.file ? publicUrlFromFile(req.file) : (req.body.imageUrl || null);
 
     // Stockage canonique de la commune (slug si possible)
-    const userCidRaw = (req.user?.communeId || '').toString().trim().toLowerCase();
-    const bodyCidRaw = (communeId || '').toString().trim().toLowerCase();
-    const userCid = await preferSlug(userCidRaw);
-    const bodyCid = await preferSlug(bodyCidRaw);
+    const userCid = await preferSlug(req.user?.communeId || '');
+    const bodyCid = await preferSlug(communeId || '');
 
     const base = {
       title: String(title).trim(),
       content: String(content).trim(),
       imageUrl: imageUrl || null,
 
+      category: normalizeCategory(category),
+
       visibility: 'local',
-      communeId: userCid, // par défaut pour admin
+      communeId: userCid,               // par défaut pour admin
       audienceCommunes: [],
 
       priority: ['normal', 'pinned', 'urgent'].includes(priority) ? priority : 'normal',
-      startAt: toDateOrNull(startAt),
-      endAt: toDateOrNull(endAt),
+      startAt: safeToDate(startAt),
+      endAt:   safeToDate(endAt),
 
       authorId: req.user.id,
       authorEmail: req.user.email,
 
+      // champs facultatifs (schema strict les ignore si absents)
       publishedAt: new Date(),
       authorName: (authorName || '').trim(),
       publisher: (publisher && publisher.trim()) || 'Association Bellevue Dembeni',
-      sourceUrl:
-        typeof sourceUrl === 'string' && /^https?:\/\//i.test(sourceUrl) ? sourceUrl : '',
+      sourceUrl: (typeof sourceUrl === 'string' && /^https?:\/\//i.test(sourceUrl)) ? sourceUrl : '',
       status: status === 'draft' ? 'draft' : 'published',
     };
 
@@ -137,20 +163,13 @@ router.post('/', auth, upload.single('image'), async (req, res) => {
         }
       } else if (base.visibility === 'custom') {
         base.communeId = '';
-        const raw = req.body.audienceCommunes ?? req.body['audienceCommunes[]'] ?? [];
-        let arr = raw;
+        let raw = req.body.audienceCommunes ?? req.body['audienceCommunes[]'] ?? [];
         if (typeof raw === 'string') {
-          try {
-            const j = JSON.parse(raw);
-            arr = Array.isArray(j) ? j : raw.split(',');
-          } catch {
-            arr = raw.split(',');
-          }
+          try { const j = JSON.parse(raw); raw = Array.isArray(j) ? j : raw.split(','); }
+          catch { raw = raw.split(','); }
         }
-        base.audienceCommunes = Array.isArray(arr)
-          ? (await Promise.all(arr.map(preferSlug)))
-              .map((s) => s.trim().toLowerCase())
-              .filter(Boolean)
+        base.audienceCommunes = Array.isArray(raw)
+          ? (await Promise.all(raw.map(preferSlug))).map(norm).filter(Boolean)
           : [];
       } else if (base.visibility === 'global') {
         base.communeId = '';
@@ -168,7 +187,7 @@ router.post('/', auth, upload.single('image'), async (req, res) => {
     res.status(201).json(doc);
   } catch (err) {
     console.error('❌ POST /articles', err);
-    res.status(500).json({ message: 'Erreur serveur' });
+    res.status(500).json({ message: err?.message || 'Erreur interne du serveur' });
   }
 });
 
@@ -184,25 +203,25 @@ router.get('/', auth, async (req, res) => {
     const role = req.user.role;
 
     // commune depuis header ou query (priorité au header)
-    const headerCid = (req.header('x-commune-id') || '').trim().toLowerCase();
-    const queryCid = (req.query.communeId || '').trim().toLowerCase();
+    const headerCid = norm(req.header('x-commune-id') || '');
+    const queryCid  = norm(req.query.communeId || '');
 
     let filter = {};
 
     if (role === 'admin') {
-      // admin : SEULEMENT ses propres articles ET scoping commune
+      // admin : SEULEMENT ses articles ET scoping commune
       const baseCid = headerCid || queryCid || (req.user.communeId || '');
       const { list: ids } = await communeKeys(baseCid);
       if (!ids.length) return res.json([]); // pas de commune => pas d’articles
 
       filter = {
         $and: [
-          { authorId: String(req.user.id) }, // 👈 ne voir QUE ses propres articles
+          { authorId: String(req.user.id) },
           {
             $or: [
-              { visibility: 'local', communeId: { $in: ids } },
+              { visibility: 'local',  communeId: { $in: ids } },
               { visibility: 'custom', audienceCommunes: { $in: ids } },
-              { visibility: 'global' }, // au cas où (normalement les admins ne créent pas de global)
+              { visibility: 'global' },
             ],
           },
         ],
@@ -213,7 +232,7 @@ router.get('/', auth, async (req, res) => {
         const { list: ids } = await communeKeys(headerCid || queryCid);
         filter = {
           $or: [
-            { visibility: 'local', communeId: { $in: ids } },
+            { visibility: 'local',  communeId: { $in: ids } },
             { visibility: 'custom', audienceCommunes: { $in: ids } },
             { visibility: 'global' },
           ],
@@ -237,26 +256,16 @@ router.get('/', auth, async (req, res) => {
     res.json(docs);
   } catch (err) {
     console.error('❌ GET /articles', err);
-    res.status(500).json({ message: 'Erreur serveur' });
+    res.status(500).json({ message: err?.message || 'Erreur serveur' });
   }
 });
 
 /* ================== LIST PUBLIQUE (app/mobile) ================== */
-/**
- * GET /api/articles/public
- * Accès sans token.
- * Requiert ?communeId=... ou header x-commune-id: ...
- * ➜ Retourne les articles publiés qui concernent la commune :
- *    - local (communeId = slug OU ObjectId)
- *    - custom (audienceCommunes contient slug OU ObjectId)
- *    - global (toutes communes)
- */
 router.get('/public', async (req, res) => {
   try {
-    const headerCid = (req.header('x-commune-id') || '').trim().toLowerCase();
-    const queryCid = (req.query.communeId || '').trim().toLowerCase();
-    const keys = await communeKeys(headerCid || queryCid);
-    const ids = keys.list;
+    const headerCid = norm(req.header('x-commune-id') || '');
+    const queryCid  = norm(req.query.communeId || '');
+    const { list: ids } = await communeKeys(headerCid || queryCid);
 
     if (!ids.length) return res.status(400).json({ message: 'communeId requis' });
 
@@ -269,7 +278,7 @@ router.get('/public', async (req, res) => {
     const timeWindow = {
       $and: [
         { $or: [{ startAt: { $exists: false } }, { startAt: null }, { startAt: { $lte: now } }] },
-        { $or: [{ endAt: { $exists: false } }, { endAt: null }, { endAt: { $gte: now } }] },
+        { $or: [{ endAt:   { $exists: false } }, { endAt: null }, { endAt:   { $gte: now } }] },
       ],
     };
 
@@ -281,7 +290,7 @@ router.get('/public', async (req, res) => {
         {
           $or: [
             { visibility: 'global' },
-            { visibility: 'local', communeId: { $in: ids } },
+            { visibility: 'local',  communeId: { $in: ids } },
             { visibility: 'custom', audienceCommunes: { $in: ids } },
           ],
         },
@@ -300,6 +309,7 @@ router.get('/public', async (req, res) => {
         sourceUrl: 1,
         priority: 1,
         visibility: 1,
+        category: 1,
       }
     )
       .sort({ priority: -1, publishedAt: -1 })
@@ -312,7 +322,7 @@ router.get('/public', async (req, res) => {
     res.json(docs);
   } catch (err) {
     console.error('❌ GET /articles/public', err);
-    res.status(500).json({ message: 'Erreur serveur' });
+    res.status(500).json({ message: err?.message || 'Erreur serveur' });
   }
 });
 
@@ -320,7 +330,7 @@ router.get('/public', async (req, res) => {
 router.get('/:id', optionalAuth, async (req, res) => {
   try {
     const id = String(req.params.id || '').trim();
-    if (!id || id.length < 12) {
+    if (!mongoose.Types.ObjectId.isValid(id)) {
       return res.status(400).json({ message: 'ID invalide' });
     }
 
@@ -328,12 +338,10 @@ router.get('/:id', optionalAuth, async (req, res) => {
     if (!doc) return res.status(404).json({ message: 'Article introuvable' });
 
     const role = req.user?.role || null;
-    const isPanel = role === 'admin' || role === 'superadmin';
 
-    // 🔒 Panel : un ADMIN ne peut lire que ses propres articles
+    // 🔒 Panel admin: ne peut lire que ses propres articles
     if (role === 'admin') {
       if (String(doc.authorId || '') !== String(req.user?.id || '')) {
-        // 404 volontaire pour ne pas révéler l’existence
         return res.status(404).json({ message: 'Article introuvable' });
       }
       return res.json(doc);
@@ -344,23 +352,23 @@ router.get('/:id', optionalAuth, async (req, res) => {
       return res.json(doc);
     }
 
-    // Public (pas de token admin/superadmin) : vérifier la fenêtre & le ciblage de commune
-    const headerCid = (req.header('x-commune-id') || '').trim().toLowerCase();
-    const queryCid = (req.query.communeId || '').trim().toLowerCase();
+    // Public : vérifier fenêtre & commune
+    const headerCid = norm(req.header('x-commune-id') || '');
+    const queryCid  = norm(req.query.communeId || '');
     const { list: ids } = await communeKeys(headerCid || queryCid);
 
     const now = new Date();
     const okStart = !doc.startAt || doc.startAt <= now;
-    const okEnd = !doc.endAt || doc.endAt >= now;
+    const okEnd   = !doc.endAt   || doc.endAt   >= now;
     const okStatus = doc.status === 'published';
 
     let allowed = false;
     if (doc.visibility === 'global') {
       allowed = true;
     } else if (doc.visibility === 'local') {
-      allowed = ids.includes(String(doc.communeId).toLowerCase());
+      allowed = ids.includes(norm(doc.communeId));
     } else if (doc.visibility === 'custom') {
-      const set = new Set((doc.audienceCommunes || []).map((s) => String(s).toLowerCase()));
+      const set = new Set((doc.audienceCommunes || []).map(norm));
       allowed = ids.some((k) => set.has(k));
     }
 
@@ -371,7 +379,7 @@ router.get('/:id', optionalAuth, async (req, res) => {
     res.json(doc);
   } catch (err) {
     console.error('❌ GET /articles/:id', err);
-    res.status(500).json({ message: 'Erreur serveur' });
+    res.status(500).json({ message: err?.message || 'Erreur serveur' });
   }
 });
 
@@ -384,7 +392,7 @@ router.put('/:id', auth, upload.single('image'), async (req, res) => {
     }
 
     const id = String(req.params.id || '').trim();
-    if (!id || id.length < 12) {
+    if (!mongoose.Types.ObjectId.isValid(id)) {
       return res.status(400).json({ message: 'ID invalide' });
     }
 
@@ -393,50 +401,33 @@ router.put('/:id', auth, upload.single('image'), async (req, res) => {
 
     if (req.user.role === 'admin') {
       if (String(current.authorId || '') !== String(req.user.id || '')) {
-        return res
-          .status(403)
-          .json({ message: 'Interdit : vous ne pouvez modifier que vos articles' });
+        return res.status(403).json({ message: 'Interdit : vous ne pouvez modifier que vos articles' });
       }
     }
 
     const payload = {};
-    const setIf = (k, v) => {
-      if (v !== undefined) payload[k] = v;
-    };
-    const toDateOrNull = (v) => (v ? new Date(v) : null);
+    const setIf = (k, v) => { if (v !== undefined) payload[k] = v; };
 
-    if (req.body.title != null) setIf('title', String(req.body.title).trim());
+    if (req.body.title   != null) setIf('title',   String(req.body.title).trim());
     if (req.body.content != null) setIf('content', String(req.body.content).trim());
+    if (req.body.category != null) setIf('category', normalizeCategory(req.body.category));
 
-    if (req.file) {
-      setIf('imageUrl', publicUrlFromFile(req.file));
-    } else if (req.body.imageUrl !== undefined) {
-      setIf('imageUrl', req.body.imageUrl || null);
-    }
+    if (req.file) setIf('imageUrl', publicUrlFromFile(req.file));
+    else if (req.body.imageUrl !== undefined) setIf('imageUrl', req.body.imageUrl || null);
 
-    if (req.body.priority && ['normal', 'pinned', 'urgent'].includes(req.body.priority)) {
-      setIf('priority', req.body.priority);
-    }
-    if ('startAt' in req.body) setIf('startAt', toDateOrNull(req.body.startAt));
-    if ('endAt' in req.body) setIf('endAt', toDateOrNull(req.body.endAt));
+    if (['normal','pinned','urgent'].includes(req.body.priority)) setIf('priority', req.body.priority);
+    if ('startAt' in req.body) setIf('startAt', safeToDate(req.body.startAt));
+    if ('endAt'   in req.body) setIf('endAt',   safeToDate(req.body.endAt));
 
-    if ('publishedAt' in req.body)
-      setIf('publishedAt', toDateOrNull(req.body.publishedAt) || current.publishedAt || new Date());
-    if ('authorName' in req.body) setIf('authorName', (req.body.authorName || '').trim());
-    if ('publisher' in req.body)
-      setIf('publisher', (req.body.publisher || 'Association Bellevue Dembeni').trim());
-    if ('sourceUrl' in req.body)
-      setIf(
-        'sourceUrl',
-        typeof req.body.sourceUrl === 'string' && /^https?:\/\//i.test(req.body.sourceUrl)
-          ? req.body.sourceUrl
-          : ''
-      );
-    if ('status' in req.body) setIf('status', req.body.status === 'draft' ? 'draft' : 'published');
+    if ('publishedAt' in req.body) setIf('publishedAt', safeToDate(req.body.publishedAt) || current.publishedAt || new Date());
+    if ('authorName'  in req.body) setIf('authorName',  (req.body.authorName || '').trim());
+    if ('publisher'   in req.body) setIf('publisher',   (req.body.publisher   || 'Association Bellevue Dembeni').trim());
+    if ('sourceUrl'   in req.body) setIf('sourceUrl',   (typeof req.body.sourceUrl === 'string' && /^https?:\/\//i.test(req.body.sourceUrl)) ? req.body.sourceUrl : '');
+    if ('status'      in req.body) setIf('status',      req.body.status === 'draft' ? 'draft' : 'published');
 
     if (req.user.role === 'superadmin' && req.body.visibility) {
       const v = req.body.visibility;
-      if (['local', 'global', 'custom'].includes(v)) {
+      if (['local','global','custom'].includes(v)) {
         payload.visibility = v;
         if (v === 'local') {
           const cid = await preferSlug(req.body.communeId || '');
@@ -447,17 +438,11 @@ router.put('/:id', auth, upload.single('image'), async (req, res) => {
           payload.communeId = '';
           let arr = req.body.audienceCommunes ?? req.body['audienceCommunes[]'] ?? [];
           if (typeof arr === 'string') {
-            try {
-              const j = JSON.parse(arr);
-              arr = Array.isArray(j) ? j : arr.split(',');
-            } catch {
-              arr = arr.split(',');
-            }
+            try { const j = JSON.parse(arr); arr = Array.isArray(j) ? j : arr.split(','); }
+            catch { arr = arr.split(','); }
           }
           payload.audienceCommunes = Array.isArray(arr)
-            ? (await Promise.all(arr.map(preferSlug)))
-                .map((s) => s.trim().toLowerCase())
-                .filter(Boolean)
+            ? (await Promise.all(arr.map(preferSlug))).map(norm).filter(Boolean)
             : [];
         } else if (v === 'global') {
           payload.communeId = '';
@@ -470,7 +455,7 @@ router.put('/:id', auth, upload.single('image'), async (req, res) => {
     res.json(updated);
   } catch (err) {
     console.error('❌ PUT /articles/:id', err);
-    res.status(500).json({ message: 'Erreur modification article' });
+    res.status(500).json({ message: err?.message || 'Erreur modification article' });
   }
 });
 
@@ -483,7 +468,7 @@ router.delete('/:id', auth, async (req, res) => {
     }
 
     const id = String(req.params.id || '').trim();
-    if (!id || id.length < 12) {
+    if (!mongoose.Types.ObjectId.isValid(id)) {
       return res.status(400).json({ message: 'ID invalide' });
     }
 
@@ -492,9 +477,7 @@ router.delete('/:id', auth, async (req, res) => {
 
     if (req.user.role === 'admin') {
       if (String(current.authorId || '') !== String(req.user.id || '')) {
-        return res
-          .status(403)
-          .json({ message: 'Interdit : vous ne pouvez supprimer que vos articles' });
+        return res.status(403).json({ message: 'Interdit : vous ne pouvez supprimer que vos articles' });
       }
     }
 
@@ -502,7 +485,7 @@ router.delete('/:id', auth, async (req, res) => {
     res.json({ message: '✅ Article supprimé' });
   } catch (err) {
     console.error('❌ DELETE /articles/:id', err);
-    res.status(500).json({ message: 'Erreur suppression article' });
+    res.status(500).json({ message: err?.message || 'Erreur suppression article' });
   }
 });
 
