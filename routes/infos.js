@@ -17,13 +17,18 @@ const normCid = (v) => String(v || '').trim().toLowerCase();
 
 function optionalAuth(req, _res, next) {
   const authz = req.header('authorization') || '';
+  // ⬇️ on lit le header commune TÔT pour pouvoir s’en servir de fallback
+  const headerCid =
+    normCid(req.header('x-commune-id') || req.header('x-commune') || req.header('x-communeid') || '');
+
   if (authz.startsWith('Bearer ')) {
     const token = authz.slice(7).trim();
     try {
       const payload = jwt.verify(token, process.env.JWT_SECRET || 'dev-secret');
       req.user = {
         role: payload.role,
-        communeId: payload.communeId || '',
+        // ⬇️ fallback: si le token n’a pas de commune, on prend celle du header
+        communeId: payload.communeId || headerCid || '',
         email: payload.email || '',
         id: payload.id ? String(payload.id) : '',
       };
@@ -70,7 +75,6 @@ function isAuthorUser(doc, user) {
 }
 
 // ───────────────────────── CREATE (panel) ─────────────────────────
-// Autoriser admin ET superadmin + fournir un alias POST /create (évite 404 côté front)
 async function handleCreate(req, res) {
   try {
     let {
@@ -109,9 +113,8 @@ async function handleCreate(req, res) {
       },
       authorId: req.user.id,
       authorEmail: req.user.email,
-      // Les champs ci-dessous aident le front à distinguer les globales "créées par superadmin"
-      authorRole: req.user.role,                 // sera ignoré si le schéma est strict et ne le prévoit pas
-      createdBySuperadmin: req.user.role === 'superadmin', // idem
+      authorRole: req.user.role,
+      createdBySuperadmin: req.user.role === 'superadmin',
     };
 
     // superadmin : peut choisir la portée et la/les communes
@@ -158,7 +161,7 @@ router.post('/create', auth, requireRole(['admin','superadmin']), upload.single(
  *  - ?period=7|30 (optionnel)
  *  - multi-commune: header x-commune-id ou ?communeId=
  * Public => respecte startAt/endAt ; Panel (admin/superadmin) => ignore fenêtre temporelle
- * Admin => forcé sur sa commune, pas d’override via header/query
+ * Admin => forcé sur sa commune (mais on accepte un fallback depuis le header si le token n’a pas la commune)
  */
 router.get('/', optionalAuth, async (req, res) => {
   try {
@@ -169,14 +172,16 @@ router.get('/', optionalAuth, async (req, res) => {
 
     // Déterminer communeId à utiliser
     let communeId = '';
+    const headerCid = normCid(req.header('x-commune-id') || req.header('x-commune') || req.header('x-communeid') || '');
+    const queryCid  = normCid(req.query?.communeId || req.query?.commune || '');
+
     if (role === 'admin') {
-      communeId = normCid(req.user?.communeId || '');
+      // ⬇️ admin: token d’abord, sinon fallback sur header/query
+      communeId = normCid(req.user?.communeId || '') || headerCid || queryCid || '';
       if (!communeId) {
         return res.status(403).json({ message: 'Compte admin non rattaché à une commune' });
       }
     } else {
-      const headerCid = normCid(req.header('x-commune-id') || req.header('x-commune') || req.header('x-communeid') || '');
-      const queryCid  = normCid(req.query?.communeId || req.query?.commune || '');
       communeId = headerCid || queryCid || '';
     }
 
