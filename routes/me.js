@@ -33,19 +33,30 @@ function publicBaseUrl(req) {
   const host = req.get('host');
   return `${proto}://${host}`;
 }
+
+// ✅ Corrigé : enlever les slashs de tête pour éviter un chemin absolu OS
 function localPathFromPublicUrl(url) {
   try {
     const u = new URL(url);
     if (!u.pathname.startsWith('/uploads/avatars/')) return null;
-    return path.join(__dirname, '..', u.pathname);
+    const rel = u.pathname.replace(/^\/+/, ''); // remove leading slashes
+    return path.join(__dirname, '..', rel);
   } catch {
     return null;
   }
 }
+
 async function deleteIfExists(filePath) {
   if (!filePath) return;
   try { await fs.promises.unlink(filePath); }
   catch (e) { if (e.code !== 'ENOENT') console.warn('⚠️ unlink avatar:', e.message); }
+}
+
+// Version numérique pour casser le cache côté client
+function photoVersionFrom(doc) {
+  if (!doc) return Date.now();
+  const t = doc.updatedAt instanceof Date ? doc.updatedAt.getTime() : Date.now();
+  return t || Date.now();
 }
 
 // --------- GET /api/me ----------
@@ -63,6 +74,7 @@ router.get('/me', auth, async (req, res) => {
       origUserId: req.user.origUserId || null,
       name: null,
       photo: null,
+      photoVersion: Date.now(), // par défaut
     };
 
     // Tente d’enrichir avec la base (name, photo, éventuelles infos à jour)
@@ -70,17 +82,19 @@ router.get('/me', auth, async (req, res) => {
     let doc = null;
 
     if (id && isValidObjectId(id)) {
-      doc = await User.findById(id).select('email role name communeId communeName photo');
-      if (!doc && Admin) doc = await Admin.findById(id).select('email role name communeId communeName photo');
+      doc = await User.findById(id).select('email role name communeId communeName photo updatedAt');
+      if (!doc && Admin) doc = await Admin.findById(id).select('email role name communeId communeName photo updatedAt');
     }
     if (!doc && email) {
-      doc = await User.findOne({ email }).select('email role name communeId communeName photo');
-      if (!doc && Admin) doc = await Admin.findOne({ email }).select('email role name communeId communeName photo');
+      doc = await User.findOne({ email }).select('email role name communeId communeName photo updatedAt');
+      if (!doc && Admin) doc = await Admin.findOne({ email }).select('email role name communeId communeName photo updatedAt');
     }
 
     if (doc) {
       payload.name = doc.name ?? payload.name;
       payload.photo = doc.photo ?? payload.photo;
+      payload.photoVersion = photoVersionFrom(doc);
+
       // Si la base a des valeurs plus fraîches pour la commune, on les prend
       if (doc.communeId)   payload.communeId = String(doc.communeId);
       if (doc.communeName) payload.communeName = String(doc.communeName);
@@ -106,12 +120,12 @@ router.patch('/me', auth, async (req, res) => {
     let doc = null;
 
     if (id && isValidObjectId(id)) {
-      doc = await User.findByIdAndUpdate(id, updates, { new: true, select: 'email role name communeId communeName photo' });
-      if (!doc && Admin) doc = await Admin.findByIdAndUpdate(id, updates, { new: true, select: 'email role name communeId communeName photo' });
+      doc = await User.findByIdAndUpdate(id, updates, { new: true, select: 'email role name communeId communeName photo updatedAt' });
+      if (!doc && Admin) doc = await Admin.findByIdAndUpdate(id, updates, { new: true, select: 'email role name communeId communeName photo updatedAt' });
     }
     if (!doc && email) {
-      doc = await User.findOneAndUpdate({ email }, updates, { new: true, select: 'email role name communeId communeName photo' });
-      if (!doc && Admin) doc = await Admin.findOneAndUpdate({ email }, updates, { new: true, select: 'email role name communeId communeName photo' });
+      doc = await User.findOneAndUpdate({ email }, updates, { new: true, select: 'email role name communeId communeName photo updatedAt' });
+      if (!doc && Admin) doc = await Admin.findOneAndUpdate({ email }, updates, { new: true, select: 'email role name communeId communeName photo updatedAt' });
     }
 
     // On renvoie le même shape que GET /me (jamais 404)
@@ -126,6 +140,7 @@ router.patch('/me', auth, async (req, res) => {
       origUserId: req.user.origUserId || null,
       name: doc?.name ?? null,
       photo: doc?.photo ?? null,
+      photoVersion: photoVersionFrom(doc),
     };
 
     // Si la base a des valeurs plus fraîches pour la commune/role
@@ -161,12 +176,12 @@ router.post('/me/photo', auth, upload.single('photo'), async (req, res) => {
     let doc = null;
 
     if (id && isValidObjectId(id)) {
-      doc = await User.findById(id).select('email role name communeId communeName photo');
-      if (!doc && Admin) doc = await Admin.findById(id).select('email role name communeId communeName photo');
+      doc = await User.findById(id).select('email role name communeId communeName photo updatedAt');
+      if (!doc && Admin) doc = await Admin.findById(id).select('email role name communeId communeName photo updatedAt');
     }
     if (!doc && email) {
-      doc = await User.findOne({ email }).select('email role name communeId communeName photo');
-      if (!doc && Admin) doc = await Admin.findOne({ email }).select('email role name communeId communeName photo');
+      doc = await User.findOne({ email }).select('email role name communeId communeName photo updatedAt');
+      if (!doc && Admin) doc = await Admin.findOne({ email }).select('email role name communeId communeName photo updatedAt');
     }
 
     // On ne renvoie pas 404 si pas de doc : on mettra juste l’URL dans la réponse
@@ -178,9 +193,17 @@ router.post('/me/photo', auth, upload.single('photo'), async (req, res) => {
 
       // Mettre à jour la photo dans le bon modèle
       if (doc.constructor.modelName === 'User') {
-        doc = await User.findByIdAndUpdate(doc._id, { photo: url }, { new: true, select: 'email role name communeId communeName photo' });
+        doc = await User.findByIdAndUpdate(
+          doc._id,
+          { photo: url },
+          { new: true, select: 'email role name communeId communeName photo updatedAt' }
+        );
       } else {
-        doc = await Admin.findByIdAndUpdate(doc._id, { photo: url }, { new: true, select: 'email role name communeId communeName photo' });
+        doc = await Admin.findByIdAndUpdate(
+          doc._id,
+          { photo: url },
+          { new: true, select: 'email role name communeId communeName photo updatedAt' }
+        );
       }
     }
 
@@ -196,6 +219,7 @@ router.post('/me/photo', auth, upload.single('photo'), async (req, res) => {
       origUserId: req.user.origUserId || null,
       name: doc?.name ?? null,
       photo: doc?.photo ?? url, // au minimum, la nouvelle URL
+      photoVersion: photoVersionFrom(doc) // buste le cache
     };
 
     if (doc?.communeId)   payload.communeId = String(doc.communeId);
