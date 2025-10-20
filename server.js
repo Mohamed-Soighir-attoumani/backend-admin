@@ -71,30 +71,15 @@ app.use(promBundle({
 
 app.get('/api/health', (_, res) => res.json({ status: 'ok', timestamp: Date.now() }));
 
-// ✅ Pare-balles: expose /api/me ici pour éviter tout 404 (même si routes/me.js bug)
-app.get('/api/me', auth, (req, res) => {
-  res.json({
-    user: {
-      id: req.user.id,
-      email: req.user.email,
-      role: req.user.role,
-      communeId: req.user.communeId || '',
-      communeName: req.user.communeName || '',
-      tv: typeof req.user.tv === 'number' ? req.user.tv : 0,
-      impersonated: !!req.user.impersonated,
-      origUserId: req.user.origUserId || null,
-      // champs facultatifs (la route dédiée peut enrichir)
-      name: null,
-      photo: null,
-    },
-  });
-});
-
 /* Routes API */
 app.use('/api', require('./routes/setup-admin'));
 app.use('/api', require('./routes/auth'));
-app.use('/api', require('./routes/me')); // version enrichie (name/photo...), pare-balles couvre le 404
-app.use('/api/change-password', (req, _res, next) => { console.log('[HIT] /api/change-password', req.method, req.path || '/'); next(); }, require('./routes/changePassword'));
+app.use('/api', require('./routes/me')); // ← monte d'abord la route enrichie (name/photo...)
+
+app.use('/api/change-password',
+  (req, _res, next) => { console.log('[HIT] /api/change-password', req.method, req.path || '/'); next(); },
+  require('./routes/changePassword')
+);
 app.use('/api/incidents', require('./routes/incidents'));
 app.use('/api/articles', require('./routes/articles'));
 
@@ -119,6 +104,25 @@ app.use('/api', require('./routes/subscriptions'));
 app.use('/api', require('./routes/debug'));
 
 app.get('/', (_, res) => res.send('API SecuriDem opérationnelle ✅'));
+
+// ✅ Pare-balles: exposée APRÈS pour ne pas écraser la route enrichie
+app.get('/api/me', auth, (req, res) => {
+  res.json({
+    user: {
+      id: req.user.id,
+      email: req.user.email,
+      role: req.user.role,
+      communeId: req.user.communeId || '',
+      communeName: req.user.communeName || '',
+      tv: typeof req.user.tv === 'number' ? req.user.tv : 0,
+      impersonated: !!req.user.impersonated,
+      origUserId: req.user.origUserId || null,
+      // champs facultatifs (la route dédiée peut enrichir)
+      name: null,
+      photo: null,
+    },
+  });
+});
 
 // Cron backup
 cron.schedule('0 3 * * *', async () => {
