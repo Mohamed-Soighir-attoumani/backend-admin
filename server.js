@@ -14,10 +14,13 @@ const runBackup = require('./scripts/backup');
 const { secretFingerprint } = require('./utils/jwt');
 
 const Commune = require('./models/Commune');
+// ⬇️ Router des communes
 const communeRoutes = require('./routes/communeRoutes');
 
+// ✅ Auth middleware pour /api/me pare-balles
 const auth = require('./middleware/authMiddleware');
 
+// ⬇️ Routers
 const infosRouter = require('./routes/infos');
 const notificationsRouter = require('./routes/notifications');
 
@@ -68,42 +71,7 @@ app.use(promBundle({
 
 app.get('/api/health', (_, res) => res.json({ status: 'ok', timestamp: Date.now() }));
 
-/* Routes API */
-app.use('/api', require('./routes/setup-admin'));
-app.use('/api', require('./routes/auth'));
-
-// 🔑 👉 Monte d’abord la VRAIE route enrichie
-app.use('/api', require('./routes/me'));
-
-app.use('/api/change-password',
-  (req, _res, next) => { console.log('[HIT] /api/change-password', req.method, req.path || '/'); next(); },
-  require('./routes/changePassword')
-);
-app.use('/api/incidents', require('./routes/incidents'));
-app.use('/api/articles', require('./routes/articles'));
-
-// 🔔 Notifications
-app.use('/api/notifications', notificationsRouter);
-
-// ℹ️ Infos
-app.use('/api/infos', infosRouter);
-app.use('/api/info',  infosRouter);
-app.use('/infos',     infosRouter);
-
-app.use('/api/projects', require('./routes/projects'));
-app.use('/api/devices', require('./routes/devices'));
-
-app.use('/api/communes', communeRoutes);
-app.use('/communes', communeRoutes);
-
-app.use('/api', require('./routes/userRoutes'));
-app.use('/api', require('./routes/subscriptions'));
-app.use('/api', require('./routes/debug'));
-
-app.get('/', (_, res) => res.send('API SecuriDem opérationnelle ✅'));
-
-// ✅ (OPTIONNEL) Route pare-balles déplacée APRÈS : ne s’exécutera
-// que si, pour une raison quelconque, la route enrichie n’est pas montée.
+// ✅ Pare-balles: expose /api/me ici pour éviter tout 404 (même si routes/me.js bug)
 app.get('/api/me', auth, (req, res) => {
   res.json({
     user: {
@@ -115,13 +83,44 @@ app.get('/api/me', auth, (req, res) => {
       tv: typeof req.user.tv === 'number' ? req.user.tv : 0,
       impersonated: !!req.user.impersonated,
       origUserId: req.user.origUserId || null,
+      // champs facultatifs (la route dédiée peut enrichir)
       name: null,
       photo: null,
     },
   });
 });
 
-const cron = require('node-cron');
+/* Routes API */
+app.use('/api', require('./routes/setup-admin'));
+app.use('/api', require('./routes/auth'));
+app.use('/api', require('./routes/me')); // version enrichie (name/photo...), pare-balles couvre le 404
+app.use('/api/change-password', (req, _res, next) => { console.log('[HIT] /api/change-password', req.method, req.path || '/'); next(); }, require('./routes/changePassword'));
+app.use('/api/incidents', require('./routes/incidents'));
+app.use('/api/articles', require('./routes/articles'));
+
+// 🔔 Notifications
+app.use('/api/notifications', notificationsRouter);
+
+// ℹ️ Infos — on monte plusieurs alias pour éviter les 404 selon le front :
+app.use('/api/infos', infosRouter);  // chemin canonique
+app.use('/api/info',  infosRouter);  // alias singulier (certains fronts l’emploient)
+app.use('/infos',     infosRouter);  // alias public (si API_URL n’inclut pas /api)
+
+app.use('/api/projects', require('./routes/projects'));
+app.use('/api/devices', require('./routes/devices'));
+
+// IMPORTANT: router des communes (sans re-préfixer /api dans le fichier)
+app.use('/api/communes', communeRoutes);
+// ✅ Alias public pour l’app mobile
+app.use('/communes', communeRoutes);
+
+app.use('/api', require('./routes/userRoutes'));
+app.use('/api', require('./routes/subscriptions'));
+app.use('/api', require('./routes/debug'));
+
+app.get('/', (_, res) => res.send('API SecuriDem opérationnelle ✅'));
+
+// Cron backup
 cron.schedule('0 3 * * *', async () => {
   logger.info('Lancement sauvegarde quotidienne');
   try {
@@ -138,10 +137,65 @@ app.use((err, req, res, _next) => {
   res.status(500).json({ message: 'Erreur interne du serveur' });
 });
 
-// 404 API
+// 404 API (après toutes les routes)
 app.use('/api/*', (req, res) => {
   res.status(404).json({ message: `Route API introuvable ❌ (${req.method} ${req.originalUrl})` });
 });
 
 /* --------- Maintenance indexes + seed ---------- */
-// ... (inchangé)
+async function fixCommuneIndexes() {
+  try {
+    const collection = mongoose.connection.collection('communes');
+    const indexes = await collection.indexes();
+
+    // 1) Supprimer un éventuel index UNIQUE sur slug_1 (héritage ancien)
+    const slugIdx = indexes.find(i => i.name === 'slug_1');
+    if (slugIdx && slugIdx.unique) {
+      await collection.dropIndex('slug_1');
+      logger.info('Index unique slug_1 supprimé ✅');
+      // Recréer un index simple non-unique
+      await collection.createIndex({ slug: 1 }, { name: 'slug_1' });
+      logger.info('Index slug_1 recréé (non-unique) ✅');
+    }
+
+    // 2) ⚠️ Supprimer l’index UNIQUE id_1 (cause des E11000 avec {id:null})
+    const idIdx = indexes.find(i => i.name === 'id_1');
+    if (idIdx) {
+      await collection.dropIndex('id_1');
+      logger.info('Index id_1 supprimé ✅ (champ id non utilisé par le schéma)');
+    }
+
+    const after = await collection.indexes();
+    logger.info(`Indexes communes après correction: ${after.map(i => i.name).join(', ')}`);
+  } catch (e) {
+    logger.warn('Impossible de corriger les indexes des communes (peut-être déjà corrects)', { error: e.message });
+  }
+}
+
+async function ensureDefaultCommunes() {
+  const count = await Commune.countDocuments();
+  if (count > 0) return;
+
+  const base = [
+    { id: 'dembeni',   name: 'Dembéni',   region: 'Mayotte', imageUrl: '/uploads/communes/dembeni.jpg' },
+    { id: 'mamoudzou', name: 'Mamoudzou', region: 'Mayotte', imageUrl: '/uploads/communes/mamoudzou.jpg' },
+    { id: 'chirongui', name: 'Chirongui', region: 'Mayotte', imageUrl: '/uploads/communes/chirongui.jpg' },
+  ].map(c => ({ ...c, slug: c.id })); // slug=id
+
+  await Commune.insertMany(base, { ordered: true });
+  logger.info('Communes par défaut insérées ✅');
+}
+
+mongoose
+  .connect(MONGODB_URI, { useNewUrlParser: true, useUnifiedTopology: true })
+  .then(async () => {
+    logger.info('MongoDB connecté ✅');
+    logger.info(`JWT secret fingerprint: ${secretFingerprint()}`);
+    if (!GITHUB_TOKEN) logger.warn('GITHUB_TOKEN manquant — endpoint /cve retournera []');
+
+    await fixCommuneIndexes();
+    await ensureDefaultCommunes();
+
+    app.listen(PORT, HOST, () => logger.info(`Serveur dispo sur http://${HOST}:${PORT} 🚀`));
+  })
+  .catch((err) => logger.error('Erreur MongoDB ❌', err));
